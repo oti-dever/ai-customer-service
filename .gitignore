@@ -1,3 +1,105 @@
+# Qt QMake 项目 .gitignore
+
+# ============ QMake 构建文件 ============
+# qmake 生成的文件
+Makefile
+Makefile.Debug
+Makefile.Release
+Makefile.*.Debug
+Makefile.*.Release
+
+# qmake 缓存文件
+.qmake.stash
+
+# QMake 生成的中间文件
+*.pro.user
+*.pro.user.*
+*.pro.user.auto
+*.pro.user.*
+
+# ============ Qt Creator IDE 文件 ============
+# Qt Creator 配置文件
+CMakeLists.txt.user
+*.creator.user
+*.creator.user.*
+*.creator.user.auto
+.qtcreator/
+
+# 项目配置备份
+*.pro.user~
+*.creator~
+
+# ============ 编译输出目录 ============
+# 构建目录（推荐在项目外构建）
+build-*/
+debug/
+release/
+*.build/
+*.o
+*.obj
+
+# ============ 可执行文件和库 ============
+*.exe
+*.app
+*.dll
+*.so
+*.so.*
+*.dylib
+*.a
+*.lib
+
+# ============ Qt MOC/UIC/RCC 生成文件 ============
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.moc
+*.qm
+
+# ============ 平台特定文件 ============
+# Windows
+Thumbs.db
+desktop.ini
+*.lnk
+
+# macOS
+.DS_Store
+*.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+
+# ============ 备份文件 ============
+*.bak
+*.swp
+*.old
+*.orig
+*.rej
+
+# ============ 依赖文件 ============
+*.d
+*.d.*
+
+# ============ 日志和临时文件 ============
+*.log
+*.tmp
+*.temp
+
+# ============ 项目特定文件 ============
+# 如果你有自定义的构建目录
+bin/
+lib/
+obj/
+
+# ============ 测试和覆盖率文件 ============
+*.gcda
+*.gcno
+*.gcov
+
 # Prerequisites
 *.d
 
