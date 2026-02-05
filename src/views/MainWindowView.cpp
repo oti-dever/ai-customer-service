@@ -385,16 +385,15 @@ QWidget* MainWindowView::buildLeftSidebar()
     m_platformTree->setSelectionMode(QAbstractItemView::SingleSelection);  // 单选模式
     m_platformTree->setEditTriggers(QAbstractItemView::NoEditTriggers);    // 禁止编辑
     m_platformTree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);  // 隐藏水平滚动条
-    m_platformTree->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);    // 隐藏垂直滚动条
+    m_platformTree->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);    // 内容过多时显示垂直滚动条，避免子项被遮挡
     m_platformTree->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);  // 逐像素滚动
     m_platformTree->setUniformRowHeights(false);  // 非统一行高
     m_platformTree->setMouseTracking(true);       // 启用鼠标跟踪
     m_platformTree->expandAll();  // 展开所有项
 
-    layout->addWidget(m_platformTree);
+    layout->addWidget(m_platformTree, 1);  // 拉伸因子 1：树占据中间可用空间，不足时由树内部滚动
 
-    // 添加伸缩空间，将设置按钮推到底部
-    layout->addStretch(1);
+    // 不再使用 addStretch，树已通过 stretch 占据剩余空间，设置按钮自然在底部
 
     // 创建设置按钮
     m_btnSettings = new QToolButton(left);
@@ -694,26 +693,7 @@ void MainWindowView::onPlatformTreeSelectionChanged()
 
 void MainWindowView::updateTreeViewHeight()
 {
-    if (!m_platformTree || !m_platformTreeModel) return;
-
-    int totalHeight = 0;
-    int itemCount = m_platformTreeModel->rowCount();
-    for (int i = 0; i < itemCount; ++i) {
-        QModelIndex index = m_platformTreeModel->index(i, 0);
-        bool isGroup = index.data(IsGroupRole).toBool();
-
-        int itemHeight = isGroup ? 48 : 56;
-        totalHeight += itemHeight;
-
-        if (isGroup && m_platformTree->isExpanded(index)) {
-            int childCount = m_platformTreeModel->rowCount(index);
-            for (int j = 0; j < childCount; ++j) {
-                totalHeight += 56;
-            }
-        }
-    }
-
-    m_platformTree->setMinimumHeight(totalHeight + 20);
+    // 树高度由布局拉伸决定，内容过多时通过垂直滚动条查看，不再强制 setMinimumHeight 避免遮挡
 }
 
 /**
@@ -741,6 +721,15 @@ void MainWindowView::applyStyle()
         }
         /* 平台树的每个项也设置为透明背景 */
         QTreeView#platformList::item { background: transparent; }
+        /* 平台树垂直滚动条（深色边栏下显式样式） */
+        QTreeView#platformList QScrollBar:vertical {
+            background: #2d2d2d; width: 8px; border-radius: 4px; margin: 0;
+        }
+        QTreeView#platformList QScrollBar::handle:vertical {
+            background: #5a5a5a; border-radius: 4px; min-height: 30px;
+        }
+        QTreeView#platformList QScrollBar::handle:vertical:hover { background: #6a6a6a; }
+        QTreeView#platformList QScrollBar::add-line:vertical, QTreeView#platformList QScrollBar::sub-line:vertical { height: 0; }
 
         /* 设置按钮样式：匹配分组项样式 */
         QToolButton#settingsButton {
