@@ -10,7 +10,7 @@ CONFIG += c++17
 
 SOURCES += \
     main.cpp \
-    mainwindow.cpp \
+    # mainwindow.cpp \
     src/views/SettingDialog.cpp \
     src/views/RobotManageDialog.cpp \
     src/views/GroupReceptionDialog.cpp \
@@ -20,7 +20,7 @@ SOURCES += \
     src\views\AddWindowDialogView.cpp
 
 HEADERS += \
-    mainwindow.h \
+    # mainwindow.h \
     src/views/SettingDialog.h \
     src/views/RobotManageDialog.h \
     src/views/GroupReceptionDialog.h \
