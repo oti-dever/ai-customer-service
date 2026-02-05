@@ -1,0 +1,33 @@
+<RCC>
+    <qresource prefix="/">
+        <file>res/Platform-Management.png</file>
+        <file>res/Add-Normal.png</file>
+        <file>res/Add-Pressed.png</file>
+        <file>res/Auto-Embed-Window.png</file>
+        <file>res/Click-to-Select-Platform.png</file>
+        <file>res/Enterprise-WeChat-Normal.png</file>
+        <file>res/Enterprise-WeChat-Platform-Launched.png</file>
+        <file>res/Qianniu-Normal.png</file>
+        <file>res/Qianniu-Platform-Launched.png</file>
+        <file>res/QQ-Normal.png</file>
+        <file>res/QQ-Platform-Launched.png</file>
+        <file>res/Quick-Launch-Application.png</file>
+        <file>res/Refresh-Normal.png</file>
+        <file>res/Refresh-Pressed.png</file>
+        <file>res/Restart-Normal.png</file>
+        <file>res/Restart-Pressed.png</file>
+        <file>res/System-Ready.png</file>
+        <file>res/WeChat-Normal.png</file>
+        <file>res/WeChat-Platform-Launched.png</file>
+        <file>res/Yangyang-Client-Window.png</file>
+        <file>res/AddNewWindow.png</file>
+        <file>res/RefreshPlatformList.png</file>
+        <file>res/Restart.png</file>
+        <file>res/Ready.png</file>
+        <file>res/RefreshWindowList.png</file>
+        <file>res/Reception.png</file>
+        <file>res/Robot.png</file>
+        <file>res/manageConsole.png</file>
+        <file>res/Settings/Settings.png</file>
+    </qresource>
+</RCC>
