@@ -2,6 +2,8 @@
 
 #include <QObject>
 
+class QTimer;
+class QWidget;
 class MainWindowView;
 class PlatformModel;
 
@@ -21,7 +23,11 @@ public:
 
     MainWindowView* view() const { return m_view; }  ///< 获取主窗口视图
 
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;  ///< 应用级：点击某窗口时将其置顶
+
 private slots:
+    void onPendingRaiseTimeout();        ///< 执行延后的「置顶」任务
     // 响应View发出的信号
     void onRequestQuickStart();          ///< 响应快速启动请求
     void onRequestAutoEmbed();           ///< 响应自动嵌入请求
@@ -32,6 +38,10 @@ private slots:
     void onPlatformSelected(const QString& id); ///< 响应平台选择
 
 private:
+    void cancelPendingRaiseIfMainWindow();  ///< 打开弹窗时取消「置顶主窗口」的待执行任务
+
     MainWindowView* m_view = nullptr;     ///< 主窗口视图实例
     PlatformModel* m_platformModel = nullptr; ///< 平台数据模型
+    QTimer* m_pendingRaiseTimer = nullptr;    ///< 延后置顶用的定时器（可取消）
+    QWidget* m_pendingRaiseWidget = nullptr; ///< 待置顶的窗口
 };

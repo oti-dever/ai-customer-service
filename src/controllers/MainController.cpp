@@ -9,6 +9,10 @@
 
 #include <QMessageBox>
 #include <QStatusBar>
+#include <QApplication>
+#include <QEvent>
+#include <QWidget>
+#include <QTimer>
 
 /**
  * @brief 构造函数，初始化控制器
@@ -30,6 +34,44 @@ MainController::MainController(QObject* parent)
     connect(m_view, &MainWindowView::requestSettings, this, &MainController::onRequestSettings);
     connect(m_view, &MainWindowView::platformGroupClicked, this, &MainController::onPlatformGroupClicked);
     connect(m_view, &MainWindowView::platformSelected, this, &MainController::onPlatformSelected);
+
+    // 应用内多窗口独立交互：点击某窗口即将其置顶，无模态阻塞
+    qApp->installEventFilter(this);
+
+    m_pendingRaiseTimer = new QTimer(this);
+    m_pendingRaiseTimer->setSingleShot(true);
+    connect(m_pendingRaiseTimer, &QTimer::timeout, this, &MainController::onPendingRaiseTimeout);
+}
+
+void MainController::cancelPendingRaiseIfMainWindow()
+{
+    if (m_pendingRaiseTimer && m_pendingRaiseTimer->isActive() && m_pendingRaiseWidget == m_view) {
+        m_pendingRaiseTimer->stop();
+        m_pendingRaiseWidget = nullptr;
+    }
+}
+
+void MainController::onPendingRaiseTimeout()
+{
+    if (m_pendingRaiseWidget && m_pendingRaiseWidget->isVisible()) {
+        m_pendingRaiseWidget->raise();
+        m_pendingRaiseWidget->activateWindow();
+    }
+    m_pendingRaiseWidget = nullptr;
+}
+
+bool MainController::eventFilter(QObject* obj, QEvent* event)
+{
+    if (event->type() == QEvent::MouseButtonPress) {
+        if (QWidget* w = qobject_cast<QWidget*>(obj)) {
+            QWidget* top = w->topLevelWidget();
+            if (top && top->isWindow() && top->isVisible()) {
+                m_pendingRaiseWidget = top;
+                m_pendingRaiseTimer->start(0);
+            }
+        }
+    }
+    return false;
 }
 
 /**
@@ -74,10 +116,11 @@ void MainController::onRequestRefresh()
  */
 void MainController::onRequestSettings()
 {
-    // 弹出设置对话框
+    cancelPendingRaiseIfMainWindow();
+    // 弹出设置对话框（父为 nullptr 使与主窗口完全独立，便于点击谁谁置顶）
     static SettingDialog* settingDialog = nullptr;
     if (!settingDialog) {
-        settingDialog = new SettingDialog(m_view);
+        settingDialog = new SettingDialog(nullptr);
     }
     settingDialog->show();
     settingDialog->raise();
@@ -101,18 +144,20 @@ void MainController::onPlatformGroupClicked(int row)
 void MainController::onPlatformSelected(const QString& id)
 {
     if (id == QLatin1String("managerobot")) {
+        cancelPendingRaiseIfMainWindow();
         static RobotManageDialog* robotDlg = nullptr;
         if (!robotDlg)
-            robotDlg = new RobotManageDialog(m_view);
+            robotDlg = new RobotManageDialog(nullptr);
         robotDlg->show();
         robotDlg->raise();
         robotDlg->activateWindow();
         return;
     }
     if (id == QLatin1String("groupreception")) {
+        cancelPendingRaiseIfMainWindow();
         static GroupReceptionDialog* receptionDlg = nullptr;
         if (!receptionDlg)
-            receptionDlg = new GroupReceptionDialog(m_view);
+            receptionDlg = new GroupReceptionDialog(nullptr);
         receptionDlg->show();
         receptionDlg->raise();
         receptionDlg->activateWindow();
