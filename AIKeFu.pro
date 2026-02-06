@@ -17,7 +17,8 @@ SOURCES += \
     src\controllers\MainController.cpp \
     src\models\PlatformModel.cpp \
     src\views\MainWindowView.cpp \
-    src\views\AddWindowDialogView.cpp
+    src\views\AddWindowDialogView.cpp \
+    utils/ApplyStyle.cpp
 
 HEADERS += \
     # mainwindow.h \
@@ -27,7 +28,8 @@ HEADERS += \
     src\controllers\MainController.h \
     src\models\PlatformModel.h \
     src\views\MainWindowView.h \
-    src\views\AddWindowDialogView.h
+    src\views\AddWindowDialogView.h \
+    utils/ApplyStyle.h
 
 # NOTE: UI is built in code for better maintainability/extension (MVC).
 
