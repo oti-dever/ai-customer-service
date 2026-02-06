@@ -24,15 +24,18 @@ public:
 private:
     void buildUI();
     void applyStyle();
-    QWidget* buildLeftNav();
+    QWidget* buildLeftNav(); // 构建左侧导航栏
     QWidget* buildRightContent();
-    QWidget* buildOverviewPage();
-    QWidget* buildRobotManagePage();
-    QWidget* buildKnowledgePage();
-    QWidget* buildMessagePage();
-    QWidget* buildJargonPage();
-    QWidget* buildForbiddenPage();
-    QWidget* buildHistoryPage();
+    QWidget* buildOverviewPage(); // 构建系统概览页面
+    QWidget* buildRobotManagePage(); // 构建机器人管理页面
+    QWidget* buildKnowledgePage(); // 构建知识库管理页面
+    QWidget* buildMessagePage(); // 构建消息处理页面
+    QWidget* buildJargonPage(); // 构建行话转换页面
+    QWidget* buildForbiddenPage(); // 构建违禁词管理页面
+    QWidget* buildHistoryPage(); // 构建对话历史页面
+    QWidget* buildBackupPage(); // 构建数据备份页面
+    QWidget* buildLogPage(); // 构建日志管理页面
+    // QScrollArea* buildCommonPage(const QString& title, const QString& sub);
     QFrame* makeCard(QWidget* parent, const QString& objectName = QString());
     void onNavItemChanged();
 

@@ -31,6 +31,7 @@
 #include <QScrollBar>
 #include <QTableWidget>
 #include <QHeaderView>
+#include "utils/ApplyStyle.h"
 
 namespace {
 
@@ -90,7 +91,9 @@ RobotManageDialog::RobotManageDialog(QWidget* parent)
     setMinimumSize(900, 560);
 
     buildUI();
-    applyStyle();
+    // applyStyle();
+    // 设置robotManage所有样式
+    setStyleSheet(ApplyStyle::robotManageFullStyle());
 }
 
 void RobotManageDialog::buildUI()
@@ -103,13 +106,15 @@ void RobotManageDialog::buildUI()
 
     m_contentStack = new QStackedWidget(this);
     m_contentStack->setObjectName("robotContentStack");
-    m_contentStack->addWidget(buildOverviewPage());   // index 0
-    m_contentStack->addWidget(buildRobotManagePage()); // index 1，默认显示
+    m_contentStack->addWidget(buildOverviewPage());    // index 0 系统概览
+    m_contentStack->addWidget(buildRobotManagePage()); // index 1，默认显示机器人管理
     m_contentStack->addWidget(buildKnowledgePage());   // index 2 知识库管理
     m_contentStack->addWidget(buildMessagePage());     // index 3 消息处理
-    m_contentStack->addWidget(buildJargonPage());       // index 4 行话转换
-    m_contentStack->addWidget(buildForbiddenPage());    // index 5 违禁词管理
-    m_contentStack->addWidget(buildHistoryPage());      // index 6 对话历史
+    m_contentStack->addWidget(buildJargonPage());      // index 4 行话转换
+    m_contentStack->addWidget(buildForbiddenPage());   // index 5 违禁词管理
+    m_contentStack->addWidget(buildHistoryPage());     // index 6 对话历史
+    m_contentStack->addWidget(buildBackupPage()); // index 7 数据备份
+    m_contentStack->addWidget(buildLogPage()); // index 8 日志管理
     m_contentStack->setCurrentIndex(1);
     rootLayout->addWidget(m_contentStack, 1);
 }
@@ -122,6 +127,39 @@ QFrame* RobotManageDialog::makeCard(QWidget* parent, const QString& objectName)
     card->setFrameShape(QFrame::NoFrame);
     return card;
 }
+
+enum class AppIcon {
+    Overview,
+    Robot,
+    Knowledge,
+    Message,
+    Jargon,
+    Forbidden,
+    History,
+    Backup,
+    Log
+};
+
+// 图标管理类
+class IconManager {
+public:
+    static QIcon getIcon(AppIcon icon, const QSize& size = QSize(28, 28)) {
+        static QMap<AppIcon, QString> iconMap = {
+            {AppIcon::Overview, ":/res/RobotManage/overview.png"},
+            {AppIcon::Robot, ":/res/RobotManage/robot.png"},
+            {AppIcon::Knowledge, ":/res/RobotManage/knowledge.png"},
+            {AppIcon::Message, ":/res/RobotManage/message.png"},
+            {AppIcon::Jargon, ":/res/RobotManage/Jargon.png"},
+            {AppIcon::Forbidden, ":/res/RobotManage/forbidden.png"},
+            {AppIcon::History, ":/res/RobotManage/history.png"},
+            {AppIcon::Backup, ":/res/RobotManage/backup.png"},
+            {AppIcon::Log, ":/res/RobotManage/Log.png"}
+        };
+
+        QPixmap pixmap(iconMap.value(icon, ":/icons/default.png"));
+        return QIcon(pixmap.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+};
 
 /**
  * @brief 构建左侧深色导航栏（#25262b）
@@ -142,7 +180,7 @@ QWidget* RobotManageDialog::buildLeftNav()
     auto* brandLayout = new QVBoxLayout(brand);
     brandLayout->setContentsMargins(20, 20, 20, 16);
     brandLayout->setSpacing(6);
-    auto* titleLabel = new QLabel(QStringLiteral("AI客服系统 v1.4"), brand);
+    auto* titleLabel = new QLabel(QStringLiteral("羊羊AI客服系统 v1.0"), brand);
     titleLabel->setObjectName("navBrandTitle");
     auto* subLabel = new QLabel(QStringLiteral("多机器人多角色管理平台"), brand);
     subLabel->setObjectName("navBrandSub");
@@ -236,9 +274,19 @@ QWidget* RobotManageDialog::buildLeftNav()
         f.setBold(true);
         item->setFont(f);
     };
-    auto addItem = [this, style, iconSz](QStyle::StandardPixmap pix, const QString& text, const QString& id, bool selected) {
+
+    // auto addItem = [this, style, iconSz](QStyle::StandardPixmap pix, const QString& text, const QString& id, bool selected) {
+    //     auto* item = new QListWidgetItem(
+    //         style->standardIcon(pix).pixmap(iconSz, iconSz),
+    //         text,
+    //         m_navList);
+    //     item->setData(Qt::UserRole, id);
+    //     if (selected)
+    //         m_navList->setCurrentItem(item);
+    // };
+    auto addItem = [this, iconSz](AppIcon icon, const QString& text, const QString& id, bool selected) {
         auto* item = new QListWidgetItem(
-            style->standardIcon(pix).pixmap(iconSz, iconSz),
+            IconManager::getIcon(icon, QSize(iconSz, iconSz)),
             text,
             m_navList);
         item->setData(Qt::UserRole, id);
@@ -246,18 +294,22 @@ QWidget* RobotManageDialog::buildLeftNav()
             m_navList->setCurrentItem(item);
     };
 
+    // addGroup(QStringLiteral("核心功能"));
+    // addItem(QStyle::SP_FileIcon, QStringLiteral("系统概览"), QStringLiteral("overview"), false);
+    // addItem(QStyle::SP_ComputerIcon, QStringLiteral("机器人管理"), QStringLiteral("robot"), true);
+    // addItem(QStyle::SP_DirIcon, QStringLiteral("知识库管理"), QStringLiteral("knowledge"), false);
     addGroup(QStringLiteral("核心功能"));
-    addItem(QStyle::SP_FileIcon, QStringLiteral("系统概览"), QStringLiteral("overview"), false);
-    addItem(QStyle::SP_ComputerIcon, QStringLiteral("机器人管理"), QStringLiteral("robot"), true);
-    addItem(QStyle::SP_DirIcon, QStringLiteral("知识库管理"), QStringLiteral("knowledge"), false);
+    addItem(AppIcon::Overview, QStringLiteral("系统概览"), QStringLiteral("overview"), false);
+    addItem(AppIcon::Robot, QStringLiteral("机器人管理"), QStringLiteral("robot"), true);
+    addItem(AppIcon::Knowledge, QStringLiteral("知识库管理"), QStringLiteral("knowledge"), false);
     addGroup(QStringLiteral("对话过程管理"));
-    addItem(QStyle::SP_MessageBoxInformation, QStringLiteral("消息处理"), QStringLiteral("message"), false);
-    addItem(QStyle::SP_BrowserReload, QStringLiteral("行话转换"), QStringLiteral("jargon"), false);
-    addItem(QStyle::SP_MessageBoxCritical, QStringLiteral("违禁词管理"), QStringLiteral("forbidden"), false);
-    addItem(QStyle::SP_ArrowBack, QStringLiteral("对话历史"), QStringLiteral("history"), false);
+    addItem(AppIcon::Message, QStringLiteral("消息处理"), QStringLiteral("message"), false);
+    addItem(AppIcon::Jargon, QStringLiteral("行话转换"), QStringLiteral("jargon"), false);
+    addItem(AppIcon::Forbidden, QStringLiteral("违禁词管理"), QStringLiteral("forbidden"), false);
+    addItem(AppIcon::History, QStringLiteral("对话历史"), QStringLiteral("history"), false);
     addGroup(QStringLiteral("系统管理"));
-    addItem(QStyle::SP_DriveHDIcon, QStringLiteral("数据备份"), QStringLiteral("backup"), false);
-    addItem(QStyle::SP_FileDialogListView, QStringLiteral("日志管理"), QStringLiteral("log"), false);
+    addItem(AppIcon::Backup, QStringLiteral("数据备份"), QStringLiteral("backup"), false);
+    addItem(AppIcon::Log, QStringLiteral("日志管理"), QStringLiteral("log"), false);
 
     connect(m_navList, &QListWidget::currentItemChanged, this, &RobotManageDialog::onNavItemChanged);
     layout->addWidget(m_navList, 1);
@@ -283,6 +335,10 @@ void RobotManageDialog::onNavItemChanged()
         m_contentStack->setCurrentIndex(5);
     else if (id == QLatin1String("history"))
         m_contentStack->setCurrentIndex(6);
+    else if (id == QLatin1String("backup"))
+        m_contentStack->setCurrentIndex(7);
+    else if (id == QLatin1String("log"))
+        m_contentStack->setCurrentIndex(8);
     // 其他菜单项暂保持当前页或可后续扩展
 }
 
@@ -642,7 +698,10 @@ QWidget* RobotManageDialog::buildRobotManagePage()
     searchRobot->setMinimumWidth(220);
     auto* comboIndustry = new QComboBox(content);
     comboIndustry->setObjectName("robotFilterCombo");
-    comboIndustry->addItem(QStringLiteral("筛选行业"));
+    comboIndustry->addItem(QStringLiteral("全部行业"));
+    comboIndustry->addItem(QStringLiteral("游戏行业"));
+    comboIndustry->addItem(QStringLiteral("软件行业"));
+    comboIndustry->addItem(QStringLiteral("电商行业"));
     comboIndustry->setMinimumWidth(120);
     filterBar->addWidget(searchRobot);
     filterBar->addWidget(comboIndustry);
@@ -1810,7 +1869,10 @@ QWidget* RobotManageDialog::buildHistoryPage()
     comboRobot->setMinimumWidth(120);
     auto* comboStatus = new QComboBox(content);
     comboStatus->setObjectName("historyComboStatus");
-    comboStatus->addItem(QStringLiteral("会话状态"));
+    comboStatus->addItem(QStringLiteral("全部状态"));
+    comboStatus->addItem(QStringLiteral("活跃"));
+    comboStatus->addItem(QStringLiteral("关闭"));
+    comboStatus->addItem(QStringLiteral("已归档"));
     comboStatus->setMinimumWidth(100);
     auto* startDate = new QLineEdit(content);
     startDate->setObjectName("historyDateEdit");
@@ -1889,281 +1951,785 @@ QWidget* RobotManageDialog::buildHistoryPage()
     return scroll;
 }
 
-void RobotManageDialog::applyStyle()
+/**
+ * @brief 构建数据备份页面
+ */
+#if 0
+QWidget *RobotManageDialog::buildBackupPage()
 {
-    setStyleSheet(QStringLiteral(R"QSS(
-        QDialog { background: #ffffff; }
-        /* 左侧导航栏 #25262b */
-        QWidget#robotNavSidebar { background: #25262b; }
-        QWidget#navBrand { background: #25262b; }
-        QLabel#navBrandTitle { color: #ffffff; font-size: 16px; font-weight: bold; }
-        QLabel#navBrandSub { color: #ffffff; font-size: 12px; }
-        QFrame#navDivider { background: #3d3e44; max-height: 1px; }
-        QFrame#navStatCard { background: #3a3b40; border-radius: 4px; }
-        QPushButton#navRefreshBtn, QToolButton#navRefreshBtn { color: #4080ff; border: none; background: transparent; }
-        QLabel#navStatTitle { color: #c9cacd; font-size: 11px; }
-        QLabel#navStatLabel { color: #ffffff; font-size: 12px; }
-        QLabel#navStatValue { color: #ffffff; font-size: 12px; }
-        QLabel#navStatValueRed { color: #f56c6c; font-size: 12px; font-weight: bold; }
-        QLabel#navPowerIcon { color: #ff7d00; font-size: 14px; }
-        QFrame#navStatDivider { background: #3d3e44; }
-        QListWidget#robotNavList {
-            background: #25262b; border: none; outline: none;
-        }
-        QListWidget#robotNavList::item {
-            color: #ffffff; padding: 10px 16px; background: transparent;
-        }
-        QListWidget#robotNavList::item:hover:!selected {
-            background: #2d2e33;
-        }
-        QListWidget#robotNavList::item:selected {
-            background: #3a3b40; color: #ffffff;
-        }
-
-        /* 右侧内容区 */
-        QScrollArea#robotContentScroll { background: #ffffff; }
-        QWidget#robotContentArea { background: #ffffff; }
-        QLabel#robotPageTitle { color: #1d1d1f; font-size: 18px; font-weight: bold; }
-        QLabel#robotPageSub { color: #8a8b90; font-size: 12px; }
-        QPushButton#topBtnOrange { background: #ff7d00; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#topBtnPurple { background: #9254de; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#topBtnBlue { background: #4080ff; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#topBtnGreen { background: #00b42a; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QLineEdit#robotGlobalSearch, QLineEdit#robotFilterSearch {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 8px 12px; color: #1d1d1f;
-        }
-        QComboBox#robotFilterCombo {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 6px 12px; min-height: 20px; color: #1d1d1f;
-        }
-        QFrame#statCardBlue { background: #e6f4ff; border-radius: 8px; }
-        QFrame#statCardGreen { background: #f0fdf4; border-radius: 8px; }
-        QFrame#statCardPurple { background: #faf5ff; border-radius: 8px; }
-        QFrame#statCardOrange { background: #fff7ed; border-radius: 8px; }
-        QFrame#statCardBlue QLabel#robotStatCardTitle,
-        QFrame#statCardGreen QLabel#robotStatCardTitle,
-        QFrame#statCardPurple QLabel#robotStatCardTitle,
-        QFrame#statCardOrange QLabel#robotStatCardTitle {
-            color: #1d1d1f; font-size: 14px; font-weight: bold;
-        }
-        QFrame#statCardBlue QLabel#robotStatCardSub,
-        QFrame#statCardGreen QLabel#robotStatCardSub,
-        QFrame#statCardPurple QLabel#robotStatCardSub,
-        QFrame#statCardOrange QLabel#robotStatCardSub {
-            color: #8a8b90; font-size: 12px;
-        }
-        QPushButton#filterBtnOrange { background: #ff7d00; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#filterBtnPurple { background: #9254de; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#filterBtnBlue { background: #4080ff; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#filterBtnGreen { background: #00b42a; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#robotCreateBtn { background: #1d1d1f; color: #ffffff; border: none; border-radius: 8px; padding: 0 20px; font-weight: bold; }
-        QPushButton#robotCreateBtn:hover { background: #3d3d3f; }
-        QFrame#robotEmptyPanel { background: #ffffff; border: 1px solid #e5e6eb; border-radius: 8px; }
-        QLabel#robotEmptyTitle { color: #1d1d1f; font-size: 16px; font-weight: bold; }
-        QLabel#robotEmptySub { color: #8a8b90; font-size: 12px; }
-
-        /* 系统概览页 */
-        QFrame#overviewWelcomeBanner {
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #1a1d29, stop:1 #2d3748);
-            border: 1px solid #4a5568; border-radius: 8px;
-        }
-        QLabel#overviewWelcomeTitle { color: #ffffff; font-size: 20px; font-weight: bold; }
-        QLabel#overviewWelcomeSub { color: #e2e8f0; font-size: 12px; }
-        QLabel#overviewSectionTitle { color: #1d1d1f; font-size: 14px; font-weight: bold; }
-        QLabel#overviewCardTitle { color: #8a8b90; font-size: 12px; }
-        QLabel#overviewCardValue { color: #1d1d1f; font-size: 16px; font-weight: bold; }
-        QFrame#overviewCardOrange, QFrame#overviewCardGreen, QFrame#overviewCardPurple,
-        QFrame#overviewCardPink, QFrame#overviewCardBlue, QFrame#resCardPurple,
-        QFrame#resCardBlue, QFrame#resCardGreen, QFrame#resCardPink, QFrame#resCardYellow {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 8px;
-        }
-        QProgressBar#overviewRingGreen {
-            border: 4px solid #e5e6eb; border-radius: 40px; background: #ffffff;
-            text-align: center;
-        }
-        QProgressBar#overviewRingGreen::chunk { background: #00b42a; border-radius: 36px; }
-        QProgressBar#overviewRingGray {
-            border: 4px solid #e5e6eb; border-radius: 40px; background: #ffffff;
-        }
-        QProgressBar#overviewRingGray::chunk { background: #8a8b90; border-radius: 36px; }
-        QProgressBar#overviewRingYellow {
-            border: 4px solid #e5e6eb; border-radius: 40px; background: #ffffff;
-        }
-        QProgressBar#overviewRingYellow::chunk { background: #faad14; border-radius: 36px; }
-        QLabel#overviewRingLabelGreen { color: #00b42a; font-size: 12px; font-weight: bold; }
-        QLabel#overviewRingLabelGray { color: #8a8b90; font-size: 12px; }
-        QLabel#overviewRingLabelYellow { color: #faad14; font-size: 12px; }
-
-        /* 知识库管理页 */
-        QWidget#kbLeftPanel { background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px; padding: 12px; }
-        QLineEdit#kbTreeSearch {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 8px 12px; color: #1d1d1f;
-        }
-        QPushButton#kbTreeSearchBtn { background: #9254de; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#kbTreeAddBtn { background: #9254de; color: #ffffff; border: none; border-radius: 4px; font-size: 16px; font-weight: bold; }
-        QTreeWidget#kbTree {
-            background: #ffffff; border: none; outline: none;
-            color: #1d1d1f; font-size: 13px;
-        }
-        QTreeWidget#kbTree::item {
-            padding: 6px 4px; color: #1d1d1f;
-        }
-        QTreeWidget#kbTree::item:selected {
-            color: #1d1d1f; background: #e6f4ff;
-        }
-        QTreeWidget#kbTree::item:hover {
-            background: #f5f7fa;
-        }
-        QWidget#kbRightPanel {
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f9f5fc, stop:1 #f5eef8);
-            border: 1px solid #e5e6eb; border-radius: 4px;
-        }
-        QLabel#kbRightTitle { color: #1d1d1f; font-size: 16px; font-weight: bold; }
-        QLabel#kbRightSub { color: #8a8b90; font-size: 12px; }
-        QFrame#kbEmptyPanel {
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f9f5fc, stop:1 #f5eef8);
-            border: 1px solid #e5e6eb; border-radius: 8px;
-        }
-        QFrame#kbEmptyIconWrap { background: #e9e5ff; border-radius: 32px; }
-        QLabel#kbEmptyTitle { color: #1d1d1f; font-size: 14px; font-weight: bold; }
-        QLabel#kbEmptySub { color: #8a8b90; font-size: 12px; }
-
-        /* 消息处理页 */
-        QLabel#msgSectionTitle { color: #1d1d1f; font-size: 14px; font-weight: bold; }
-        QLabel#msgSectionHint { color: #8a8b90; font-size: 12px; }
-        QFrame#msgCardRecv { background: #e6f4ff; border-radius: 8px; border: 1px solid #bae0ff; }
-        QFrame#msgCardSend { background: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0; }
-        QFrame#msgCardStat { background: #faf5ff; border-radius: 8px; border: 1px solid #e9d5ff; }
-        QFrame#msgCardQuick { background: #fff7ed; border-radius: 8px; border: 1px solid #fed7aa; }
-        QFrame#msgCardRecv QLabel#msgCardTitle, QFrame#msgCardSend QLabel#msgCardTitle,
-        QFrame#msgCardStat QLabel#msgCardTitle, QFrame#msgCardQuick QLabel#msgCardTitle {
-            color: #1d1d1f; font-size: 13px; font-weight: bold;
-        }
-        QLabel#msgCardFooter, QLabel#msgStatRow { color: #8a8b90; font-size: 12px; }
-        QLabel#msgQuickHint { color: #8a8b90; font-size: 11px; }
-        QCheckBox#msgToggle { color: #1d1d1f; font-size: 12px; spacing: 8px; }
-        QCheckBox#msgToggle::indicator { width: 40px; height: 20px; border-radius: 10px; background: #c0c0c0; }
-        QCheckBox#msgToggle::indicator:checked { background: #3b82f6; }
-        QPushButton#msgBtnGreen { background: #22c55e; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QPushButton#msgBtnGray { background: #ffffff; color: #4b5563; border: 1px solid #d1d5db; border-radius: 4px; padding: 0 16px; }
-        QPushButton#msgBtnBlue { background: #3b82f6; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QFrame#msgFlowStep { background: #ffffff; border: 1px solid #e5e6eb; border-radius: 8px; }
-        QFrame#msgFlowStepHighlight { background: #ffffff; border: 2px solid #00b42a; border-radius: 8px; }
-        QLabel#msgFlowStepTitle { color: #1d1d1f; font-size: 12px; font-weight: bold; }
-        QLabel#msgFlowStepSub { color: #8a8b90; font-size: 11px; }
-        QLabel#msgSubSectionTitle { color: #1d1d1f; font-size: 13px; font-weight: bold; }
-        QTextEdit#msgTextEdit {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 8px; color: #1d1d1f; font-size: 13px;
-        }
-        QLabel#msgCharCount { color: #8a8b90; font-size: 12px; }
-
-        /* 行话转换页 */
-        QLabel#jargonPlatformLabel { color: #1d1d1f; font-size: 13px; }
-        QComboBox#jargonPlatformCombo {
-            background: #f5f7fa; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 6px 12px; min-height: 20px; color: #1d1d1f;
-        }
-        QPushButton#jargonBtnTest {
-            background: #f5f7fa; color: #1d1d1f; border: 1px solid #e5e6eb;
-            border-radius: 4px; padding: 0 16px;
-        }
-        QPushButton#jargonBtnAdd { background: #8b5cf6; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QFrame#jargonCardTotal { background: #e6f4ff; border-radius: 8px; border: 1px solid #bae0ff; }
-        QFrame#jargonCardEnabled { background: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0; }
-        QFrame#jargonCardReplace { background: #fff7ed; border-radius: 8px; border: 1px solid #fed7aa; }
-        QFrame#jargonCardDelete { background: #fef2f2; border-radius: 8px; border: 1px solid #fecaca; }
-        QLabel#jargonCardLabel { color: #8a8b90; font-size: 12px; }
-        QLabel#jargonCardValue { color: #1d1d1f; font-size: 18px; font-weight: bold; }
-        QLabel#jargonSectionTitle { color: #1d1d1f; font-size: 14px; font-weight: bold; }
-        QLineEdit#jargonRulesSearch {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 8px 12px; color: #1d1d1f;
-        }
-        QTableWidget#jargonTable {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            gridline-color: #e5e6eb;
-        }
-        QTableWidget#jargonTable::item { color: #1d1d1f; padding: 8px; }
-        QHeaderView::section {
-            background: #f5f7fa; color: #8a8b90; font-size: 12px; padding: 10px 8px;
-            border: none; border-bottom: 1px solid #e5e6eb;
-        }
-
-        /* 违禁词管理页 */
-        QPushButton#forbiddenBtnTest {
-            background: #f5f7fa; color: #1d1d1f; border: 1px solid #e5e6eb;
-            border-radius: 4px; padding: 0 16px;
-        }
-        QPushButton#forbiddenBtnExport { background: #3b82f6; color: #ffffff; border: none; border-radius: 4px; padding: 0 12px; }
-        QPushButton#forbiddenBtnImport { background: #22c55e; color: #ffffff; border: none; border-radius: 4px; padding: 0 12px; }
-        QPushButton#forbiddenBtnAi { background: #8b5cf6; color: #ffffff; border: none; border-radius: 4px; padding: 0 12px; }
-        QPushButton#forbiddenBtnBatchDir { background: #22c55e; color: #ffffff; border: none; border-radius: 4px; padding: 0 12px; }
-        QPushButton#forbiddenBtnBatchEdit { background: #3b82f6; color: #ffffff; border: none; border-radius: 4px; padding: 0 12px; }
-        QPushButton#forbiddenBtnBatchDel { background: #ef4444; color: #ffffff; border: none; border-radius: 4px; padding: 0 12px; }
-        QPushButton#forbiddenBtnAdd { background: #8b5cf6; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QLabel#forbiddenPlatformLabel { color: #1d1d1f; font-size: 13px; }
-        QComboBox#forbiddenPlatformCombo {
-            background: #f5f7fa; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 6px 12px; min-height: 20px; color: #1d1d1f;
-        }
-        QLineEdit#forbiddenRuleSearch {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 8px 12px; color: #1d1d1f;
-        }
-        QFrame#forbiddenCardTotal { background: #e6f4ff; border-radius: 8px; border: 1px solid #bae0ff; }
-        QFrame#forbiddenCardEnabled { background: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0; }
-        QFrame#forbiddenCardDisabled { background: #f3f4f6; border-radius: 8px; border: 1px solid #e5e7eb; }
-        QFrame#forbiddenCardReplace { background: #faf5ff; border-radius: 8px; border: 1px solid #e9d5ff; }
-        QLabel#forbiddenCardLabel { color: #8a8b90; font-size: 12px; }
-        QLabel#forbiddenCardValue { color: #1d1d1f; font-size: 18px; font-weight: bold; }
-        QTableWidget#forbiddenTable {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 8px;
-            gridline-color: #e5e6eb;
-        }
-        QTableWidget#forbiddenTable::item { color: #1d1d1f; padding: 8px; }
-
-        /* 对话历史页 */
-        QLabel#historyMgmtTitle { color: #1d1d1f; font-size: 14px; font-weight: bold; }
-        QLabel#historyMgmtSub { color: #8a8b90; font-size: 12px; }
-        QLabel#historyTagGreen { color: #22c55e; font-size: 12px; background: #f3f4f6; border-radius: 4px; padding: 4px 10px; }
-        QLabel#historyTagBlue { color: #3b82f6; font-size: 12px; background: #f3f4f6; border-radius: 4px; padding: 4px 10px; }
-        QLabel#historyTagPurple { color: #8b5cf6; font-size: 12px; background: #f3f4f6; border-radius: 4px; padding: 4px 10px; }
-        QPushButton#historyBtnRefresh {
-            background: #f5f7fa; color: #1d1d1f; border: 1px solid #e5e6eb;
-            border-radius: 4px; padding: 0 16px;
-        }
-        QPushButton#historyBtnExport { background: #22c55e; color: #ffffff; border: none; border-radius: 4px; padding: 0 16px; }
-        QFrame#historyCardSessions, QFrame#historyCardReception, QFrame#historyCardAvg, QFrame#historyCardTime {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 8px;
-        }
-        QLabel#historyCardLabel { color: #8a8b90; font-size: 12px; }
-        QLabel#historyCardValue { color: #1d1d1f; font-size: 22px; font-weight: bold; }
-        QLabel#historyCardSub { color: #8a8b90; font-size: 12px; }
-        QFrame#historyFilterPanel {
-            background: #f5f7fa; border-radius: 8px; border: 1px solid #e5e6eb;
-        }
-        QComboBox#historyComboRobot, QComboBox#historyComboStatus {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 6px 12px; min-height: 20px; color: #1d1d1f;
-        }
-        QLineEdit#historyDateEdit, QLineEdit#historySessionSearch {
-            background: #ffffff; border: 1px solid #e5e6eb; border-radius: 4px;
-            padding: 8px 12px; color: #1d1d1f;
-        }
-        QLabel#historyToLabel { color: #8a8b90; font-size: 12px; }
-        QLabel#historyCountLabel { color: #8a8b90; font-size: 12px; }
-        QLabel#historyRealtimeLabel { color: #3b82f6; font-size: 12px; }
-        QLabel#historyRecordTitle { color: #1d1d1f; font-size: 14px; font-weight: bold; }
-        QLabel#historySortLabel { color: #8a8b90; font-size: 12px; }
-        QFrame#historyEmptyPanel {
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f8fafc, stop:1 #eff6ff);
-            border: 1px solid #e5e6eb; border-radius: 8px;
-        }
-        QFrame#historyEmptyIconWrap { background: #e0f2fe; border-radius: 40px; }
-        QLabel#historyEmptyTitle { color: #1d1d1f; font-size: 16px; font-weight: bold; }
-        QLabel#historyEmptySub { color: #8a8b90; font-size: 12px; }
-    )QSS"));
+    auto* scroll = buildCommonPage(QStringLiteral("数据备份"), QStringLiteral("数据导出与备份管理"));
+    // ...
+    return scroll;
 }
+#endif
+
+QWidget *RobotManageDialog::buildBackupPage()
+{
+    auto* scroll = new QScrollArea(this);
+    scroll->setObjectName("robotContentScroll");
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto* content = new QWidget(scroll);
+    content->setObjectName("robotContentArea");
+    auto* mainLayout = new QVBoxLayout(content);
+    mainLayout->setContentsMargins(24, 24, 24, 24);
+    mainLayout->setSpacing(20);
+
+    // 1. 顶部标题与操作栏
+    auto* headerRow = new QHBoxLayout();
+    auto* titleCol = new QVBoxLayout();
+    titleCol->setSpacing(4);
+    auto* pageTitle = new QLabel(QStringLiteral("数据备份"), content);
+    pageTitle->setObjectName("robotPageTitle");
+    auto* pageSub = new QLabel(QStringLiteral("数据导出与备份管理"), content);
+    pageSub->setObjectName("robotPageSub");
+    titleCol->addWidget(pageTitle);
+    titleCol->addWidget(pageSub);
+    headerRow->addLayout(titleCol, 1);
+    headerRow->addSpacing(8);
+    auto* btnAi = new QPushButton(QStringLiteral("AI配置"), content);
+    btnAi->setObjectName("topBtnOrange");
+    auto* btnAgg = new QPushButton(QStringLiteral("聚合对话"), content);
+    btnAgg->setObjectName("topBtnPurple");
+    auto* btnShare = new QPushButton(QStringLiteral("分享"), content);
+    btnShare->setObjectName("topBtnBlue");
+    auto* btnGuide = new QPushButton(QStringLiteral("使用向导"), content);
+    btnGuide->setObjectName("topBtnPurple");
+    auto* btnContact = new QPushButton(QStringLiteral("联系我们"), content);
+    btnContact->setObjectName("topBtnGreen");
+    for (QPushButton* b : { btnAi, btnAgg, btnShare, btnGuide, btnContact }) {
+        b->setFixedHeight(32);
+        headerRow->addWidget(b);
+        headerRow->addSpacing(8);
+    }
+    mainLayout->addLayout(headerRow);
+
+    // 2. 全局搜索框
+    auto* globalSearch = new QLineEdit(content);
+    globalSearch->setObjectName("robotGlobalSearch");
+    globalSearch->setPlaceholderText(QStringLiteral("搜索功能..."));
+    globalSearch->setClearButtonEnabled(false);
+    mainLayout->addWidget(globalSearch);
+
+    // 3. 智能提示条
+    auto* tipPanel = new QFrame(content);
+    tipPanel->setObjectName("backupTipPanel");
+    tipPanel->setMinimumHeight(44);
+    auto* tipLayout = new QVBoxLayout(tipPanel);
+    tipLayout->setContentsMargins(12, 12, 12, 12);
+    auto* tipLabel = new QLabel(QStringLiteral("智能数据保护·一键备份恢复·安全可靠的数据管理解决方案"), tipPanel);
+    tipLabel->setObjectName("backupTipLabel");
+    tipLabel->setAlignment(Qt::AlignCenter);
+    tipLayout->addWidget(tipLabel);
+    mainLayout->addWidget(tipPanel);
+
+    // 4. 统计卡片行（4 个白色卡片）
+    auto* cardRow = new QHBoxLayout();
+    cardRow->setSpacing(12);
+    auto* style = this->style();
+    const int iconSz = 24;
+
+    // 备份文件卡片
+    auto* cardBackupFiles = makeCard(content, "backupCard");
+    cardBackupFiles->setMinimumHeight(100);
+    auto* layBackupFiles = new QVBoxLayout(cardBackupFiles);
+    layBackupFiles->setContentsMargins(16, 16, 16, 16);
+    auto* backupFilesIcon = new QLabel(cardBackupFiles);
+    backupFilesIcon->setPixmap(style->standardIcon(QStyle::SP_FileIcon).pixmap(iconSz, iconSz));
+    auto* backupFilesTitle = new QLabel(QStringLiteral("备份文件"), cardBackupFiles);
+    backupFilesTitle->setObjectName("backupCardLabel");
+    auto* backupFilesVal = new QLabel(QStringLiteral("0"), cardBackupFiles);
+    backupFilesVal->setObjectName("backupCardValue");
+    layBackupFiles->addWidget(backupFilesIcon);
+    layBackupFiles->addWidget(backupFilesTitle);
+    layBackupFiles->addWidget(backupFilesVal);
+    cardRow->addWidget(cardBackupFiles, 1);
+
+    // 总大小卡片
+    auto* cardTotalSize = makeCard(content, "backupCard");
+    cardTotalSize->setMinimumHeight(100);
+    auto* layTotalSize = new QVBoxLayout(cardTotalSize);
+    layTotalSize->setContentsMargins(16, 16, 16, 16);
+    auto* totalSizeIcon = new QLabel(cardTotalSize);
+    totalSizeIcon->setPixmap(style->standardIcon(QStyle::SP_DriveHDIcon).pixmap(iconSz, iconSz));
+    auto* totalSizeTitle = new QLabel(QStringLiteral("总大小"), cardTotalSize);
+    totalSizeTitle->setObjectName("backupCardLabel");
+    auto* totalSizeVal = new QLabel(QStringLiteral("0 B"), cardTotalSize);
+    totalSizeVal->setObjectName("backupCardValue");
+    layTotalSize->addWidget(totalSizeIcon);
+    layTotalSize->addWidget(totalSizeTitle);
+    layTotalSize->addWidget(totalSizeVal);
+    cardRow->addWidget(cardTotalSize, 1);
+
+    // 有效备份卡片
+    auto* cardValidBackups = makeCard(content, "backupCard");
+    cardValidBackups->setMinimumHeight(100);
+    auto* layValidBackups = new QVBoxLayout(cardValidBackups);
+    layValidBackups->setContentsMargins(16, 16, 16, 16);
+    auto* validBackupsIcon = new QLabel(cardValidBackups);
+    validBackupsIcon->setPixmap(style->standardIcon(QStyle::SP_DialogApplyButton).pixmap(iconSz, iconSz));
+    auto* validBackupsTitle = new QLabel(QStringLiteral("有效备份"), cardValidBackups);
+    validBackupsTitle->setObjectName("backupCardLabel");
+    auto* validBackupsVal = new QLabel(QStringLiteral("0"), cardValidBackups);
+    validBackupsVal->setObjectName("backupCardValue");
+    layValidBackups->addWidget(validBackupsIcon);
+    layValidBackups->addWidget(validBackupsTitle);
+    layValidBackups->addWidget(validBackupsVal);
+    cardRow->addWidget(cardValidBackups, 1);
+
+    // 最新备份卡片
+    auto* cardLatestBackup = makeCard(content, "backupCard");
+    cardLatestBackup->setMinimumHeight(100);
+    auto* layLatestBackup = new QVBoxLayout(cardLatestBackup);
+    layLatestBackup->setContentsMargins(16, 16, 16, 16);
+    auto* latestBackupIcon = new QLabel(cardLatestBackup);
+    latestBackupIcon->setPixmap(style->standardIcon(QStyle::SP_FileDialogInfoView).pixmap(iconSz, iconSz));
+    auto* latestBackupTitle = new QLabel(QStringLiteral("最新备份"), cardLatestBackup);
+    latestBackupTitle->setObjectName("backupCardLabel");
+    auto* latestBackupVal = new QLabel(QStringLiteral("无"), cardLatestBackup);
+    latestBackupVal->setObjectName("backupCardValue");
+    layLatestBackup->addWidget(latestBackupIcon);
+    layLatestBackup->addWidget(latestBackupTitle);
+    layLatestBackup->addWidget(latestBackupVal);
+    cardRow->addWidget(cardLatestBackup, 1);
+
+    mainLayout->addLayout(cardRow);
+
+    // 5. 操作按钮组
+    auto* actionButtonsRow = new QHBoxLayout();
+    actionButtonsRow->setSpacing(8);
+    actionButtonsRow->setAlignment(Qt::AlignCenter);
+
+    // 创建备份按钮
+    auto* btnCreateBackup = new QPushButton(QStringLiteral("创建备份"), content);
+    btnCreateBackup->setObjectName("backupBtnCreate");
+    btnCreateBackup->setFixedHeight(40);
+    btnCreateBackup->setIcon(style->standardIcon(QStyle::SP_FileDialogNewFolder));
+    btnCreateBackup->setIconSize(QSize(16, 16));
+    actionButtonsRow->addWidget(btnCreateBackup);
+
+    // 导入备份按钮
+    auto* btnImportBackup = new QPushButton(QStringLiteral("导入备份"), content);
+    btnImportBackup->setObjectName("backupBtnImport");
+    btnImportBackup->setFixedHeight(40);
+    btnImportBackup->setIcon(style->standardIcon(QStyle::SP_ArrowUp));
+    btnImportBackup->setIconSize(QSize(16, 16));
+    actionButtonsRow->addWidget(btnImportBackup);
+
+    // 刷新列表按钮
+    auto* btnRefreshList = new QPushButton(QStringLiteral("刷新列表"), content);
+    btnRefreshList->setObjectName("backupBtnRefresh");
+    btnRefreshList->setFixedHeight(40);
+    btnRefreshList->setIcon(style->standardIcon(QStyle::SP_BrowserReload));
+    btnRefreshList->setIconSize(QSize(16, 16));
+    actionButtonsRow->addWidget(btnRefreshList);
+
+    mainLayout->addLayout(actionButtonsRow);
+
+    // 6. 备份文件管理模块
+    auto* mgmtHeader = new QHBoxLayout();
+    auto* mgmtTitleCol = new QVBoxLayout();
+    mgmtTitleCol->setSpacing(4);
+    auto* mgmtTitle = new QLabel(QStringLiteral("备份文件管理"), content);
+    mgmtTitle->setObjectName("backupMgmtTitle");
+    mgmtTitleCol->addWidget(mgmtTitle);
+    mgmtHeader->addLayout(mgmtTitleCol, 1);
+
+    // 视图切换按钮组
+    auto* btnListView = new QPushButton(content);
+    btnListView->setObjectName("backupViewBtn");
+    btnListView->setFixedSize(32, 32);
+    btnListView->setIcon(style->standardIcon(QStyle::SP_FileDialogListView));
+    btnListView->setIconSize(QSize(16, 16));
+    btnListView->setCheckable(true);
+
+    auto* btnCardView = new QPushButton(content);
+    btnCardView->setObjectName("backupViewBtn");
+    btnCardView->setFixedSize(32, 32);
+    btnCardView->setIcon(style->standardIcon(QStyle::SP_FileDialogDetailedView));
+    btnCardView->setIconSize(QSize(16, 16));
+    btnCardView->setCheckable(true);
+    btnCardView->setChecked(true); // 默认选中卡片视图
+
+    mgmtHeader->addWidget(btnListView);
+    mgmtHeader->addSpacing(4);
+    mgmtHeader->addWidget(btnCardView);
+    mainLayout->addLayout(mgmtHeader);
+
+    // 7. 空状态区域
+    auto* emptyPanel = makeCard(content, "backupEmptyPanel");
+    emptyPanel->setObjectName("backupEmptyPanel");
+    emptyPanel->setMinimumHeight(320);
+    auto* emptyLayout = new QVBoxLayout(emptyPanel);
+    emptyLayout->setContentsMargins(40, 40, 40, 40);
+    emptyLayout->setSpacing(16);
+    emptyLayout->setAlignment(Qt::AlignCenter);
+
+    // 空状态图标
+    auto* emptyIconWrap = new QFrame(emptyPanel);
+    emptyIconWrap->setObjectName("backupEmptyIconWrap");
+    emptyIconWrap->setFixedSize(80, 80);
+    auto* emptyIconLay = new QVBoxLayout(emptyIconWrap);
+    emptyIconLay->setAlignment(Qt::AlignCenter);
+    auto* emptyIcon = new QLabel(emptyIconWrap);
+    emptyIcon->setPixmap(style->standardIcon(QStyle::SP_ArrowUp).pixmap(40, 40));
+    emptyIcon->setAlignment(Qt::AlignCenter);
+    emptyIconLay->addWidget(emptyIcon);
+
+    // 空状态文字
+    auto* emptyTitle = new QLabel(QStringLiteral("还没有备份文件"), emptyPanel);
+    emptyTitle->setObjectName("backupEmptyTitle");
+    auto* emptySub = new QLabel(QStringLiteral("创建您的第一个数据备份，保护重要数据安全"), emptyPanel);
+    emptySub->setObjectName("backupEmptySub");
+
+    // 立即创建备份按钮
+    auto* btnCreateNow = new QPushButton(QStringLiteral("立即创建备份"), emptyPanel);
+    btnCreateNow->setObjectName("backupBtnCreateNow");
+    btnCreateNow->setFixedHeight(36);
+    btnCreateNow->setIcon(style->standardIcon(QStyle::SP_FileDialogNewFolder));
+    btnCreateNow->setIconSize(QSize(16, 16));
+
+    emptyLayout->addWidget(emptyIconWrap);
+    emptyLayout->addWidget(emptyTitle);
+    emptyLayout->addWidget(emptySub);
+    emptyLayout->addWidget(btnCreateNow);
+
+    mainLayout->addWidget(emptyPanel, 1);
+
+    scroll->setWidget(content);
+    return scroll;
+}
+
+QWidget* RobotManageDialog::buildLogPage()
+{
+    auto* scroll = new QScrollArea(this);
+    scroll->setObjectName("robotContentScroll");
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto* content = new QWidget(scroll);
+    content->setObjectName("robotContentArea");
+    auto* mainLayout = new QVBoxLayout(content);
+    mainLayout->setContentsMargins(24, 24, 24, 24);
+    mainLayout->setSpacing(20);
+
+    // 1. 顶部标题与操作栏
+    auto* headerRow = new QHBoxLayout();
+    auto* titleCol = new QVBoxLayout();
+    titleCol->setSpacing(4);
+    auto* pageTitle = new QLabel(QStringLiteral("日志管理"), content);
+    pageTitle->setObjectName("robotPageTitle");
+    auto* pageSub = new QLabel(QStringLiteral("系统日志查看与检索"), content);
+    pageSub->setObjectName("robotPageSub");
+    titleCol->addWidget(pageTitle);
+    titleCol->addWidget(pageSub);
+    headerRow->addLayout(titleCol, 1);
+    headerRow->addSpacing(8);
+    auto* btnAi = new QPushButton(QStringLiteral("AI配置"), content);
+    btnAi->setObjectName("topBtnOrange");
+    auto* btnAgg = new QPushButton(QStringLiteral("聚合对话"), content);
+    btnAgg->setObjectName("topBtnPurple");
+    auto* btnShare = new QPushButton(QStringLiteral("分享"), content);
+    btnShare->setObjectName("topBtnBlue");
+    auto* btnGuide = new QPushButton(QStringLiteral("使用向导"), content);
+    btnGuide->setObjectName("topBtnPurple");
+    auto* btnContact = new QPushButton(QStringLiteral("联系我们"), content);
+    btnContact->setObjectName("topBtnGreen");
+    for (QPushButton* b : { btnAi, btnAgg, btnShare, btnGuide, btnContact }) {
+        b->setFixedHeight(32);
+        headerRow->addWidget(b);
+        headerRow->addSpacing(8);
+    }
+    mainLayout->addLayout(headerRow);
+
+    // 2. 全局搜索框
+    auto* globalSearch = new QLineEdit(content);
+    globalSearch->setObjectName("robotGlobalSearch");
+    globalSearch->setPlaceholderText(QStringLiteral("搜索功能..."));
+    globalSearch->setClearButtonEnabled(false);
+    mainLayout->addWidget(globalSearch);
+
+    // 3. 顶部紫色日志管理横幅
+    auto* bannerPanel = new QFrame(content);
+    bannerPanel->setObjectName("logBannerPanel");
+    bannerPanel->setMinimumHeight(80);
+
+    auto* bannerLayout = new QHBoxLayout(bannerPanel);
+    bannerLayout->setContentsMargins(16, 16, 16, 16);
+
+    // 左侧内容
+    auto* bannerLeft = new QVBoxLayout();
+    bannerLeft->setSpacing(4);
+
+    auto* bannerTitleRow = new QHBoxLayout();
+    bannerTitleRow->setSpacing(8);
+    auto* bannerIcon = new QLabel(bannerPanel);
+    auto* style = this->style();
+    bannerIcon->setPixmap(style->standardIcon(QStyle::SP_FileDialogInfoView).pixmap(24, 24));
+
+    auto* bannerTitle = new QLabel(QStringLiteral("日志管理"), bannerPanel);
+    bannerTitle->setObjectName("logBannerTitle");
+
+    bannerTitleRow->addWidget(bannerIcon);
+    bannerTitleRow->addWidget(bannerTitle);
+    bannerLeft->addLayout(bannerTitleRow);
+
+    auto* bannerDesc = new QLabel(QStringLiteral("实时监控系统运行状态，查看操作记录和系统日志"), bannerPanel);
+    bannerDesc->setObjectName("logBannerDesc");
+    bannerLeft->addWidget(bannerDesc);
+
+    bannerLayout->addLayout(bannerLeft, 1);
+
+    // 右侧操作按钮
+    auto* bannerBtnRefresh = new QPushButton(QStringLiteral("刷新数据"), bannerPanel);
+    bannerBtnRefresh->setObjectName("logBannerBtnRefresh");
+    bannerBtnRefresh->setFixedHeight(32);
+    bannerBtnRefresh->setIcon(style->standardIcon(QStyle::SP_BrowserReload));
+    bannerBtnRefresh->setIconSize(QSize(16, 16));
+
+    auto* bannerBtnExport = new QPushButton(QStringLiteral("导出日志"), bannerPanel);
+    bannerBtnExport->setObjectName("logBannerBtnExport");
+    bannerBtnExport->setFixedHeight(32);
+    bannerBtnExport->setIcon(style->standardIcon(QStyle::SP_DialogSaveButton));
+    bannerBtnExport->setIconSize(QSize(16, 16));
+
+    bannerLayout->addWidget(bannerBtnRefresh);
+    bannerLayout->addSpacing(8);
+    bannerLayout->addWidget(bannerBtnExport);
+
+    mainLayout->addWidget(bannerPanel);
+
+    // 4. 统计卡片行（4个白色卡片）
+    auto* cardRow = new QHBoxLayout();
+    cardRow->setSpacing(12);
+    const int iconSz = 24;
+
+    // 重要日志卡片
+    auto* cardImportant = makeCard(content, "logCard");
+    cardImportant->setMinimumHeight(120);
+    auto* layImportant = new QVBoxLayout(cardImportant);
+    layImportant->setContentsMargins(16, 16, 16, 12);
+
+    auto* importantIconRow = new QHBoxLayout();
+    auto* importantIcon = new QLabel(cardImportant);
+    importantIcon->setPixmap(style->standardIcon(QStyle::SP_MessageBoxCritical).pixmap(iconSz, iconSz));
+    importantIconRow->addWidget(importantIcon);
+    importantIconRow->addStretch(1);
+
+    auto* importantTitle = new QLabel(QStringLiteral("重要日志"), cardImportant);
+    importantTitle->setObjectName("logCardTitle");
+    auto* importantValue = new QLabel(QStringLiteral("0"), cardImportant);
+    importantValue->setObjectName("logCardValue");
+
+    // 进度条
+    auto* importantProgress = new QProgressBar(cardImportant);
+    importantProgress->setObjectName("logProgressRed");
+    importantProgress->setValue(0);
+    importantProgress->setTextVisible(false);
+    importantProgress->setMaximumHeight(4);
+
+    layImportant->addLayout(importantIconRow);
+    layImportant->addWidget(importantTitle);
+    layImportant->addWidget(importantValue);
+    layImportant->addWidget(importantProgress);
+    cardRow->addWidget(cardImportant, 1);
+
+    // 普通日志卡片
+    auto* cardNormal = makeCard(content, "logCard");
+    cardNormal->setMinimumHeight(120);
+    auto* layNormal = new QVBoxLayout(cardNormal);
+    layNormal->setContentsMargins(16, 16, 16, 12);
+
+    auto* normalIconRow = new QHBoxLayout();
+    auto* normalIcon = new QLabel(cardNormal);
+    normalIcon->setPixmap(style->standardIcon(QStyle::SP_MessageBoxInformation).pixmap(iconSz, iconSz));
+    normalIconRow->addWidget(normalIcon);
+    normalIconRow->addStretch(1);
+
+    auto* normalTitle = new QLabel(QStringLiteral("普通日志"), cardNormal);
+    normalTitle->setObjectName("logCardTitle");
+    auto* normalValue = new QLabel(QStringLiteral("2"), cardNormal);
+    normalValue->setObjectName("logCardValue");
+
+    auto* normalProgress = new QProgressBar(cardNormal);
+    normalProgress->setObjectName("logProgressBlue");
+    normalProgress->setValue(100);
+    normalProgress->setTextVisible(false);
+    normalProgress->setMaximumHeight(4);
+
+    layNormal->addLayout(normalIconRow);
+    layNormal->addWidget(normalTitle);
+    layNormal->addWidget(normalValue);
+    layNormal->addWidget(normalProgress);
+    cardRow->addWidget(cardNormal, 1);
+
+    // 今日日志卡片
+    auto* cardToday = makeCard(content, "logCard");
+    cardToday->setMinimumHeight(120);
+    auto* layToday = new QVBoxLayout(cardToday);
+    layToday->setContentsMargins(16, 16, 16, 12);
+
+    auto* todayIconRow = new QHBoxLayout();
+    auto* todayIcon = new QLabel(cardToday);
+    todayIcon->setPixmap(style->standardIcon(QStyle::SP_FileDialogInfoView).pixmap(iconSz, iconSz));
+    todayIconRow->addWidget(todayIcon);
+    todayIconRow->addStretch(1);
+
+    auto* todayTitle = new QLabel(QStringLiteral("今日日志"), cardToday);
+    todayTitle->setObjectName("logCardTitle");
+    auto* todayValue = new QLabel(QStringLiteral("0"), cardToday);
+    todayValue->setObjectName("logCardValue");
+
+    auto* todayProgress = new QProgressBar(cardToday);
+    todayProgress->setObjectName("logProgressGreen");
+    todayProgress->setValue(0);
+    todayProgress->setTextVisible(false);
+    todayProgress->setMaximumHeight(4);
+
+    layToday->addLayout(todayIconRow);
+    layToday->addWidget(todayTitle);
+    layToday->addWidget(todayValue);
+    layToday->addWidget(todayProgress);
+    cardRow->addWidget(cardToday, 1);
+
+    // 总共日志卡片
+    auto* cardTotal = makeCard(content, "logCard");
+    cardTotal->setMinimumHeight(120);
+    auto* layTotal = new QVBoxLayout(cardTotal);
+    layTotal->setContentsMargins(16, 16, 16, 12);
+
+    auto* totalIconRow = new QHBoxLayout();
+    auto* totalIcon = new QLabel(cardTotal);
+    totalIcon->setPixmap(style->standardIcon(QStyle::SP_FileIcon).pixmap(iconSz, iconSz));
+    totalIconRow->addWidget(totalIcon);
+    totalIconRow->addStretch(1);
+
+    auto* totalTitle = new QLabel(QStringLiteral("总共日志"), cardTotal);
+    totalTitle->setObjectName("logCardTitle");
+    auto* totalValue = new QLabel(QStringLiteral("2"), cardTotal);
+    totalValue->setObjectName("logCardValue");
+
+    auto* totalProgress = new QProgressBar(cardTotal);
+    totalProgress->setObjectName("logProgressPurple");
+    totalProgress->setValue(100);
+    totalProgress->setTextVisible(false);
+    totalProgress->setMaximumHeight(4);
+
+    layTotal->addLayout(totalIconRow);
+    layTotal->addWidget(totalTitle);
+    layTotal->addWidget(totalValue);
+    layTotal->addWidget(totalProgress);
+    cardRow->addWidget(cardTotal, 1);
+
+    mainLayout->addLayout(cardRow);
+
+    // 5. 操作日志模块
+    // 模块标题
+    auto* moduleHeader = new QHBoxLayout();
+    auto* moduleTitleIcon = new QLabel(content);
+    moduleTitleIcon->setPixmap(style->standardIcon(QStyle::SP_FileDialogListView).pixmap(20, 20));
+
+    auto* moduleTitle = new QLabel(QStringLiteral("操作日志"), content);
+    moduleTitle->setObjectName("logModuleTitle");
+
+    moduleHeader->addWidget(moduleTitleIcon);
+    moduleHeader->addWidget(moduleTitle);
+    moduleHeader->addStretch(1);
+    mainLayout->addLayout(moduleHeader);
+
+    // 筛选栏
+    auto* filterPanel = new QFrame(content);
+    filterPanel->setObjectName("logFilterPanel");
+    auto* filterLayout = new QHBoxLayout(filterPanel);
+    filterLayout->setContentsMargins(12, 12, 12, 12);
+    filterLayout->setSpacing(12);
+
+    // 时间范围选择器（简化处理，使用QLineEdit）
+    auto* timeStart = new QLineEdit(filterPanel);
+    timeStart->setObjectName("logTimeStart");
+    timeStart->setPlaceholderText(QStringLiteral("开始时间"));
+    timeStart->setMinimumWidth(120);
+
+    auto* toLabel = new QLabel(QStringLiteral("至"), filterPanel);
+    toLabel->setObjectName("logToLabel");
+
+    auto* timeEnd = new QLineEdit(filterPanel);
+    timeEnd->setObjectName("logTimeEnd");
+    timeEnd->setPlaceholderText(QStringLiteral("结束时间"));
+    timeEnd->setMinimumWidth(120);
+
+    // 操作类型下拉框
+    auto* typeCombo = new QComboBox(filterPanel);
+    typeCombo->setObjectName("logTypeCombo");
+    typeCombo->addItem(QStringLiteral("全部类型"));
+    typeCombo->addItem(QStringLiteral("登录"));
+    typeCombo->addItem(QStringLiteral("创建"));
+    typeCombo->addItem(QStringLiteral("修改"));
+    typeCombo->addItem(QStringLiteral("删除"));
+    typeCombo->addItem(QStringLiteral("查询"));
+    typeCombo->setMinimumWidth(100);
+
+    // 操作结果下拉框
+    auto* resultCombo = new QComboBox(filterPanel);
+    resultCombo->setObjectName("logResultCombo");
+    resultCombo->addItem(QStringLiteral("全部结果"));
+    resultCombo->addItem(QStringLiteral("成功"));
+    resultCombo->addItem(QStringLiteral("失败"));
+    resultCombo->setMinimumWidth(100);
+
+    // 搜索框
+    auto* logSearch = new QLineEdit(filterPanel);
+    logSearch->setObjectName("logSearch");
+    logSearch->setPlaceholderText(QStringLiteral("搜索操作描述或用户名"));
+    logSearch->setClearButtonEnabled(false);
+    logSearch->setMinimumWidth(200);
+
+    // 查询和重置按钮
+    auto* btnQuery = new QPushButton(QStringLiteral("查询"), filterPanel);
+    btnQuery->setObjectName("logBtnQuery");
+    btnQuery->setFixedHeight(32);
+
+    auto* btnReset = new QPushButton(QStringLiteral("重置"), filterPanel);
+    btnReset->setObjectName("logBtnReset");
+    btnReset->setFixedHeight(32);
+
+    // 添加到布局
+    filterLayout->addWidget(timeStart);
+    filterLayout->addWidget(toLabel);
+    filterLayout->addWidget(timeEnd);
+    filterLayout->addWidget(typeCombo);
+    filterLayout->addWidget(resultCombo);
+    filterLayout->addWidget(logSearch, 1);
+    filterLayout->addWidget(btnQuery);
+    filterLayout->addWidget(btnReset);
+
+    mainLayout->addWidget(filterPanel);
+
+    // 操作日志表格
+    auto* logTable = new QTableWidget(content);
+    logTable->setObjectName("logTable");
+    logTable->setColumnCount(7);
+    logTable->setHorizontalHeaderLabels({
+        QStringLiteral("操作时间"),
+        QStringLiteral("操作类型"),
+        QStringLiteral("操作用户"),
+        QStringLiteral("操作描述"),
+        QStringLiteral("操作IP"),
+        QStringLiteral("耗时"),
+        QStringLiteral("状态")
+    });
+    logTable->setRowCount(5); // 示例数据5条
+    logTable->setAlternatingRowColors(true);
+    logTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    logTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    logTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    // 设置列宽
+    logTable->setColumnWidth(0, 140); // 操作时间
+    logTable->setColumnWidth(1, 100); // 操作类型
+    logTable->setColumnWidth(2, 80);  // 操作用户
+    logTable->setColumnWidth(3, 200); // 操作描述
+    logTable->setColumnWidth(4, 100); // 操作IP
+    logTable->setColumnWidth(5, 60);  // 耗时
+    logTable->setColumnWidth(6, 80);  // 状态
+
+    // 添加示例数据（实际应用中应从数据源加载）
+    QStringList times = {
+        "2026/2/4 07:59:09",
+        "2026/2/4 07:58:23",
+        "2026/2/4 07:57:15",
+        "2026/2/4 07:56:42",
+        "2026/2/4 07:55:31"
+    };
+
+    QStringList types = {
+        "删除",
+        "创建",
+        "修改",
+        "查询",
+        "登录"
+    };
+
+    QStringList users = {
+        "系统",
+        "管理员",
+        "系统",
+        "管理员",
+        "系统"
+    };
+
+    QStringList descriptions = {
+        "删除机器人: 客服助手",
+        "创建知识库: 产品文档",
+        "修改配置: 对话时长限制",
+        "查询日志: 操作记录",
+        "用户登录: admin"
+    };
+
+    QStringList ips = {
+        "127.0.0.1",
+        "192.168.1.100",
+        "127.0.0.1",
+        "192.168.1.101",
+        "127.0.0.1"
+    };
+
+    QStringList durations = {
+        "-",
+        "-",
+        "-",
+        "-",
+        "-"
+    };
+
+    QStringList statuses = {
+        "成功",
+        "成功",
+        "成功",
+        "成功",
+        "成功"
+    };
+
+    for (int row = 0; row < 5; ++row) {
+        logTable->setItem(row, 0, new QTableWidgetItem(times[row]));
+        logTable->setItem(row, 1, new QTableWidgetItem(types[row]));
+        logTable->setItem(row, 2, new QTableWidgetItem(users[row]));
+        logTable->setItem(row, 3, new QTableWidgetItem(descriptions[row]));
+        logTable->setItem(row, 4, new QTableWidgetItem(ips[row]));
+        logTable->setItem(row, 5, new QTableWidgetItem(durations[row]));
+        logTable->setItem(row, 6, new QTableWidgetItem(statuses[row]));
+
+        // 设置文本居中
+        for (int col = 0; col < 7; ++col) {
+            QTableWidgetItem* item = logTable->item(row, col);
+            if (item) {
+                item->setTextAlignment(Qt::AlignCenter);
+            }
+        }
+    }
+
+    mainLayout->addWidget(logTable, 1);
+
+    // 分页栏
+    auto* paginationPanel = new QFrame(content);
+    paginationPanel->setObjectName("logPaginationPanel");
+    auto* paginationLayout = new QHBoxLayout(paginationPanel);
+    paginationLayout->setContentsMargins(12, 8, 12, 8);
+
+    // 左侧文字
+    auto* pageInfo = new QLabel(QStringLiteral("共5条记录，当前显示第1-5条"), paginationPanel);
+    pageInfo->setObjectName("logPageInfo");
+
+    // 每页条数选择
+    auto* pageSizeLabel = new QLabel(QStringLiteral("每页"), paginationPanel);
+    pageSizeLabel->setObjectName("logPageSizeLabel");
+
+    auto* pageSizeCombo = new QComboBox(paginationPanel);
+    pageSizeCombo->setObjectName("logPageSizeCombo");
+    pageSizeCombo->addItems({ "10条/页", "20条/页", "50条/页", "100条/页" });
+    pageSizeCombo->setCurrentIndex(0);
+    pageSizeCombo->setMaximumWidth(100);
+
+    // 分页控件
+    auto* btnPrev = new QPushButton(QStringLiteral("上一页"), paginationPanel);
+    btnPrev->setObjectName("logBtnPrev");
+    btnPrev->setFixedWidth(70);
+
+    auto* btnPage1 = new QPushButton(QStringLiteral("1"), paginationPanel);
+    btnPage1->setObjectName("logBtnPage");
+    btnPage1->setFixedWidth(36);
+    btnPage1->setCheckable(true);
+    btnPage1->setChecked(true);
+
+    auto* btnNext = new QPushButton(QStringLiteral("下一页"), paginationPanel);
+    btnNext->setObjectName("logBtnNext");
+    btnNext->setFixedWidth(70);
+
+    auto* gotoLabel = new QLabel(QStringLiteral("前往"), paginationPanel);
+    gotoLabel->setObjectName("logGotoLabel");
+
+    auto* gotoInput = new QLineEdit(paginationPanel);
+    gotoInput->setObjectName("logGotoInput");
+    gotoInput->setFixedWidth(50);
+    gotoInput->setAlignment(Qt::AlignCenter);
+
+    auto* pageLabel = new QLabel(QStringLiteral("页"), paginationPanel);
+    pageLabel->setObjectName("logPageLabel");
+
+    // 添加到布局
+    paginationLayout->addWidget(pageInfo);
+    paginationLayout->addStretch(1);
+    paginationLayout->addWidget(pageSizeLabel);
+    paginationLayout->addWidget(pageSizeCombo);
+    paginationLayout->addSpacing(20);
+    paginationLayout->addWidget(btnPrev);
+    paginationLayout->addWidget(btnPage1);
+    paginationLayout->addWidget(btnNext);
+    paginationLayout->addSpacing(20);
+    paginationLayout->addWidget(gotoLabel);
+    paginationLayout->addWidget(gotoInput);
+    paginationLayout->addWidget(pageLabel);
+
+    mainLayout->addWidget(paginationPanel);
+
+    scroll->setWidget(content);
+    return scroll;
+}
+
+#if 0
+QScrollArea *RobotManageDialog::buildCommonPage(const QString &title, const QString &sub)
+{
+    auto* scroll = new QScrollArea(this);
+    scroll->setObjectName("robotContentScroll");
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto* content = new QWidget(scroll);
+    content->setObjectName("robotContentArea");
+    auto* mainLayout = new QVBoxLayout(content);
+    mainLayout->setContentsMargins(24, 24, 24, 24);
+    mainLayout->setSpacing(20);
+
+    // 1. 顶部标题与操作栏
+    auto* headerRow = new QHBoxLayout();
+    auto* titleCol = new QVBoxLayout();
+    titleCol->setSpacing(4);
+    auto* pageTitle = new QLabel(title, content);
+    pageTitle->setObjectName("robotPageTitle");
+    auto* pageSub = new QLabel(sub, content);
+    pageSub->setObjectName("robotPageSub");
+    titleCol->addWidget(pageTitle);
+    titleCol->addWidget(pageSub);
+    headerRow->addLayout(titleCol, 1);
+    headerRow->addSpacing(8);
+    auto* btnAi = new QPushButton(QStringLiteral("AI配置"), content);
+    btnAi->setObjectName("topBtnOrange");
+    auto* btnAgg = new QPushButton(QStringLiteral("聚合对话"), content);
+    btnAgg->setObjectName("topBtnPurple");
+    auto* btnShare = new QPushButton(QStringLiteral("分享"), content);
+    btnShare->setObjectName("topBtnBlue");
+    auto* btnGuide = new QPushButton(QStringLiteral("使用向导"), content);
+    btnGuide->setObjectName("topBtnPurple");
+    auto* btnContact = new QPushButton(QStringLiteral("联系我们"), content);
+    btnContact->setObjectName("topBtnGreen");
+    for (QPushButton* b : { btnAi, btnAgg, btnShare, btnGuide, btnContact }) {
+        b->setFixedHeight(32);
+        headerRow->addWidget(b);
+        headerRow->addSpacing(8);
+    }
+    mainLayout->addLayout(headerRow);
+
+    // 2. 全局搜索框
+    auto* globalSearch = new QLineEdit(content);
+    globalSearch->setObjectName("robotGlobalSearch");
+    globalSearch->setPlaceholderText(QStringLiteral("搜索功能..."));
+    globalSearch->setClearButtonEnabled(false);
+    mainLayout->addWidget(globalSearch);
+
+    return scroll;
+}
+#endif
