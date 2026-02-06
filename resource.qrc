@@ -29,5 +29,17 @@
         <file>res/Robot.png</file>
         <file>res/manageConsole.png</file>
         <file>res/Settings/Settings.png</file>
+        <file>res/RobotManage/backup.png</file>
+        <file>res/RobotManage/forbidden.png</file>
+        <file>res/RobotManage/history.png</file>
+        <file>res/RobotManage/Jargon.png</file>
+        <file>res/RobotManage/knowledge.png</file>
+        <file>res/RobotManage/Log.png</file>
+        <file>res/RobotManage/message.png</file>
+        <file>res/RobotManage/overview.png</file>
+        <file>res/RobotManage/robot.png</file>
+        <file>res/GroupReception/history.png</file>
+        <file>res/GroupReception/message.png</file>
+        <file>res/GroupReception/index.png</file>
     </qresource>
 </RCC>
