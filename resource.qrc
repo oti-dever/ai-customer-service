@@ -41,5 +41,22 @@
         <file>res/GroupReception/history.png</file>
         <file>res/GroupReception/message.png</file>
         <file>res/GroupReception/index.png</file>
+        <file>res/Settings/SmartReplySettings.png</file>
+        <file>res/Settings/AIConfig.png</file>
+        <file>res/Settings/ClueList.png</file>
+        <file>res/Settings/ContentReplace.png</file>
+        <file>res/Settings/DefaultReply.png</file>
+        <file>res/Settings/KeywordRule.png</file>
+        <file>res/Settings/MessagePush.png</file>
+        <file>res/Settings/SimpleAI.png</file>
+        <file>res/Settings/SpeedUp.png</file>
+        <file>res/Settings/ProductManual.png</file>
+        <file>res/Settings/BasicConfig.png</file>
+        <file>res/Settings/APIToken.png</file>
+        <file>res/Settings/ComputingPowerBalance.png</file>
+        <file>res/Settings/ModelSelect.png</file>
+        <file>res/Settings/SystemPrompt.png</file>
+        <file>res/Settings/Question.png</file>
+        <file>res/Settings/Refresh.png</file>
     </qresource>
 </RCC>
