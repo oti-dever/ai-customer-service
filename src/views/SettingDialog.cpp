@@ -27,6 +27,8 @@
 #include <QStyle>
 #include <QIcon>
 
+#include "utils/ApplyStyle.h"
+
 /**
  * @brief 设置对话框构造函数
  * @param parent 父窗口
@@ -41,13 +43,16 @@ SettingDialog::SettingDialog(QWidget* parent)
 
     // 自适应屏幕比例，设置合理尺寸；窗口可缩放以适配不同分辨率
     const QSize screenSize = qApp->primaryScreen()->availableSize();
-    resize(screenSize.width() * 0.7, screenSize.height() * 0.75);
+    // resize(screenSize.width() * 0.7, screenSize.height() * 0.75);
+    resize(qMin(screenSize.width() * 0.85, 1280.0), qMin(screenSize.height() * 0.8, 800.0));
     setMinimumSize(900, 560);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     // 构建UI
     buildUI();
-    applyStyle();
+    // applyStyle();
+    // 设置SettingDialog所有样式
+    setStyleSheet(ApplyStyle::settingsStyle());
 }
 
 /**
@@ -179,10 +184,18 @@ QWidget* SettingDialog::buildLeftSidebar()
     navTitleLayout->setContentsMargins(20, 16, 20, 12);
     navTitleLayout->setSpacing(8);
     auto* navTitleIcon = new QLabel(navTitleRow);
-    navTitleIcon->setPixmap(style()->standardIcon(QStyle::SP_FileDialogDetailedView).pixmap(16, 16));
+    // navTitleIcon->setPixmap(style()->standardIcon(QStyle::SP_FileDialogDetailedView).pixmap(16, 16));
+    navTitleIcon->setPixmap(QPixmap(":/res/Settings/SmartReplySettings.png").scaled(22, 22, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     navTitleIcon->setStyleSheet("background: transparent;");
     auto* navTitle = new QLabel(QStringLiteral("智能回复设置"), navTitleRow);
     navTitle->setObjectName("navTitle");
+
+    // 放大标题字体
+    QFont titleFont = navTitle->font();
+    titleFont.setPointSize(15);  // 增加标题字体大小
+    titleFont.setBold(true);     // 加粗
+    navTitle->setFont(titleFont);
+
     navTitleLayout->addWidget(navTitleIcon);
     navTitleLayout->addWidget(navTitle);
     navTitleLayout->addStretch();
@@ -198,10 +211,19 @@ QWidget* SettingDialog::buildLeftSidebar()
     m_navList->setObjectName("navList");
     m_navList->setFrameShape(QFrame::NoFrame);
 
-    // 添加导航项（与文档「完整菜单列表」一致）
+    // 设置列表项的图标大小，放大图标的关键
+    const int iconSize = 24;
+    m_navList->setIconSize(QSize(iconSize, iconSize));
+
+    // 设置导航列表字体（放大字体）
+    QFont listFont = m_navList->font();
+    listFont.setPointSize(11);  // 设置列表字体大小为11pt
+    m_navList->setFont(listFont);
+
+    // 添加导航项
     QStringList navItems = {
-        QStringLiteral("简易AI (支持FastGPT/Dify)"),
-        QStringLiteral("AI配置 (OpenAI通用格式)"),
+        QStringLiteral("简易AI"),
+        QStringLiteral("AI配置"),
         QStringLiteral("首响提速"),
         QStringLiteral("关键词规则"),
         QStringLiteral("内容替换"),
@@ -210,26 +232,52 @@ QWidget* SettingDialog::buildLeftSidebar()
         QStringLiteral("线索列表")
     };
 
-    auto* style = this->style();
-    QVector<QStyle::StandardPixmap> navIcons = {
-        QStyle::SP_MessageBoxInformation,  /* 简易AI - 闪电用信息图标占位 */
-        QStyle::SP_FileDialogDetailedView, /* AI配置 - 齿轮用设置类图标占位 */
-        QStyle::SP_ArrowUp,                /* 首响提速 */
-        QStyle::SP_FileIcon,               /* 关键词规则 */
-        QStyle::SP_BrowserReload,          /* 内容替换 */
-        QStyle::SP_MessageBoxInformation,  /* 默认回复 */
-        QStyle::SP_MessageBoxInformation,  /* 消息推送 - 铃铛用信息占位 */
-        QStyle::SP_FileDialogListView      /* 线索列表 */
+#if 0
+    // auto* style = this->style();
+    // QVector<QStyle::StandardPixmap> navIcons = {
+    //     QStyle::SP_MessageBoxInformation,  /* 简易AI - 闪电用信息图标占位 */
+    //     QStyle::SP_FileDialogDetailedView, /* AI配置 - 齿轮用设置类图标占位 */
+    //     QStyle::SP_ArrowUp,                /* 首响提速 */
+    //     QStyle::SP_FileIcon,               /* 关键词规则 */
+    //     QStyle::SP_BrowserReload,          /* 内容替换 */
+    //     QStyle::SP_MessageBoxInformation,  /* 默认回复 */
+    //     QStyle::SP_MessageBoxInformation,  /* 消息推送 - 铃铛用信息占位 */
+    //     QStyle::SP_FileDialogListView      /* 线索列表 */
+    // };
+
+    // const int iconSize = 18;
+    // for (int i = 0; i < navItems.size(); ++i) {
+    //     auto* listItem = new QListWidgetItem(
+    //         style->standardIcon(i < navIcons.size() ? navIcons[i] : QStyle::SP_FileIcon)
+    //             .pixmap(iconSize, iconSize),
+    //         navItems[i],
+    //         m_navList);
+    //     listItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    //     listItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+    // }
+#endif
+
+    // 替换为res目录下的png图片资源
+    QStringList navIcons = {
+        ":/res/Settings/SimpleAI.png",          // 简易AI
+        ":/res/Settings/AIConfig.png",          // AI配置
+        ":/res/Settings/SpeedUp.png",           // 首响提速
+        ":/res/Settings/KeywordRule.png",       // 关键词规则
+        ":/res/Settings/ContentReplace.png",    // 内容替换
+        ":/res/Settings/DefaultReply.png",      // 默认回复
+        ":/res/Settings/MessagePush.png",       // 消息推送
+        ":/res/Settings/ClueList.png"          // 线索列表
     };
-    const int iconSize = 18;
+
+    // const int iconSize = 35;
     for (int i = 0; i < navItems.size(); ++i) {
-        auto* listItem = new QListWidgetItem(
-            style->standardIcon(i < navIcons.size() ? navIcons[i] : QStyle::SP_FileIcon)
-                .pixmap(iconSize, iconSize),
-            navItems[i],
-            m_navList);
+        // 加载并缩放图片
+        QPixmap pixmap(navIcons[i]);
+        pixmap = pixmap.scaled(iconSize, iconSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        auto* listItem = new QListWidgetItem(QIcon(pixmap), navItems[i], m_navList);
         listItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         listItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        listItem->setIcon(QIcon(pixmap));
     }
 
     layout->addWidget(m_navList, 1);
@@ -239,6 +287,8 @@ QWidget* SettingDialog::buildLeftSidebar()
 
     // 默认选中第一项
     m_navList->setCurrentRow(0);
+
+    m_navList->setStyleSheet(ApplyStyle::settingsLeftNavStyle());  // 设置列表项高度为图标高度+额外空间
 
     return sidebar;
 }
@@ -305,473 +355,6 @@ void SettingDialog::onNavigationItemChanged(int index)
 }
 
 /**
- * @brief 应用样式表（配色参考管理后台智能回复设置界面）
- */
-void SettingDialog::applyStyle()
-{
-    setStyleSheet(QStringLiteral(R"QSS(
-        /* 主窗口：白色主内容区 */
-        QDialog {
-            background: #ffffff;
-        }
-
-        /* 顶部标题栏：白底深色字 */
-        QFrame#header {
-            background: #ffffff;
-            border-bottom: 1px solid #E4E7ED;
-        }
-        QLabel#headerTitle {
-            color: #303133;
-            font-size: 14px;
-            font-weight: bold;
-        }
-        QPushButton#windowControlBtn {
-            background: transparent;
-            border: none;
-            color: #909399;
-            font-size: 14px;
-        }
-        QPushButton#windowControlBtn:hover {
-            background: #F5F7FA;
-            color: #303133;
-        }
-
-        /* 左侧导航栏：文档 深黑蓝 #1a1d29，选中项蓝色 #2563eb */
-        QWidget#leftSidebar {
-            background: #1a1d29;
-        }
-        QWidget#navTitleRow {
-            background: #1a1d29;
-        }
-        QLabel#navTitle {
-            color: #ffffff;
-            font-size: 14px;
-            font-weight: bold;
-            background: transparent;
-        }
-        QFrame#navDivider {
-            background: #3d4152;
-        }
-        QListWidget#navList {
-            background: #1a1d29;
-            border: none;
-            outline: none;
-        }
-        QListWidget#navList::item {
-            color: #ffffff;
-            padding: 12px 20px;
-            border: none;
-            border-left: 3px solid transparent;
-            background: transparent;
-        }
-        QListWidget#navList::item:hover {
-            background: #252836;
-            color: #ffffff;
-        }
-        QListWidget#navList::item:selected {
-            background: #2563eb;
-            color: #ffffff;
-            border-left: 3px solid #1d4ed8;
-        }
-
-        /* 右侧内容区 */
-        QScrollArea#scrollArea {
-            background: #ffffff;
-            border: none;
-        }
-        QScrollArea#scrollArea QWidget {
-            background: #ffffff;
-        }
-        /* 内容区所有标签默认深色字（避免未设 objectName 的标签如“适用平台”显示为白字） */
-        QScrollArea#scrollArea QLabel {
-            color: #303133;
-        }
-
-        /* 页面标题 */
-        QLabel#pageTitle {
-            font-size: 18px;
-            font-weight: bold;
-            color: #303133;
-        }
-
-        /* 卡片：白底、浅灰边框、圆角 */
-        QFrame#card {
-            background: #ffffff;
-            border-radius: 8px;
-            border: 1px solid #DCDFE6;
-        }
-
-        /* 顶部提示条 - 文档 浅蓝 #e0f2fe，圆角4px */
-        QFrame#tipBar {
-            background: #e0f2fe;
-            border: 1px solid #bae6fd;
-            border-radius: 4px;
-        }
-        QFrame#tipBar QLabel {
-            color: #606266;
-        }
-        QFrame#tipBar QPushButton {
-            background: transparent;
-            border: none;
-            color: #909399;
-            font-size: 16px;
-        }
-        QFrame#tipBar QPushButton:hover {
-            color: #303133;
-        }
-
-        /* 算力余额警示文案（橘红色粗体） */
-        QLabel#balanceWarning {
-            font-size: 16px;
-            color: #E6A23C;
-            font-weight: bold;
-        }
-        /* 可用变量标签（浅蓝底深色字，保证常显不发白） */
-        QPushButton#variableBtn {
-            background-color: #A9D1ED;
-            border: none;
-            border-radius: 4px;
-            color: #303133;
-            padding: 6px 12px;
-            font-size: 12px;
-        }
-        QScrollArea#scrollArea QPushButton#variableBtn {
-            background-color: #A9D1ED;
-            color: #303133;
-        }
-        QPushButton#variableBtn:hover {
-            background-color: #7BAED9;
-            color: #ffffff;
-        }
-        QScrollArea#scrollArea QPushButton#variableBtn:hover {
-            background-color: #7BAED9;
-            color: #ffffff;
-        }
-
-        /* 内容区输入框、下拉框、多行文本：白底、浅灰边框、圆角 */
-        QScrollArea#scrollArea QLineEdit,
-        QScrollArea#scrollArea QComboBox,
-        QScrollArea#scrollArea QSpinBox,
-        QScrollArea#scrollArea QDateEdit,
-        QScrollArea#scrollArea QDateTimeEdit {
-            background: #ffffff;
-            border: 1px solid #DCDFE6;
-            border-radius: 4px;
-            color: #303133;
-            padding: 6px 10px;
-            min-height: 18px;
-        }
-        QScrollArea#scrollArea QLineEdit:focus,
-        QScrollArea#scrollArea QComboBox:focus,
-        QScrollArea#scrollArea QSpinBox:focus {
-            border: 1px solid #5B9BD5;
-        }
-        QScrollArea#scrollArea QComboBox::drop-down {
-            border: none;
-            background: transparent;
-            width: 20px;
-        }
-        QScrollArea#scrollArea QComboBox::down-arrow {
-            image: none;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-top: 5px solid #909399;
-            margin-right: 6px;
-            width: 0;
-            height: 0;
-        }
-        /* 下拉列表项：白底深色字（避免下拉内容为白字不可见） */
-        QComboBox QAbstractItemView {
-            background-color: #ffffff;
-            color: #303133;
-            selection-background-color: #E1EFF9;
-            selection-color: #303133;
-        }
-        QScrollArea#scrollArea QTextEdit {
-            background: #ffffff;
-            border: 1px solid #DCDFE6;
-            border-radius: 4px;
-            color: #303133;
-            padding: 8px;
-        }
-        QScrollArea#scrollArea QTextEdit:focus {
-            border: 1px solid #5B9BD5;
-        }
-
-        /* 标签页栏 - 文档 基础设置选中白底+浅灰边框，未选中浅灰背景 */
-        QTabWidget::pane {
-            border: 1px solid #e5e7eb;
-            border-radius: 4px;
-            border-top: none;
-            top: -1px;
-            background: #ffffff;
-        }
-        QTabBar::tab {
-            background: #f3f4f6;
-            color: #303133;
-            padding: 10px 20px;
-            margin-right: 4px;
-            border-radius: 4px 4px 0 0;
-        }
-        QTabBar::tab:selected {
-            background: #ffffff;
-            color: #303133;
-            font-weight: bold;
-            border: 1px solid #e5e7eb;
-            border-bottom: 1px solid #ffffff;
-        }
-        QTabBar::tab:hover:!selected {
-            color: #2563eb;
-        }
-
-        /* 卡片标题（各页统一） */
-        QLabel#cardTitle {
-            font-size: 14px;
-            font-weight: bold;
-            color: #303133;
-        }
-        /* 辅助说明文字 */
-        QLabel#hintLabel {
-            color: #909399;
-            font-size: 12px;
-        }
-
-        /* 算力余额 - 文档 浅蓝 #e0f2fe，圆角4px */
-        QFrame#balancePanel {
-            background: #e0f2fe;
-            border: 1px solid #bae6fd;
-            border-radius: 4px;
-        }
-
-        /* 红色警示条（不携带说明书等） */
-        QFrame#dangerCard {
-            background: #FEE8E7;
-            border: 1px solid #FBC4C4;
-            border-radius: 8px;
-        }
-        QFrame#dangerCard QLabel {
-            color: #A94442;
-        }
-
-        /* 复选框：开关风格，选中为柔和蓝 */
-        QCheckBox {
-            spacing: 8px;
-        }
-        QCheckBox::indicator {
-            width: 44px;
-            height: 22px;
-            border-radius: 11px;
-            background: #DCDFE6;
-            border: none;
-        }
-        QCheckBox::indicator:checked {
-            background: #5B9BD5;
-        }
-        QCheckBox::indicator:hover {
-            background: #C0C4CC;
-        }
-        QCheckBox::indicator:checked:hover {
-            background: #7BAED9;
-        }
-
-        /* 表格 */
-        QTableWidget {
-            background: #ffffff;
-            border: 1px solid #DCDFE6;
-            border-radius: 4px;
-            gridline-color: #EBEEF5;
-        }
-        QTableWidget::item {
-            padding: 8px;
-            color: #303133;
-        }
-        QTableWidget::item:selected {
-            background: #E1EFF9;
-            color: #303133;
-        }
-        QHeaderView::section {
-            background: #F5F7FA;
-            color: #606266;
-            padding: 10px 8px;
-            border: none;
-            border-bottom: 1px solid #EBEEF5;
-            border-right: 1px solid #EBEEF5;
-        }
-
-        /* 滚动条 */
-        QScrollBar:vertical {
-            background: #F5F7FA;
-            width: 8px;
-            border-radius: 4px;
-            margin: 0;
-        }
-        QScrollBar::handle:vertical {
-            background: #C0C4CC;
-            border-radius: 4px;
-            min-height: 30px;
-        }
-        QScrollBar::handle:vertical:hover {
-            background: #909399;
-        }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-            height: 0;
-        }
-
-        /* 底部操作栏 - 文档 按钮高度32px，保存配置 #22c55e */
-        QFrame#bottomBar {
-            background: #ffffff;
-            border-top: 1px solid #E4E7ED;
-        }
-        QPushButton#resetBtn {
-            background: #ffffff;
-            border: 1px solid #DCDFE6;
-            border-radius: 4px;
-            color: #303133;
-            font-size: 14px;
-            padding: 0 16px;
-            min-height: 32px;
-        }
-        QPushButton#resetBtn:hover {
-            background: #F5F7FA;
-            color: #2563eb;
-            border-color: #93c5fd;
-        }
-        QPushButton#saveBtn {
-            background: #22c55e;
-            border: none;
-            border-radius: 4px;
-            color: #ffffff;
-            font-size: 14px;
-            font-weight: bold;
-            padding: 0 16px;
-            min-height: 32px;
-        }
-        QPushButton#saveBtn:hover {
-            background: #16a34a;
-        }
-
-        /* 内容区次要按钮（恢复默认、清空、导出Excel 等）- 强制可见，避免发白 */
-        QPushButton#secondaryBtn {
-            background-color: #ffffff;
-            border: 1px solid #DCDFE6;
-            border-radius: 4px;
-            color: #606266;
-            padding: 5px 12px;
-        }
-        QPushButton#secondaryBtn:hover {
-            background-color: #F5F7FA;
-            color: #5B9BD5;
-            border-color: #C6E2FF;
-        }
-        QScrollArea#scrollArea QPushButton#secondaryBtn {
-            background-color: #ffffff;
-            color: #606266;
-            border: 1px solid #DCDFE6;
-        }
-        QScrollArea#scrollArea QPushButton#secondaryBtn:hover {
-            background-color: #F5F7FA;
-            color: #5B9BD5;
-        }
-
-        /* 主操作按钮（添加规则、添加说明书、查询、发送测试推送 等）- 强制蓝底白字可见 */
-        QPushButton#primaryBtn {
-            background-color: #5B9BD5;
-            border: none;
-            border-radius: 4px;
-            color: #ffffff;
-            padding: 8px 15px;
-        }
-        QPushButton#primaryBtn:hover {
-            background-color: #7BAED9;
-            color: #ffffff;
-        }
-        QScrollArea#scrollArea QPushButton#primaryBtn {
-            background-color: #5B9BD5;
-            color: #ffffff;
-            border: none;
-        }
-        QScrollArea#scrollArea QPushButton#primaryBtn:hover {
-            background-color: #7BAED9;
-            color: #ffffff;
-        }
-
-        /* 功能说明折叠按钮（三角图标） */
-        QPushButton#collapseBtn {
-            background: transparent;
-            border: none;
-            color: #909399;
-            font-size: 12px;
-        }
-        QPushButton#collapseBtn:hover {
-            color: #606266;
-        }
-
-        /* 温和色强调链接蓝 */
-        QLabel#linkLabel {
-            color: #5B9BD5;
-            font-size: 12px;
-        }
-        /* 空状态提示（暂无数据） */
-        QLabel#emptyStateLabel {
-            color: #909399;
-            font-size: 14px;
-        }
-        /* 线索列表：日期范围单框（一个框内 开始 至 结束） */
-        QFrame#dateRangeBox {
-            background: #ffffff;
-            border: 1px solid #DCDFE6;
-            border-radius: 4px;
-            min-height: 18px;
-        }
-        QFrame#dateRangeBox QDateEdit {
-            border: none;
-            background: transparent;
-            min-width: 90px;
-        }
-        QFrame#dateRangeBox QLabel {
-            color: #909399;
-        }
-
-        /* 日历弹层：强制深色数字与白底，避免受全局样式影响导致数字发白不可见 */
-        QCalendarWidget QWidget {
-            background-color: #ffffff;
-            color: #303133;
-        }
-        QCalendarWidget QTableView {
-            background-color: #ffffff;
-            color: #303133;
-            gridline-color: #EBEEF5;
-        }
-        QCalendarWidget QTableView::item {
-            color: #303133;
-            background-color: #ffffff;
-        }
-        QCalendarWidget QTableView::item:hover {
-            background-color: #F5F7FA;
-            color: #303133;
-        }
-        QCalendarWidget QTableView::item:selected {
-            background-color: #5B9BD5;
-            color: #ffffff;
-        }
-        QCalendarWidget QToolButton {
-            background-color: #ffffff;
-            color: #303133;
-            border: none;
-        }
-        QCalendarWidget QMenu {
-            background-color: #ffffff;
-            color: #303133;
-        }
-        QCalendarWidget QSpinBox {
-            background-color: #ffffff;
-            color: #303133;
-            border: 1px solid #DCDFE6;
-        }
-    )QSS"));
-}
-
-/**
  * @brief 构建简易AI设置页面
  * @return 页面组件指针
  */
@@ -783,7 +366,7 @@ QWidget* SettingDialog::buildSimpleAIPage()
     layout->setSpacing(20);
 
     // 页面标题（文档：简易AI，左对齐黑色粗体）
-    auto* title = new QLabel(QStringLiteral("简易AI"), page);
+    auto* title = new QLabel(QStringLiteral("简易AI（支持FastGPT/Dify）"), page);
     title->setObjectName("pageTitle");
     layout->addWidget(title);
 
@@ -794,12 +377,12 @@ QWidget* SettingDialog::buildSimpleAIPage()
     auto* tipLayout = new QHBoxLayout(tipBar);
     tipLayout->setContentsMargins(12, 8, 12, 8);
     tipLayout->setSpacing(10);
-    auto* tipIcon = new QLabel(QStringLiteral("✓"), tipBar);
+    auto* tipIcon = new QLabel(QStringLiteral("✅️"), tipBar);
     tipIcon->setObjectName("tipBarIcon");
     tipIcon->setStyleSheet("color: #67C23A; font-size: 16px; font-weight: bold;");
-    auto* tipText = new QLabel(QStringLiteral("携带商品说明书：简易AI可对接FastGPT/Dify等知识库，并携带本地「商品说明书」内容一起发送给AI。"), tipBar);
+    auto* tipText = new QLabel(QStringLiteral("携带商品说明书：简易AI可对接 FastGPT/Dify 等知识库，并携带本地「商品说明书」内容一起发送给AI。"), tipBar);
     tipText->setWordWrap(true);
-    auto* tipClose = new QPushButton(QStringLiteral("×"), tipBar);
+    auto* tipClose = new QPushButton(QStringLiteral("❌"), tipBar);
     tipClose->setFixedSize(24, 24);
     tipClose->setCursor(Qt::PointingHandCursor);
     tipLayout->addWidget(tipIcon);
@@ -866,18 +449,45 @@ QWidget* SettingDialog::buildSimpleAIPage()
     manualTabLayout->addWidget(manualCard, 1);
 
     auto* style = this->style();
-    tabWidget->addTab(basicTab, style->standardIcon(QStyle::SP_FileDialogDetailedView), QStringLiteral("基础设置"));
-    tabWidget->addTab(manualTab, style->standardIcon(QStyle::SP_FileIcon), QStringLiteral("商品说明书"));
+    const QIcon IconConfig = QIcon(":res/Settings/BasicConfig.png");
+    tabWidget->addTab(basicTab, IconConfig, QStringLiteral("基础设置"));
+    // tabWidget->addTab(basicTab, style->standardIcon(QStyle::SP_FileDialogDetailedView), QStringLiteral("基础设置"));
+    const QIcon IconManual = QIcon(":res/Settings/ProductManual.png");
+    // tabWidget->addTab(manualTab, style->standardIcon(QStyle::SP_FileIcon), QStringLiteral("商品说明书"));
+    tabWidget->addTab(manualTab, IconManual, QStringLiteral("商品说明书"));
     layout->addWidget(tabWidget);
 
     // 上半部分：双列卡片（文档：左卡片=基础配置模块，右卡片=模型与余额模块）
     auto* upperRow = new QHBoxLayout();
     upperRow->setSpacing(20);
 
-    auto addCardTitleRow = [this, style](QVBoxLayout* cardLayout, QWidget* parent, QStyle::StandardPixmap pix, const QString& text) {
+    // auto addCardTitleRow = [this, style](QVBoxLayout* cardLayout, QWidget* parent, QStyle::StandardPixmap pix, const QString& text) {
+    //     auto* row = new QHBoxLayout();
+    //     auto* iconLbl = new QLabel(parent);
+    //     iconLbl->setPixmap(style->standardIcon(pix).pixmap(16, 16));
+    //     auto* titleLbl = new QLabel(text, parent);
+    //     titleLbl->setObjectName("cardTitle");
+    //     row->addWidget(iconLbl);
+    //     row->addWidget(titleLbl);
+    //     row->addStretch();
+    //     cardLayout->addLayout(row);
+    // };
+
+    // 修改lambda函数，使用资源图片替代系统图标
+    auto addCardTitleRow = [this, style](QVBoxLayout* cardLayout, QWidget* parent, const QString& iconPath, const QString& text) {
         auto* row = new QHBoxLayout();
         auto* iconLbl = new QLabel(parent);
-        iconLbl->setPixmap(style->standardIcon(pix).pixmap(16, 16));
+
+        // 使用资源图片替代系统图标
+        QPixmap iconPixmap(iconPath);
+        if (!iconPixmap.isNull()) {
+            // 加载并缩放资源图片
+            iconLbl->setPixmap(iconPixmap.scaled(16, 16, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        } else {
+            // 如果资源图片加载失败，使用后备系统图标
+            iconLbl->setPixmap(style->standardIcon(QStyle::SP_FileIcon).pixmap(16, 16));
+        }
+
         auto* titleLbl = new QLabel(text, parent);
         titleLbl->setObjectName("cardTitle");
         row->addWidget(iconLbl);
@@ -891,11 +501,13 @@ QWidget* SettingDialog::buildSimpleAIPage()
     auto* leftLayout = new QVBoxLayout(leftCard);
     leftLayout->setContentsMargins(20, 15, 20, 15);
     leftLayout->setSpacing(15);
-    addCardTitleRow(leftLayout, leftCard, QStyle::SP_FileDialogDetailedView, QStringLiteral("基础配置"));
+    // addCardTitleRow(leftLayout, leftCard, QStyle::SP_FileDialogDetailedView, QStringLiteral("基础配置"));
+    addCardTitleRow(leftLayout, leftCard, ":/res/Settings/BasicConfig.png", QStringLiteral("基础配置"));
     auto* enableLayout = new QHBoxLayout();
     auto* enableLabel = new QLabel(QStringLiteral("启用简易AI"), leftCard);
     auto* enableSwitch = new QCheckBox(leftCard);
     enableSwitch->setChecked(false);
+
     enableLayout->addWidget(enableLabel);
     enableLayout->addWidget(enableSwitch);
     enableLayout->addStretch();
@@ -903,19 +515,25 @@ QWidget* SettingDialog::buildSimpleAIPage()
     enableDesc->setObjectName("hintLabel");
     leftLayout->addLayout(enableLayout);
     leftLayout->addWidget(enableDesc);
-    addCardTitleRow(leftLayout, leftCard, QStyle::SP_FileDialogContentsView, QStringLiteral("API令牌"));
+    // addCardTitleRow(leftLayout, leftCard, QStyle::SP_FileDialogContentsView, QStringLiteral("API令牌"));
+    addCardTitleRow(leftLayout, leftCard, ":/res/Settings/APIToken.png", QStringLiteral("API令牌"));
+
     auto* tokenInput = new QLineEdit(leftCard);
     tokenInput->setPlaceholderText(QStringLiteral("请输入API令牌"));
     tokenInput->setEchoMode(QLineEdit::Password);
     auto* tokenBtnRow = new QHBoxLayout();
     tokenBtnRow->addWidget(tokenInput, 1);
     auto* tokenEyeBtn = new QPushButton(leftCard);
-    tokenEyeBtn->setIcon(style->standardIcon(QStyle::SP_MessageBoxQuestion));
+    // tokenEyeBtn->setIcon(style->standardIcon(QStyle::SP_MessageBoxQuestion));
+    const QIcon IconQuestion = QIcon(":/res/Settings/Question.png");
+    tokenEyeBtn->setIcon(IconQuestion);
     tokenEyeBtn->setFixedSize(28, 28);
     tokenEyeBtn->setObjectName("secondaryBtn");
     tokenEyeBtn->setFlat(true);
     auto* tokenRefreshBtn = new QPushButton(leftCard);
-    tokenRefreshBtn->setIcon(style->standardIcon(QStyle::SP_BrowserReload));
+    // tokenRefreshBtn->setIcon(style->standardIcon(QStyle::SP_BrowserReload));
+    const QIcon IconRefresh = QIcon(":/res/Settings/Refresh.png");
+    tokenRefreshBtn->setIcon(IconRefresh);
     tokenRefreshBtn->setFixedSize(28, 28);
     tokenRefreshBtn->setObjectName("secondaryBtn");
     tokenRefreshBtn->setFlat(true);
@@ -933,7 +551,8 @@ QWidget* SettingDialog::buildSimpleAIPage()
     auto* rightLayout = new QVBoxLayout(rightCard);
     rightLayout->setContentsMargins(20, 15, 20, 15);
     rightLayout->setSpacing(15);
-    addCardTitleRow(rightLayout, rightCard, QStyle::SP_ArrowUp, QStringLiteral("模型选择"));
+    // addCardTitleRow(rightLayout, rightCard, QStyle::SP_ArrowUp, QStringLiteral("模型选择"));
+    addCardTitleRow(rightLayout, rightCard, ":/res/Settings/ModelSelect.png", QStringLiteral("模型选择"));
     auto* modelLabel = new QLabel(QStringLiteral("AI模型"), rightCard);
     auto* modelCombo = new QComboBox(rightCard);
     modelCombo->addItem(QStringLiteral("通义千问 Plus（推荐）"));
@@ -943,7 +562,8 @@ QWidget* SettingDialog::buildSimpleAIPage()
     modelCombo->addItem(QStringLiteral("自定义模型"));
     rightLayout->addWidget(modelLabel);
     rightLayout->addWidget(modelCombo);
-    addCardTitleRow(rightLayout, rightCard, QStyle::SP_MessageBoxInformation, QStringLiteral("算力余额"));
+    // addCardTitleRow(rightLayout, rightCard, QStyle::SP_MessageBoxInformation, QStringLiteral("算力余额"));
+    addCardTitleRow(rightLayout, rightCard, ":/res/Settings/ComputingPowerBalance.png", QStringLiteral("算力余额"));
     auto* balancePanel = new QFrame(rightCard);
     balancePanel->setObjectName("balancePanel");
     balancePanel->setMinimumHeight(80);
@@ -959,7 +579,8 @@ QWidget* SettingDialog::buildSimpleAIPage()
     balanceLeft->addWidget(balanceDetails);
     balancePanelLayout->addLayout(balanceLeft, 1);
     auto* balanceRefreshBtn = new QPushButton(balancePanel);
-    balanceRefreshBtn->setIcon(style->standardIcon(QStyle::SP_BrowserReload));
+    // balanceRefreshBtn->setIcon(style->standardIcon(QStyle::SP_BrowserReload));
+    balanceRefreshBtn->setIcon(IconRefresh);
     balanceRefreshBtn->setFixedSize(28, 28);
     balanceRefreshBtn->setObjectName("secondaryBtn");
     balanceRefreshBtn->setFlat(true);
@@ -974,7 +595,8 @@ QWidget* SettingDialog::buildSimpleAIPage()
     auto* promptLayout = new QVBoxLayout(promptCard);
     promptLayout->setContentsMargins(20, 15, 20, 15);
     promptLayout->setSpacing(15);
-    addCardTitleRow(promptLayout, promptCard, QStyle::SP_FileIcon, QStringLiteral("系统提示词（System Prompt）"));
+    // addCardTitleRow(promptLayout, promptCard, QStyle::SP_FileIcon, QStringLiteral("系统提示词（System Prompt）"));
+    addCardTitleRow(promptLayout, promptCard, ":/res/Settings/SystemPrompt.png", QStringLiteral("系统提示词（System Prompt）"));
     auto* platformLabel = new QLabel(QStringLiteral("适用平台"), promptCard);
     auto* platformCombo = new QComboBox(promptCard);
     platformCombo->addItem(QStringLiteral("全局默认"));
@@ -1064,7 +686,7 @@ QWidget* SettingDialog::buildAIConfigPage()
     layout->setSpacing(20);
 
     // 页面标题
-    auto* title = new QLabel(QStringLiteral("AI配置 (OpenAI通用格式)"), page);
+    auto* title = new QLabel(QStringLiteral("AI配置（OpenAI通用格式）"), page);
     title->setObjectName("pageTitle");
     layout->addWidget(title);
 
@@ -1897,4 +1519,3 @@ QWidget* SettingDialog::buildLeadListPage()
 
     return page;
 }
-

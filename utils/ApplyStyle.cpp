@@ -749,3 +749,501 @@ QString ApplyStyle::logPageStyle()
         }
     )QSS");
 }
+
+QString ApplyStyle::settingsStyle()
+{
+    return QStringLiteral(R"QSS(
+        /* 主窗口：白色主内容区 */
+        QDialog {
+            background: #ffffff;
+        }
+
+        /* 顶部标题栏：白底深色字 */
+        QFrame#header {
+            background: #ffffff;
+            border-bottom: 1px solid #E4E7ED;
+        }
+        QLabel#headerTitle {
+            color: #303133;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        QPushButton#windowControlBtn {
+            background: transparent;
+            border: none;
+            color: #909399;
+            font-size: 14px;
+        }
+        QPushButton#windowControlBtn:hover {
+            background: #F5F7FA;
+            color: #303133;
+        }
+
+        /* 左侧导航栏：文档 深黑蓝 #1a1d29，选中项蓝色 #2563eb */
+        QWidget#leftSidebar {
+            background: #1a1d29;
+        }
+        QWidget#navTitleRow {
+            background: #1a1d29;
+        }
+        QLabel#navTitle {
+            color: #ffffff;
+            font-size: 14px;
+            font-weight: bold;
+            background: transparent;
+        }
+        QFrame#navDivider {
+            background: #3d4152;
+        }
+        QListWidget#navList {
+            background: #1a1d29;
+            border: none;
+            outline: none;
+        }
+        QListWidget#navList::item {
+            color: #ffffff;
+            padding: 12px 20px;
+            border: none;
+            border-left: 3px solid transparent;
+            background: transparent;
+        }
+        QListWidget#navList::item:hover {
+            background: #252836;
+            color: #ffffff;
+        }
+        QListWidget#navList::item:selected {
+            background: #2563eb;
+            color: #ffffff;
+            border-left: 3px solid #1d4ed8;
+        }
+
+        /* 右侧内容区 */
+        QScrollArea#scrollArea {
+            background: #ffffff;
+            border: none;
+        }
+        QScrollArea#scrollArea QWidget {
+            background: #ffffff;
+        }
+        /* 内容区所有标签默认深色字（避免未设 objectName 的标签如“适用平台”显示为白字） */
+        QScrollArea#scrollArea QLabel {
+            color: #303133;
+        }
+
+        /* 页面标题 */
+        QLabel#pageTitle {
+            font-size: 18px;
+            font-weight: bold;
+            color: #303133;
+        }
+
+        /* 卡片：白底、浅灰边框、圆角 */
+        QFrame#card {
+            background: #ffffff;
+            border-radius: 8px;
+            border: 1px solid #DCDFE6;
+        }
+
+        /* 顶部提示条 - 文档 浅蓝 #e0f2fe，圆角4px */
+        QFrame#tipBar {
+            background: #e0f2fe;
+            border: 1px solid #bae6fd;
+            border-radius: 4px;
+        }
+        QFrame#tipBar QLabel {
+            color: #606266;
+        }
+        QFrame#tipBar QPushButton {
+            background: transparent;
+            border: none;
+            color: #909399;
+            font-size: 16px;
+        }
+        QFrame#tipBar QPushButton:hover {
+            color: #303133;
+        }
+
+        /* 算力余额警示文案（橘红色粗体） */
+        QLabel#balanceWarning {
+            font-size: 16px;
+            color: #E6A23C;
+            font-weight: bold;
+        }
+        /* 可用变量标签（浅蓝底深色字，保证常显不发白） */
+        QPushButton#variableBtn {
+            background-color: #A9D1ED;
+            border: none;
+            border-radius: 4px;
+            color: #303133;
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+        QScrollArea#scrollArea QPushButton#variableBtn {
+            background-color: #A9D1ED;
+            color: #303133;
+        }
+        QPushButton#variableBtn:hover {
+            background-color: #7BAED9;
+            color: #ffffff;
+        }
+        QScrollArea#scrollArea QPushButton#variableBtn:hover {
+            background-color: #7BAED9;
+            color: #ffffff;
+        }
+
+        /* 内容区输入框、下拉框、多行文本：白底、浅灰边框、圆角 */
+        QScrollArea#scrollArea QLineEdit,
+        QScrollArea#scrollArea QComboBox,
+        QScrollArea#scrollArea QSpinBox,
+        QScrollArea#scrollArea QDateEdit,
+        QScrollArea#scrollArea QDateTimeEdit {
+            background: #ffffff;
+            border: 1px solid #DCDFE6;
+            border-radius: 4px;
+            color: #303133;
+            padding: 6px 10px;
+            min-height: 18px;
+        }
+        QScrollArea#scrollArea QLineEdit:focus,
+        QScrollArea#scrollArea QComboBox:focus,
+        QScrollArea#scrollArea QSpinBox:focus {
+            border: 1px solid #5B9BD5;
+        }
+        QScrollArea#scrollArea QComboBox::drop-down {
+            border: none;
+            background: transparent;
+            width: 20px;
+        }
+        QScrollArea#scrollArea QComboBox::down-arrow {
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid #909399;
+            margin-right: 6px;
+            width: 0;
+            height: 0;
+        }
+        /* 下拉列表项：白底深色字（避免下拉内容为白字不可见） */
+        QComboBox QAbstractItemView {
+            background-color: #ffffff;
+            color: #303133;
+            selection-background-color: #E1EFF9;
+            selection-color: #303133;
+        }
+        QScrollArea#scrollArea QTextEdit {
+            background: #ffffff;
+            border: 1px solid #DCDFE6;
+            border-radius: 4px;
+            color: #303133;
+            padding: 8px;
+        }
+        QScrollArea#scrollArea QTextEdit:focus {
+            border: 1px solid #5B9BD5;
+        }
+
+        /* 标签页栏 - 文档 基础设置选中白底+浅灰边框，未选中浅灰背景 */
+        QTabWidget::pane {
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+            border-top: none;
+            top: -1px;
+            background: #ffffff;
+        }
+        QTabBar::tab {
+            background: #f3f4f6;
+            color: #303133;
+            padding: 10px 20px;
+            margin-right: 4px;
+            border-radius: 4px 4px 0 0;
+        }
+        QTabBar::tab:selected {
+            background: #ffffff;
+            color: #303133;
+            font-weight: bold;
+            border: 1px solid #e5e7eb;
+            border-bottom: 1px solid #ffffff;
+        }
+        QTabBar::tab:hover:!selected {
+            color: #2563eb;
+        }
+
+        /* 卡片标题（各页统一） */
+        QLabel#cardTitle {
+            font-size: 14px;
+            font-weight: bold;
+            color: #303133;
+        }
+        /* 辅助说明文字 */
+        QLabel#hintLabel {
+            color: #909399;
+            font-size: 12px;
+        }
+
+        /* 算力余额 - 文档 浅蓝 #e0f2fe，圆角4px */
+        QFrame#balancePanel {
+            background: #e0f2fe;
+            border: 1px solid #bae6fd;
+            border-radius: 4px;
+        }
+
+        /* 红色警示条（不携带说明书等） */
+        QFrame#dangerCard {
+            background: #FEE8E7;
+            border: 1px solid #FBC4C4;
+            border-radius: 8px;
+        }
+        QFrame#dangerCard QLabel {
+            color: #A94442;
+        }
+
+        /* 复选框：开关风格，选中为柔和蓝 */
+        QCheckBox {
+            spacing: 8px;
+        }
+        QCheckBox::indicator {
+            width: 44px;
+            height: 22px;
+            border-radius: 11px;
+            background: #DCDFE6;
+            border: none;
+        }
+        QCheckBox::indicator:checked {
+            background: #5B9BD5;
+        }
+        QCheckBox::indicator:hover {
+            background: #C0C4CC;
+        }
+        QCheckBox::indicator:checked:hover {
+            background: #7BAED9;
+        }
+
+        /* 表格 */
+        QTableWidget {
+            background: #ffffff;
+            border: 1px solid #DCDFE6;
+            border-radius: 4px;
+            gridline-color: #EBEEF5;
+        }
+        QTableWidget::item {
+            padding: 8px;
+            color: #303133;
+        }
+        QTableWidget::item:selected {
+            background: #E1EFF9;
+            color: #303133;
+        }
+        QHeaderView::section {
+            background: #F5F7FA;
+            color: #606266;
+            padding: 10px 8px;
+            border: none;
+            border-bottom: 1px solid #EBEEF5;
+            border-right: 1px solid #EBEEF5;
+        }
+
+        /* 滚动条 */
+        QScrollBar:vertical {
+            background: #F5F7FA;
+            width: 8px;
+            border-radius: 4px;
+            margin: 0;
+        }
+        QScrollBar::handle:vertical {
+            background: #C0C4CC;
+            border-radius: 4px;
+            min-height: 30px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #909399;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0;
+        }
+
+        /* 底部操作栏 - 文档 按钮高度32px，保存配置 #22c55e */
+        QFrame#bottomBar {
+            background: #ffffff;
+            border-top: 1px solid #E4E7ED;
+        }
+        QPushButton#resetBtn {
+            background: #ffffff;
+            border: 1px solid #DCDFE6;
+            border-radius: 4px;
+            color: #303133;
+            font-size: 14px;
+            padding: 0 16px;
+            min-height: 32px;
+        }
+        QPushButton#resetBtn:hover {
+            background: #F5F7FA;
+            color: #2563eb;
+            border-color: #93c5fd;
+        }
+        QPushButton#saveBtn {
+            background: #22c55e;
+            border: none;
+            border-radius: 4px;
+            color: #ffffff;
+            font-size: 14px;
+            font-weight: bold;
+            padding: 0 16px;
+            min-height: 32px;
+        }
+        QPushButton#saveBtn:hover {
+            background: #16a34a;
+        }
+
+        /* 内容区次要按钮（恢复默认、清空、导出Excel 等）- 强制可见，避免发白 */
+        QPushButton#secondaryBtn {
+            background-color: #ffffff;
+            border: 1px solid #DCDFE6;
+            border-radius: 4px;
+            color: #606266;
+            padding: 5px 12px;
+        }
+        QPushButton#secondaryBtn:hover {
+            background-color: #F5F7FA;
+            color: #5B9BD5;
+            border-color: #C6E2FF;
+        }
+        QScrollArea#scrollArea QPushButton#secondaryBtn {
+            background-color: #ffffff;
+            color: #606266;
+            border: 1px solid #DCDFE6;
+        }
+        QScrollArea#scrollArea QPushButton#secondaryBtn:hover {
+            background-color: #F5F7FA;
+            color: #5B9BD5;
+        }
+
+        /* 主操作按钮（添加规则、添加说明书、查询、发送测试推送 等）- 强制蓝底白字可见 */
+        QPushButton#primaryBtn {
+            background-color: #5B9BD5;
+            border: none;
+            border-radius: 4px;
+            color: #ffffff;
+            padding: 8px 15px;
+        }
+        QPushButton#primaryBtn:hover {
+            background-color: #7BAED9;
+            color: #ffffff;
+        }
+        QScrollArea#scrollArea QPushButton#primaryBtn {
+            background-color: #5B9BD5;
+            color: #ffffff;
+            border: none;
+        }
+        QScrollArea#scrollArea QPushButton#primaryBtn:hover {
+            background-color: #7BAED9;
+            color: #ffffff;
+        }
+
+        /* 功能说明折叠按钮（三角图标） */
+        QPushButton#collapseBtn {
+            background: transparent;
+            border: none;
+            color: #909399;
+            font-size: 12px;
+        }
+        QPushButton#collapseBtn:hover {
+            color: #606266;
+        }
+
+        /* 温和色强调链接蓝 */
+        QLabel#linkLabel {
+            color: #5B9BD5;
+            font-size: 12px;
+        }
+        /* 空状态提示（暂无数据） */
+        QLabel#emptyStateLabel {
+            color: #909399;
+            font-size: 14px;
+        }
+        /* 线索列表：日期范围单框（一个框内 开始 至 结束） */
+        QFrame#dateRangeBox {
+            background: #ffffff;
+            border: 1px solid #DCDFE6;
+            border-radius: 4px;
+            min-height: 18px;
+        }
+        QFrame#dateRangeBox QDateEdit {
+            border: none;
+            background: transparent;
+            min-width: 90px;
+        }
+        QFrame#dateRangeBox QLabel {
+            color: #909399;
+        }
+
+        /* 日历弹层：强制深色数字与白底，避免受全局样式影响导致数字发白不可见 */
+        QCalendarWidget QWidget {
+            background-color: #ffffff;
+            color: #303133;
+        }
+        QCalendarWidget QTableView {
+            background-color: #ffffff;
+            color: #303133;
+            gridline-color: #EBEEF5;
+        }
+        QCalendarWidget QTableView::item {
+            color: #303133;
+            background-color: #ffffff;
+        }
+        QCalendarWidget QTableView::item:hover {
+            background-color: #F5F7FA;
+            color: #303133;
+        }
+        QCalendarWidget QTableView::item:selected {
+            background-color: #5B9BD5;
+            color: #ffffff;
+        }
+        QCalendarWidget QToolButton {
+            background-color: #ffffff;
+            color: #303133;
+            border: none;
+        }
+        QCalendarWidget QMenu {
+            background-color: #ffffff;
+            color: #303133;
+        }
+        QCalendarWidget QSpinBox {
+            background-color: #ffffff;
+            color: #303133;
+            border: 1px solid #DCDFE6;
+        }
+    )QSS");
+}
+
+QString ApplyStyle::settingsLeftNavStyle()
+{
+    const int iconSize = 24;
+    return QString(R"(
+        QListWidget {
+            background-color: transparent;
+            border: none;
+            outline: none;
+        }
+        QListWidget::item {
+            height: %1px;               /* 增加列表项高度 */
+            padding-left: 18px;         /* 增加左边内边距，增加图标与文字间距 */
+            padding-right: 12px;
+            padding-top: 10px;          /* 增加上下内边距 */
+            padding-bottom: 10px;
+            margin: 2px 8px;            /* 增加项之间的间距 */
+            border-radius: 6px;
+            color: white;             /* 设置文字颜色 */
+            font-size: 11pt;            /* 再次确保字体大小 */
+        }
+        QListWidget::item:selected {
+            background-color: rgba(0, 120, 212, 0.1);
+            color: #0078d4;
+            font-weight: 500;
+        }
+        QListWidget::item:hover:!selected {
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+        QListWidget::item:disabled {
+            color: #999999;
+        }
+    )").arg(iconSize + 20);
+}

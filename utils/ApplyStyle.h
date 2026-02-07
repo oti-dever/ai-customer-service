@@ -30,6 +30,11 @@ public:
     // 日志管理页
     static QString logPageStyle();
 
+    // 设置对话框样式
+    static QString settingsStyle();
+    // 设置界面左侧导航栏
+    static QString settingsLeftNavStyle();
+
 private:
     ApplyStyle() = delete; // 纯静态类，禁止实例化
     ~ApplyStyle() = delete;

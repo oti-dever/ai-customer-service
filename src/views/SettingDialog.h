@@ -103,11 +103,6 @@ private:
     QFrame* makeCard(QWidget* parent);
 
     /**
-     * @brief 应用样式表
-     */
-    void applyStyle();
-
-    /**
      * @brief 处理导航项选择变化
      * @param index 选中的索引
      */
