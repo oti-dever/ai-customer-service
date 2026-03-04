@@ -178,7 +178,7 @@ QWidget *MainWindow::buildLeftSidebar()
 
     const QIcon iconReception = qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation);
     auto* itemReception = new QStandardItem(iconReception, QStringLiteral("聚合接待"));
-    itemReception->setData(QStringLiteral("reception"), PlatformIdRole);
+    itemReception->setData(QStringLiteral("aggregate"), PlatformIdRole);
     itemReception->setData(false, IsGroupRole);
     itemReception->setFlags(itemReception->flags() & ~Qt::ItemIsDropEnabled);
     manageConsole->appendRow(itemReception);
@@ -338,7 +338,11 @@ void MainWindow::onPlatformTreeSelectionChanged()
         showSystemReadyPage();
         return;
     }
-    if (id == QLatin1String("manage") || id == QLatin1String("robot") || id == QLatin1String("reception")) {
+    if (id == QLatin1String("aggregate")) {
+        openAggregateChatForm();
+        return;
+    }
+    if (id == QLatin1String("manage") || id == QLatin1String("robot")) {
         showPlaceholderPage(idx.data(Qt::DisplayRole).toString());
         return;
     }
@@ -455,7 +459,6 @@ QWidget *MainWindow::buildReadyPage()
     return center;
 }
 
-
 void MainWindow::openAddWindowDialog()
 {
     AddWindowDialog dlg(this);
@@ -476,6 +479,18 @@ void MainWindow::openAddWindowDialog()
     }
     m_centerStack->setCurrentWidget(m_embedPage);
     m_embedContainer->setEmbeddedHandle(m_embeddedHandle);
+}
+
+void MainWindow::openAggregateChatForm()
+{
+    if (!m_aggregateChatForm) {
+        m_aggregateChatForm = new AggregateChatForm(nullptr);
+        m_aggregateChatForm->setAttribute(Qt::WA_DeleteOnClose, true);
+        connect(m_aggregateChatForm, &QObject::destroyed, this, [this]() { m_aggregateChatForm = nullptr; });
+    }
+    m_aggregateChatForm->show();
+    m_aggregateChatForm->raise();
+    m_aggregateChatForm->activateWindow();
 }
 
 EmbeddedWindowContainer::EmbeddedWindowContainer(QWidget* parent)

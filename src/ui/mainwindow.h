@@ -6,6 +6,7 @@
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QTreeView>
+#include "aggregatechatform.h"
 
 QT_BEGIN_NAMESPACE
 class QStackedWidget;
@@ -13,6 +14,8 @@ class QStandardItemModel;
 class QTreeView;
 class QLabel;
 QT_END_NAMESPACE
+
+class AggregateChatForm;
 
 class EmbeddedWindowContainer : public QWidget
 {
@@ -44,6 +47,7 @@ private:
     QWidget* buildReadyPage();
     void setupStyles();
     void openAddWindowDialog();
+    void openAggregateChatForm();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -54,7 +58,6 @@ private slots:
 
 private:
     QString m_username;
-
     QStackedWidget* m_centerStack = nullptr;
     QStandardItemModel* m_platformTreeModel = nullptr;
     QTreeView* m_platformTree = nullptr;
@@ -69,6 +72,7 @@ private:
     QWidget* m_embedPage = nullptr;
     EmbeddedWindowContainer* m_embedContainer = nullptr;
     quintptr m_embeddedHandle = 0;
+    AggregateChatForm* m_aggregateChatForm = nullptr;
 };
 
 #endif // MAINWINDOW_H
