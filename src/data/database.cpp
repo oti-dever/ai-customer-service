@@ -47,19 +47,50 @@ bool Database::runMigrations()
 {
     QSqlQuery q(connection());
 
-    // users 表
-    if (!q.exec(
+    const char* migrations[] = {
         "CREATE TABLE IF NOT EXISTS users ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  username TEXT UNIQUE NOT NULL,"
         "  password_hash TEXT NOT NULL,"
         "  salt TEXT NOT NULL,"
         "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
-        ")")) {
-        qWarning() << "创建users表失败:" << q.lastError().text();
-        return false;
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS conversations ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  platform TEXT NOT NULL,"
+        "  platform_conversation_id TEXT,"
+        "  customer_name TEXT NOT NULL,"
+        "  last_message TEXT DEFAULT '',"
+        "  last_time DATETIME,"
+        "  unread_count INTEGER DEFAULT 0,"
+        "  status TEXT DEFAULT 'open',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  UNIQUE(platform, platform_conversation_id)"
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  conversation_id INTEGER NOT NULL,"
+        "  direction TEXT NOT NULL,"
+        "  content TEXT NOT NULL,"
+        "  sender TEXT NOT NULL,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  platform_msg_id TEXT,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
+        ")",
+
+        "CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations(status)",
+    };
+
+    for (const char* sql : migrations) {
+        if (!q.exec(sql)) {
+            qWarning() << "数据库迁移失败:" << q.lastError().text() << "\nSQL:" << sql;
+            return false;
+        }
     }
-    else qDebug() << "users表创建成功";
+    qInfo() << "数据库迁移完成（共" << std::size(migrations) << "条）";
 
     return true;
 }
