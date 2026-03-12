@@ -1,0 +1,22 @@
+<RCC>
+    <qresource prefix="/">
+        <file>app_icon.svg</file>
+        <file>add_new_window_icon.svg</file>
+        <file>refresh_platform_list_icon.svg</file>
+        <file>quick_launch_application_icon.svg</file>
+        <file>click_to_select_platform_icon.svg</file>
+        <file>auto_embed_window_icon.svg</file>
+        <file>system_ready_icon.svg</file>
+        <file>rocket_icon.svg</file>
+        <file>platform_management_icon.svg</file>
+        <file>back_end_management.svg</file>
+        <file>qianniu_logo.svg</file>
+        <file>pinduoduo_logo.svg</file>
+        <file>doudian_logo.svg</file>
+        <file>wechat_logo.svg</file>
+        <file>edge_logo.svg</file>
+        <file>chrome_logo.svg</file>
+        <file>aggregate_reception_icons/home_icon.svg</file>
+        <file>aggregate_reception_icons/message_icon.svg</file>
+    </qresource>
+</RCC>
