@@ -16,12 +16,15 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS
     Core
     Gui
+    Svg
     Widgets
     Sql
 )
 
 set(SOURCES
     src/main.cpp
+    resources/app_resources.qrc
+    resources/windows_app_icon.rc
     src/data/database.cpp
     src/data/userdao.cpp
     src/data/conversationdao.cpp
@@ -74,6 +77,7 @@ target_include_directories(demo1 PRIVATE
 target_link_libraries(demo1 PRIVATE
     Qt6::Core
     Qt6::Gui
+    Qt6::Svg
     Qt6::Widgets
     Qt6::Sql
 )

@@ -1,19 +1,173 @@
 #include "mainwindow.h"
-#include "../utils/applystyle.h"
 #include "addwindowdialog.h"
-#include <QStyledItemDelegate>
-#include <QTreeView>
-#include <QPainter>
-#include <QToolButton>
+#include "aggregatechatform.h"
+#include "../utils/applystyle.h"
+#include <QApplication>
+#include <QContextMenuEvent>
+#include <QCursor>
+#include <QDateTime>
+#include <QDialog>
+#include <QGuiApplication>
 #include <QHBoxLayout>
-#include <qapplication.h>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPushButton>
+#include <QRandomGenerator>
+#include <QScreen>
+#include <QSettings>
+#include <QStatusBar>
+#include <QStyledItemDelegate>
+#include <QTimer>
+#include <QToolButton>
+#include <QTreeView>
+#include <QVBoxLayout>
+#include <QWindow>
+
+// ==================== Tree roles & delegate ====================
 
 namespace {
 enum PlatformTreeRole {
     PlatformIdRole = Qt::UserRole,
     IsGroupRole,
-    DotColorRole
+    DotColorRole,
+    IsCustomerServiceItemRole,
+    IsActivatedRole
 };
+
+QIcon resourceIcon(const QString& path, const QIcon& fallback = {})
+{
+    const QIcon icon(path);
+    return icon.isNull() ? fallback : icon;
+}
+
+QPixmap resourcePixmap(const QString& path, const QSize& size, const QIcon& fallback = {})
+{
+    const QIcon icon = resourceIcon(path, fallback);
+    return icon.pixmap(size);
+}
+
+QIcon customerServiceIcon(const QString& platformId)
+{
+    if (platformId == QLatin1String("qianniu"))
+        return resourceIcon(QStringLiteral(":/qianniu_logo.svg"));
+    if (platformId == QLatin1String("pinduoduo"))
+        return resourceIcon(QStringLiteral(":/pinduoduo_logo.svg"));
+    if (platformId == QLatin1String("douyin"))
+        return resourceIcon(QStringLiteral(":/doudian_logo.svg"));
+    return {};
+}
+
+const QStringList& builtinEncouragementMessages()
+{
+    static const QStringList messages = {
+        QStringLiteral("山高万仞，只登一步"),
+        QStringLiteral("悦己者自成山海"),
+        QStringLiteral("珍惜当下"),
+        QStringLiteral("今天也在变好"),
+        QStringLiteral("先完成，再完美"),
+        QStringLiteral("保持热爱，奔赴山海"),
+        QStringLiteral("向前走，自有答案"),
+        QStringLiteral("认真生活，自会发光")
+    };
+
+    return messages;
+}
+
+QStringList normalizedMessages(const QStringList& messages)
+{
+    QStringList normalized;
+    for (QString message : messages) {
+        message = message.trimmed();
+        if (message.isEmpty() || normalized.contains(message))
+            continue;
+        normalized.append(message);
+    }
+    return normalized;
+}
+
+QStringList loadCustomEncouragementMessages()
+{
+    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    return normalizedMessages(settings.value(QStringLiteral("statusBar/customMessages")).toStringList());
+}
+
+void saveCustomEncouragementMessages(const QStringList& messages)
+{
+    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    settings.setValue(QStringLiteral("statusBar/customMessages"), normalizedMessages(messages));
+}
+
+QStringList allEncouragementMessages(const QStringList& customMessages)
+{
+    QStringList messages = builtinEncouragementMessages();
+    const QStringList custom = normalizedMessages(customMessages);
+    for (const QString& message : custom) {
+        if (!messages.contains(message))
+            messages.append(message);
+    }
+    return messages;
+}
+
+QString randomEncouragementText(const QStringList& messages, const QString& currentText = {})
+{
+    if (messages.isEmpty())
+        return {};
+    if (messages.size() == 1)
+        return messages.first();
+
+    QString nextText;
+    do {
+        const int index = QRandomGenerator::global()->bounded(messages.size());
+        nextText = messages.at(index);
+    } while (nextText == currentText);
+
+    return nextText;
+}
+
+bool isWechatWindow(const WindowInfo& info)
+{
+    const QString proc = info.processName.toLower();
+    const QString title = info.platformName.toLower();
+    return proc.contains(QStringLiteral("wechat"))
+           || title.contains(QStringLiteral("wechat"))
+           || info.platformName.contains(QStringLiteral("微信"));
+}
+
+bool isInWindowCloseHotspot(const QRect& rect, const QPoint& cursorPos)
+{
+    if (!rect.isValid()) {
+        return false;
+    }
+
+    const int hotspotWidth = qMin(96, qMax(56, rect.width() / 6));
+    const int hotspotHeight = qMin(48, qMax(28, rect.height() / 12));
+    const QRect closeHotspot(rect.right() - hotspotWidth + 1,
+                             rect.top(),
+                             hotspotWidth,
+                             hotspotHeight);
+    return closeHotspot.contains(cursorPos);
+}
+
+QIcon onlinePlatformFallbackIcon(const WindowInfo& info)
+{
+    const QString proc = info.processName.toLower();
+    const QString title = info.platformName.toLower();
+
+    if (proc.contains(QStringLiteral("wechat")) || title.contains(QStringLiteral("wechat"))
+        || info.platformName.contains(QStringLiteral("微信"))) {
+        return resourceIcon(QStringLiteral(":/wechat_logo.svg"));
+    }
+    if (proc.contains(QStringLiteral("msedge")) || title.contains(QStringLiteral("edge"))) {
+        return resourceIcon(QStringLiteral(":/edge_logo.svg"));
+    }
+    if (proc.contains(QStringLiteral("chrome")) || title.contains(QStringLiteral("chrome"))) {
+        return resourceIcon(QStringLiteral(":/chrome_logo.svg"));
+    }
+    return {};
+}
 
 class PlatformTreeDelegate : public QStyledItemDelegate
 {
@@ -24,7 +178,7 @@ public:
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
     {
         const bool isGroup = index.data(IsGroupRole).toBool();
-        return {option.rect.width(), isGroup ? 48 : 56};
+        return {option.rect.width(), isGroup ? 44 : 50};
     }
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
@@ -34,14 +188,14 @@ public:
 
         const QString title = index.data(Qt::DisplayRole).toString();
         const bool isGroup = index.data(IsGroupRole).toBool();
-        const QColor dotColor = index.data(DotColorRole).value<QColor>();
         const bool expanded = m_tree && m_tree->isExpanded(index);
         const bool sel = (option.state & QStyle::State_Selected) != 0;
         const bool hover = (option.state & QStyle::State_MouseOver) != 0;
 
-        QRect r = option.rect.adjusted(6, 4, -6, -4);
+        QRect r = option.rect.adjusted(6, 3, -6, -3);
 
         if (isGroup) {
+            const QColor dotColor = index.data(DotColorRole).value<QColor>();
             QColor bg(245, 245, 247);
             if (hover) bg = QColor(238, 240, 245);
             if (sel) bg = QColor(232, 235, 245);
@@ -66,27 +220,62 @@ public:
             if (hasChildren) {
                 painter->setPen(QColor(120, 120, 120));
                 painter->drawText(QRect(r.right() - 24, r.top(), 20, r.height()), Qt::AlignCenter,
-                    expanded ? QStringLiteral("▾") : QStringLiteral("▸"));
+                                  expanded ? QStringLiteral("\u25be") : QStringLiteral("\u25b8"));
             }
         } else {
+            bool isCS = index.data(IsCustomerServiceItemRole).toBool();
+            bool isActivated = index.data(IsActivatedRole).toBool();
+
             QColor bg(255, 255, 255);
-            if (hover) bg = QColor(248, 249, 252);
-            if (sel) bg = QColor(245, 247, 255);
+            if (isCS && !isActivated) {
+                bg = QColor(248, 248, 250);
+                if (hover) bg = QColor(244, 244, 248);
+                if (sel) bg = QColor(240, 242, 250);
+            } else {
+                if (hover) bg = QColor(248, 249, 252);
+                if (sel) bg = QColor(235, 243, 255);
+            }
             painter->setPen(Qt::NoPen);
             painter->setBrush(bg);
             painter->drawRoundedRect(r, 10, 10);
 
+            int xOff = r.left() + 12;
+
+            if (isCS) {
+                int dotSz = 8;
+                QColor dotClr = isActivated ? QColor(82, 196, 26) : QColor(190, 190, 190);
+                QRect dotR(xOff, r.center().y() - dotSz / 2, dotSz, dotSz);
+                painter->setBrush(dotClr);
+                painter->drawEllipse(dotR);
+                xOff += dotSz + 8;
+            }
+
             QIcon icon = index.data(Qt::DecorationRole).value<QIcon>();
-            QSize iconSize(24, 24);
-            QRect iconRect(r.left() + 12, r.center().y() - iconSize.height() / 2, iconSize.width(), iconSize.height());
-            if (!icon.isNull())
-                icon.paint(painter, iconRect, Qt::AlignCenter);
+            QSize iconSize(22, 22);
+            QRect iconRect(xOff, r.center().y() - iconSize.height() / 2, iconSize.width(), iconSize.height());
+            if (!icon.isNull()) {
+                if (isCS && !isActivated) {
+                    auto pix = icon.pixmap(iconSize);
+                    painter->setOpacity(0.35);
+                    painter->drawPixmap(iconRect, pix);
+                    painter->setOpacity(1.0);
+                } else {
+                    icon.paint(painter, iconRect, Qt::AlignCenter);
+                }
+            }
+            xOff += iconSize.width() + 10;
 
-            painter->setPen(QColor(40, 40, 40));
-            QRect textRect = r.adjusted(12 + iconSize.width() + 10, 0, -8, 0);
+            QColor textClr = (isCS && !isActivated) ? QColor(170, 170, 170) : QColor(40, 40, 40);
+            painter->setPen(textClr);
+            QRect textRect(xOff, r.top(), r.right() - 8 - xOff, r.height());
             painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, title);
-        }
 
+            if (sel && !isCS) {
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(QColor(24, 144, 255));
+                painter->drawRoundedRect(QRect(r.left(), r.top() + 6, 3, r.height() - 12), 1, 1);
+            }
+        }
         painter->restore();
     }
 private:
@@ -106,16 +295,20 @@ QToolButton* makeTopIconButton(QWidget* parent, const QIcon& icon, const QString
     button->setToolTip(toolTip);
     button->setAutoRaise(true);
     button->setCursor(Qt::PointingHandCursor);
-    button->setIconSize(QSize(16, 16));
+    button->setIconSize(QSize(18, 18));
     return button;
 }
 }
+
+// ==================== MainWindow ====================
 
 MainWindow::MainWindow(const QString& username, QWidget* parent)
     : QMainWindow(parent)
     , m_username(username)
 {
     setWindowTitle(QString("AI客服 - %1").arg(username));
+    setWindowIcon(resourceIcon(QStringLiteral(":/app_icon.svg"),
+                               qApp->style()->standardIcon(QStyle::SP_DesktopIcon)));
     setMinimumSize(1024, 640);
     resize(1320, 760);
 
@@ -137,18 +330,25 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
     rootLayout->addWidget(right, 1);
 
     setupStyles();
+    buildStatusBar();
+    m_windowStateTimer = new QTimer(this);
+    m_windowStateTimer->setInterval(100);
+    connect(m_windowStateTimer, &QTimer::timeout,
+            this, &MainWindow::checkManagedWindowsState);
+    m_windowStateTimer->start();
     showSystemReadyPage();
 }
 
 MainWindow::~MainWindow()
 {
-    // delete ui;
 }
 
-QWidget *MainWindow::buildLeftSidebar()
+// ==================== Left Sidebar ====================
+
+QWidget* MainWindow::buildLeftSidebar()
 {
     auto* left = new QWidget(this);
-    left->setObjectName("leftSiderbar");
+    left->setObjectName("leftSidebar");
     left->setMinimumWidth(200);
 
     auto* layout = new QVBoxLayout(left);
@@ -157,54 +357,68 @@ QWidget *MainWindow::buildLeftSidebar()
     layout->setAlignment(Qt::AlignTop);
 
     m_platformTreeModel = new QStandardItemModel(this);
-    auto* online = new QStandardItem(QStringLiteral("在线平台"));
-    online->setData(QStringLiteral("online"), PlatformIdRole);
-    online->setData(true, IsGroupRole);
-    online->setData(QColor(0, 200, 120), DotColorRole);
-    online->setFlags(online->flags() & ~Qt::ItemIsDropEnabled);
 
-    const QIcon iconManage = qApp->style()->standardIcon(QStyle::SP_FileDialogContentsView);
+    // -- 在线平台 --
+    m_onlineGroup = new QStandardItem(QStringLiteral("在线平台"));
+    m_onlineGroup->setData(QStringLiteral("online"), PlatformIdRole);
+    m_onlineGroup->setData(true, IsGroupRole);
+    m_onlineGroup->setData(QColor(0, 200, 120), DotColorRole);
+    m_onlineGroup->setFlags(m_onlineGroup->flags() & ~Qt::ItemIsDropEnabled);
+
+    // -- 管理后台 --
+    const QIcon iconManage = resourceIcon(QStringLiteral(":/back_end_management.svg"),
+                                          qApp->style()->standardIcon(QStyle::SP_FileDialogContentsView));
     auto* manageConsole = new QStandardItem(iconManage, QStringLiteral("管理后台"));
     manageConsole->setData(QStringLiteral("manage"), PlatformIdRole);
     manageConsole->setData(false, IsGroupRole);
+    manageConsole->setData(false, IsCustomerServiceItemRole);
     manageConsole->setFlags(manageConsole->flags() & ~Qt::ItemIsDropEnabled);
 
-    const QIcon iconRobot = qApp->style()->standardIcon(QStyle::SP_ComputerIcon);
+    const QIcon iconRobot = resourceIcon(QStringLiteral(":/platform_management_icon.svg"),
+                                         qApp->style()->standardIcon(QStyle::SP_ComputerIcon));
     auto* itemRobot = new QStandardItem(iconRobot, QStringLiteral("机器人管理"));
     itemRobot->setData(QStringLiteral("robot"), PlatformIdRole);
     itemRobot->setData(false, IsGroupRole);
-    itemRobot->setFlags(itemRobot->flags() & ~Qt::ItemIsDropEnabled);
+    itemRobot->setData(false, IsCustomerServiceItemRole);
     manageConsole->appendRow(itemRobot);
 
-    const QIcon iconReception = qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation);
+    const QIcon iconReception = resourceIcon(QStringLiteral(":/aggregate_reception_icons/message_icon.svg"),
+                                             qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation));
     auto* itemReception = new QStandardItem(iconReception, QStringLiteral("聚合接待"));
     itemReception->setData(QStringLiteral("aggregate"), PlatformIdRole);
     itemReception->setData(false, IsGroupRole);
-    itemReception->setFlags(itemReception->flags() & ~Qt::ItemIsDropEnabled);
+    itemReception->setData(false, IsCustomerServiceItemRole);
     manageConsole->appendRow(itemReception);
 
-    auto* offline = new QStandardItem(QStringLiteral("离线平台"));
-    offline->setData(QStringLiteral("offline"), PlatformIdRole);
-    offline->setData(true, IsGroupRole);
-    offline->setData(QColor(160, 160, 160), DotColorRole);
-    offline->setFlags(offline->flags() & ~Qt::ItemIsDropEnabled);
+    // -- 客服平台 --
+    m_csGroup = new QStandardItem(QStringLiteral("客服平台"));
+    m_csGroup->setData(QStringLiteral("cs"), PlatformIdRole);
+    m_csGroup->setData(true, IsGroupRole);
+    m_csGroup->setData(QColor(160, 160, 160), DotColorRole);
+    m_csGroup->setFlags(m_csGroup->flags() & ~Qt::ItemIsDropEnabled);
 
-    const QIcon iconPlatform = qApp->style()->standardIcon(QStyle::SP_DialogApplyButton);
-    const char* offlineItems[] = {"千牛", "拼多多", "抖店"};
-    const char* offlineIds[] = {"qianniu", "pinduoduo", "douyin"};
-    for (int i = 0; i < 3; i++) {
-        auto* item = new QStandardItem(iconPlatform, QString::fromUtf8(offlineItems[i]));
-        item->setData(QString::fromUtf8(offlineIds[i]), PlatformIdRole);
+    struct CsItem { const char* name; const char* id; };
+    CsItem csItems[] = {{"千牛", "qianniu"}, {"拼多多", "pinduoduo"}, {"抖店", "douyin"}};
+    for (const auto& cs : csItems) {
+        const QString platformId = QString::fromUtf8(cs.id);
+        QIcon itemIcon = customerServiceIcon(platformId);
+        if (itemIcon.isNull())
+            itemIcon = qApp->style()->standardIcon(QStyle::SP_DialogApplyButton);
+        auto* item = new QStandardItem(itemIcon, QString::fromUtf8(cs.name));
+        item->setData(platformId, PlatformIdRole);
         item->setData(false, IsGroupRole);
+        item->setData(true, IsCustomerServiceItemRole);
+        item->setData(false, IsActivatedRole);
         item->setFlags(item->flags() & ~Qt::ItemIsDropEnabled);
-        offline->appendRow(item);
+        m_csGroup->appendRow(item);
     }
-    m_platformTreeModel->appendRow(online);
+
+    m_platformTreeModel->appendRow(m_onlineGroup);
     m_platformTreeModel->appendRow(manageConsole);
-    m_platformTreeModel->appendRow(offline);
+    m_platformTreeModel->appendRow(m_csGroup);
 
     m_platformTree = new QTreeView(left);
-    m_platformTree->setObjectName("platformlist");
+    m_platformTree->setObjectName("platformList");
     m_platformTree->setModel(m_platformTreeModel);
     m_platformTree->setItemDelegate(new PlatformTreeDelegate(m_platformTree, m_platformTree));
     m_platformTree->setHeaderHidden(true);
@@ -218,23 +432,32 @@ QWidget *MainWindow::buildLeftSidebar()
     m_platformTree->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_platformTree->setUniformRowHeights(false);
     m_platformTree->setMouseTracking(true);
+    m_platformTree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_platformTree->expandAll();
     layout->addWidget(m_platformTree);
 
     updateTreeViewHeight();
-    connect(m_platformTree->selectionModel(), &QItemSelectionModel::selectionChanged, this, &MainWindow::onPlatformTreeSelectionChanged);
-    connect(m_platformTree, &QTreeView::clicked, this, &MainWindow::onPlatformTreeClicked);
-    connect(m_platformTree, &QTreeView::expanded, this, [this](const QModelIndex&) { updateTreeViewHeight(); });
-    connect(m_platformTree, &QTreeView::collapsed, this, [this](const QModelIndex&) { updateTreeViewHeight(); });
+    connect(m_platformTree->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, &MainWindow::onPlatformTreeSelectionChanged);
+    connect(m_platformTree, &QTreeView::clicked,
+            this, &MainWindow::onPlatformTreeClicked);
+    connect(m_platformTree, &QTreeView::expanded,
+            this, [this](const QModelIndex&) { updateTreeViewHeight(); });
+    connect(m_platformTree, &QTreeView::collapsed,
+            this, [this](const QModelIndex&) { updateTreeViewHeight(); });
+    connect(m_platformTree, &QTreeView::customContextMenuRequested,
+            this, &MainWindow::showPlatformContextMenu);
 
     return left;
 }
 
-QWidget *MainWindow::buildTopBar()
+// ==================== Top Bar ====================
+
+QWidget* MainWindow::buildTopBar()
 {
     auto* bar = new QWidget(this);
     bar->setObjectName("topBar");
-    bar->setFixedHeight(50);
+    bar->setFixedHeight(52);
 
     auto* layout = new QHBoxLayout(bar);
     layout->setContentsMargins(16, 0, 16, 0);
@@ -243,18 +466,22 @@ QWidget *MainWindow::buildTopBar()
     auto* logo = new QLabel(bar);
     logo->setObjectName("logo");
     logo->setFixedSize(22, 22);
-    logo->setPixmap(qApp->style()->standardIcon(QStyle::SP_DesktopIcon).pixmap(22, 22));
+    logo->setPixmap(resourcePixmap(QStringLiteral(":/app_icon.svg"), QSize(22, 22),
+                                   qApp->style()->standardIcon(QStyle::SP_DesktopIcon)));
 
     auto* title = new QLabel(QStringLiteral("AI客服 - %1").arg(m_username), bar);
     title->setObjectName("topTitle");
 
     layout->addWidget(logo);
     layout->addWidget(title);
-    layout->addSpacing(6);
+    layout->addSpacing(8);
 
-    m_btnAdd = makeTopIconButton(bar, qApp->style()->standardIcon(QStyle::SP_FileDialogNewFolder), QStringLiteral("添加新窗口"));
-    m_btnRefresh = makeTopIconButton(bar, qApp->style()->standardIcon(QStyle::SP_BrowserReload), QStringLiteral("刷新平台列表"));
-    m_btnQuickStart = makeTopIconButton(bar, qApp->style()->standardIcon(QStyle::SP_MediaPlay), QStringLiteral("快速启动应用"));
+    m_btnAdd = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/add_new_window_icon.svg"),
+                                                   qApp->style()->standardIcon(QStyle::SP_FileDialogNewFolder)), QStringLiteral("添加新窗口"));
+    m_btnRefresh = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/refresh_platform_list_icon.svg"),
+                                                       qApp->style()->standardIcon(QStyle::SP_BrowserReload)), QStringLiteral("刷新平台列表"));
+    m_btnQuickStart = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/quick_launch_application_icon.svg"),
+                                                          qApp->style()->standardIcon(QStyle::SP_MediaPlay)), QStringLiteral("快速启动应用"));
     layout->addWidget(m_btnAdd);
     layout->addWidget(m_btnRefresh);
 
@@ -264,7 +491,8 @@ QWidget *MainWindow::buildTopBar()
     readyLayout->setContentsMargins(10, 6, 10, 6);
     readyLayout->setSpacing(6);
     auto* readyIcon = new QLabel(readyWrap);
-    readyIcon->setPixmap(qApp->style()->standardIcon(QStyle::SP_ArrowUp).pixmap(16, 16));
+    readyIcon->setPixmap(resourcePixmap(QStringLiteral(":/system_ready_icon.svg"), QSize(18, 18),
+                                        qApp->style()->standardIcon(QStyle::SP_ArrowUp)));
     auto* readyText = new QLabel(QStringLiteral("系统就绪"), readyWrap);
     readyText->setObjectName("readyText");
     readyLayout->addWidget(readyIcon);
@@ -279,33 +507,25 @@ QWidget *MainWindow::buildTopBar()
     return bar;
 }
 
-QWidget *MainWindow::buildCenterContent()
+// ==================== Center Content ====================
+
+QWidget* MainWindow::buildCenterContent()
 {
     m_centerStack = new QStackedWidget(this);
     m_centerStack->setObjectName("centerStack");
-    m_centerStack->addWidget(buildReadyPage());
+    m_centerStack->addWidget(buildReadyPage()); // index 0
 
     m_placeholderPage = new QWidget(this);
     m_placeholderPage->setObjectName("placeholderPage");
     auto* phLayout = new QVBoxLayout(m_placeholderPage);
     phLayout->setContentsMargins(0, 0, 0, 0);
     phLayout->setAlignment(Qt::AlignCenter);
-
     m_placeholderLabel = new QLabel(m_placeholderPage);
     m_placeholderLabel->setText("placeholderText");
     m_placeholderLabel->setAlignment(Qt::AlignCenter);
     phLayout->addWidget(m_placeholderLabel);
-    m_centerStack->addWidget(m_placeholderPage);
+    m_centerStack->addWidget(m_placeholderPage); // index 1
 
-    m_embedPage = new QWidget(this);
-    m_embedPage->setObjectName("embedPage");
-    auto* embedLayout = new QVBoxLayout(m_embedPage);
-    embedLayout->setContentsMargins(12, 12, 12, 12);
-    embedLayout->setSpacing(0);
-    m_embedContainer = new EmbeddedWindowContainer(m_embedPage);
-    m_embedContainer->setObjectName("embedContainer");
-    embedLayout->addWidget(m_embedContainer);
-    m_centerStack->addWidget(m_embedPage);
     return m_centerStack;
 }
 
@@ -317,58 +537,84 @@ void MainWindow::updateTreeViewHeight()
     for (int i = 0; i < itemCount; ++i) {
         QModelIndex index = m_platformTreeModel->index(i, 0);
         bool isGroup = index.data(IsGroupRole).toBool();
-        totalHeight += isGroup ? 48 : 56;
-        if (isGroup && m_platformTree->isExpanded(index)) {
+        totalHeight += isGroup ? 44 : 50;
+        if (m_platformTree->isExpanded(index)) {
             int childCount = m_platformTreeModel->rowCount(index);
-            totalHeight += childCount * 56;
+            totalHeight += childCount * 50;
         }
     }
     m_platformTree->setMinimumHeight(totalHeight + 20);
 }
 
+// ==================== Tree Navigation ====================
+
 void MainWindow::onPlatformTreeSelectionChanged()
 {
     QModelIndex idx = m_platformTree->currentIndex();
     if (!idx.isValid()) {
+        hideCurrentFloatWindow();
         showSystemReadyPage();
         return;
     }
+
     QString id = idx.data(PlatformIdRole).toString();
-    if (id == QLatin1String("online") || id == QLatin1String("offline")) {
+    bool isGroup = idx.data(IsGroupRole).toBool();
+
+    if (isGroup) {
+        hideCurrentFloatWindow();
         showSystemReadyPage();
         return;
     }
     if (id == QLatin1String("aggregate")) {
+        hideCurrentFloatWindow();
         openAggregateChatForm();
         return;
     }
     if (id == QLatin1String("manage") || id == QLatin1String("robot")) {
+        hideCurrentFloatWindow();
         showPlaceholderPage(idx.data(Qt::DisplayRole).toString());
         return;
     }
+
+    // Customer service item — not activated yet
+    bool isCS = idx.data(IsCustomerServiceItemRole).toBool();
+    bool isActivated = idx.data(IsActivatedRole).toBool();
+    if (isCS && !isActivated) {
+        hideCurrentFloatWindow();
+        QString name = idx.data(Qt::DisplayRole).toString();
+        showPlaceholderPage(QStringLiteral("请通过顶部「添加新窗口」按钮关联 %1 窗口").arg(name));
+        return;
+    }
+
+    // Managed window
+    if (m_managedWindows.contains(id)) {
+        switchToWindow(id);
+        return;
+    }
+
+    hideCurrentFloatWindow();
     showPlaceholderPage(idx.data(Qt::DisplayRole).toString());
 }
 
-void MainWindow::onPlatformTreeClicked(const QModelIndex &idx)
+void MainWindow::onPlatformTreeClicked(const QModelIndex& idx)
 {
-    if (!idx.isValid()) {
-        return;
-    }
+    if (!idx.isValid()) return;
     bool isGroup = idx.data(IsGroupRole).toBool();
-    QString id = idx.data(PlatformIdRole).toString();
-    if (isGroup && id == QLatin1String("offline")) {
+    if (isGroup) {
         m_platformTree->setExpanded(idx, !m_platformTree->isExpanded(idx));
     }
 }
+
+// ==================== Page Switching ====================
 
 void MainWindow::showSystemReadyPage()
 {
     m_centerStack->setCurrentIndex(0);
 }
 
-void MainWindow::showPlaceholderPage(const QString &title)
+void MainWindow::showPlaceholderPage(const QString& title)
 {
-    m_placeholderLabel->setText(QStringLiteral("%1功能开发中...").arg(title));
+    m_placeholderLabel->setText(QStringLiteral("%1").arg(title));
     m_centerStack->setCurrentWidget(m_placeholderPage);
 }
 
@@ -377,7 +623,7 @@ void MainWindow::setupStyles()
     setStyleSheet(ApplyStyle::mainWindowStyle());
 }
 
-QWidget *MainWindow::buildReadyPage()
+QWidget* MainWindow::buildReadyPage()
 {
     auto* center = new QWidget(this);
     center->setObjectName("centerArea");
@@ -403,7 +649,8 @@ QWidget *MainWindow::buildReadyPage()
     rocketLayout->setContentsMargins(16, 16, 16, 16);
     rocketLayout->addStretch(1);
     auto* rocket = new QLabel(rocketWrap);
-    rocket->setPixmap(qApp->style()->standardIcon(QStyle::SP_ArrowUp).pixmap(44, 44));
+    rocket->setPixmap(resourcePixmap(QStringLiteral(":/rocket_icon.svg"), QSize(60, 60),
+                                     qApp->style()->standardIcon(QStyle::SP_ArrowUp)));
     rocketLayout->addWidget(rocket);
     rocketLayout->addStretch(1);
 
@@ -443,11 +690,17 @@ QWidget *MainWindow::buildReadyPage()
         btn->setFixedSize(150, 120);
         return btn;
     };
-    auto* btnPick = makeQuick(qApp->style()->standardIcon(QStyle::SP_ArrowRight), QStringLiteral("点击选择平台"));
-    auto* btnEmbed = makeQuick(qApp->style()->standardIcon(QStyle::SP_FileDialogListView), QStringLiteral("自动嵌入窗口"));
-    auto* btnStart = makeQuick(qApp->style()->standardIcon(QStyle::SP_DialogOkButton), QStringLiteral("快速启动应用"));
+    auto* btnPick = makeQuick(resourceIcon(QStringLiteral(":/click_to_select_platform_icon.svg"),
+                                           qApp->style()->standardIcon(QStyle::SP_ArrowRight)),
+                              QStringLiteral("点击选择平台"));
+    auto* btnEmbed = makeQuick(resourceIcon(QStringLiteral(":/auto_embed_window_icon.svg"),
+                                            qApp->style()->standardIcon(QStyle::SP_FileDialogListView)),
+                               QStringLiteral("添加新窗口"));
+    auto* btnStart = makeQuick(resourceIcon(QStringLiteral(":/quick_launch_application_icon.svg"),
+                                            qApp->style()->standardIcon(QStyle::SP_DialogOkButton)),
+                               QStringLiteral("快速启动应用"));
     connect(btnPick, &QToolButton::clicked, this, [this]() { m_platformTree->setFocus(); });
-    connect(btnEmbed, &QToolButton::clicked, this, [this]() { showPlaceholderPage(QStringLiteral("自动嵌入窗口")); });
+    connect(btnEmbed, &QToolButton::clicked, this, &MainWindow::openAddWindowDialog);
     connect(btnStart, &QToolButton::clicked, this, [this]() { showSystemReadyPage(); });
     quickLayout->addWidget(btnPick);
     quickLayout->addWidget(btnEmbed);
@@ -459,39 +712,518 @@ QWidget *MainWindow::buildReadyPage()
     return center;
 }
 
+// ==================== Add Window Dialog ====================
+
 void MainWindow::openAddWindowDialog()
 {
     AddWindowDialog dlg(this);
-    if (dlg.exec() != QDialog::Accepted) {
-        return;
-    }
+    if (dlg.exec() != QDialog::Accepted) return;
+
     const WindowInfo info = dlg.selectedWindow();
-    if (info.handle == 0) {
-        return;
-    }
-    if (m_embeddedHandle) {
-        Win32WindowHelper::detachWindow(m_embeddedHandle);
-        m_embeddedHandle = 0;
-    }
-    m_embeddedHandle = info.handle;
-    if (!m_embedContainer) {
-        return;
-    }
-    m_centerStack->setCurrentWidget(m_embedPage);
-    m_embedContainer->setEmbeddedHandle(m_embeddedHandle);
+    if (info.handle == 0) return;
+
+    addWindowToPlatform(info);
 }
+
+// ==================== Window Management ====================
+
+WindowDisplayMode MainWindow::determineDisplayMode(const WindowInfo& info)
+{
+    QString proc = info.processName.toLower();
+    if (proc.contains("aliworkbench")
+        || proc.contains("aliim") || proc.contains("qianniu"))
+        return WindowDisplayMode::Embed;
+    return WindowDisplayMode::FloatFollow;
+}
+
+QString MainWindow::matchCustomerServicePlatform(const WindowInfo& info) const
+{
+    if (info.platformName.contains(QStringLiteral("千牛"))) return QStringLiteral("qianniu");
+    if (info.platformName.contains(QStringLiteral("拼多多"))) return QStringLiteral("pinduoduo");
+    if (info.platformName.contains(QStringLiteral("抖店"))) return QStringLiteral("douyin");
+
+    QString proc = info.processName.toLower();
+    if (proc.contains("aliworkbench") || proc.contains("aliim") || proc.contains("qianniu"))
+        return QStringLiteral("qianniu");
+    if (proc.contains("pinduoduo") || proc.contains("pdd"))
+        return QStringLiteral("pinduoduo");
+    if (proc.contains("douyin") || proc.contains("feige") || proc.contains("jinritemai"))
+        return QStringLiteral("douyin");
+
+    return {};
+}
+
+QStandardItem* MainWindow::findGroupItem(const QString& groupId) const
+{
+    for (int i = 0; i < m_platformTreeModel->rowCount(); ++i) {
+        auto* item = m_platformTreeModel->item(i);
+        if (item && item->data(PlatformIdRole).toString() == groupId)
+            return item;
+    }
+    return nullptr;
+}
+
+QStandardItem* MainWindow::findChildItem(QStandardItem* parent, const QString& platformId) const
+{
+    if (!parent) return nullptr;
+    for (int i = 0; i < parent->rowCount(); ++i) {
+        auto* child = parent->child(i);
+        if (child && child->data(PlatformIdRole).toString() == platformId)
+            return child;
+    }
+    return nullptr;
+}
+
+void MainWindow::addWindowToPlatform(const WindowInfo& info)
+{
+    WindowDisplayMode mode = determineDisplayMode(info);
+    QString csMatch = matchCustomerServicePlatform(info);
+    bool isCS = !csMatch.isEmpty();
+    QString platformId;
+
+    if (isCS) {
+        platformId = csMatch;
+        // If already has a window, detach old one first
+        if (m_managedWindows.contains(platformId)) {
+            auto& old = m_managedWindows[platformId];
+            if (old.wasSetup) {
+                if (old.mode == WindowDisplayMode::Embed)
+                    Win32WindowHelper::detachWindow(old.handle);
+                else
+                    Win32WindowHelper::detachFloatFollow(old.handle,
+                                                         true,
+                                                         old.useFloatToolWindow,
+                                                         old.useFloatOwner);
+            }
+            if (old.stackPage) {
+                m_centerStack->removeWidget(old.stackPage);
+                old.stackPage->deleteLater();
+            }
+            m_managedWindows.remove(platformId);
+        }
+        // Update tree item to activated
+        auto* csItem = findChildItem(m_csGroup, platformId);
+        if (csItem) {
+            csItem->setData(true, IsActivatedRole);
+        }
+        // Update group dot to green if at least one is activated
+        m_csGroup->setData(QColor(82, 196, 26), DotColorRole);
+        qInfo() << "[MainWindow] 客服平台关联:" << platformId << "<-" << info.platformName;
+    } else {
+        platformId = QStringLiteral("online_%1").arg(m_nextOnlineId++);
+
+        // Add to tree under online group
+        QIcon icon = Win32WindowHelper::windowIcon(info);
+        if (icon.isNull())
+            icon = onlinePlatformFallbackIcon(info);
+        if (icon.isNull())
+            icon = qApp->style()->standardIcon(QStyle::SP_ComputerIcon);
+        auto* item = new QStandardItem(icon, info.platformName);
+        item->setData(platformId, PlatformIdRole);
+        item->setData(false, IsGroupRole);
+        item->setData(false, IsCustomerServiceItemRole);
+        item->setData(true, IsActivatedRole);
+        item->setFlags(item->flags() & ~Qt::ItemIsDropEnabled);
+        m_onlineGroup->appendRow(item);
+        m_platformTree->expand(m_onlineGroup->index());
+        qInfo() << "[MainWindow] 在线平台添加:" << platformId << "=" << info.platformName;
+    }
+
+    // Create stack page
+    auto* page = new QWidget(this);
+    page->setObjectName(QStringLiteral("page_%1").arg(platformId));
+    auto* pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(0, 0, 0, 0);
+
+    EmbeddedWindowContainer* container = nullptr;
+    if (mode == WindowDisplayMode::Embed) {
+        container = new EmbeddedWindowContainer(page);
+        container->setObjectName("embedContainer");
+        pageLayout->addWidget(container);
+    } else {
+        auto* floatLabel = new QLabel(page);
+        floatLabel->setAlignment(Qt::AlignCenter);
+        floatLabel->setText(QStringLiteral("浮窗模式 — %1").arg(info.platformName));
+        floatLabel->setStyleSheet("color: #999; font-size: 14px;");
+        pageLayout->addWidget(floatLabel);
+    }
+    m_centerStack->addWidget(page);
+
+    // Store entry
+    ManagedWindowEntry entry;
+    entry.platformName = info.platformName;
+    entry.platformId = platformId;
+    entry.handle = info.handle;
+    entry.mode = mode;
+    entry.isCustomerService = isCS;
+    if (mode == WindowDisplayMode::FloatFollow && isWechatWindow(info)) {
+        entry.useFloatOwner = false;
+        entry.useFloatToolWindow = false;
+        entry.useFloatRaiseAbove = true;
+    }
+    entry.container = container;
+    entry.stackPage = page;
+    entry.wasSetup = false;
+    m_managedWindows[platformId] = entry;
+
+    updateTreeViewHeight();
+
+    // Auto-select the newly added item
+    QStandardItem* targetItem = nullptr;
+    if (isCS) {
+        targetItem = findChildItem(m_csGroup, platformId);
+    } else {
+        targetItem = findChildItem(m_onlineGroup, platformId);
+    }
+    if (targetItem) {
+        m_platformTree->setCurrentIndex(targetItem->index());
+    }
+}
+
+void MainWindow::switchToWindow(const QString& platformId)
+{
+    if (!m_managedWindows.contains(platformId)) return;
+    auto& entry = m_managedWindows[platformId];
+
+    if (!Win32WindowHelper::isWindowValid(entry.handle)) {
+        qWarning() << "[MainWindow] 窗口已失效:" << entry.platformName;
+        removeOnlinePlatformItem(platformId);
+        return;
+    }
+
+    // Hide current float if switching away
+    hideCurrentFloatWindow();
+
+    // First-time setup
+    if (!entry.wasSetup) {
+        if (entry.mode == WindowDisplayMode::Embed && entry.container) {
+            auto* ec = static_cast<EmbeddedWindowContainer*>(entry.container);
+            ec->setEmbeddedHandle(entry.handle);
+            qInfo() << "[MainWindow] 嵌入窗口:" << entry.platformName;
+        } else if (entry.mode == WindowDisplayMode::FloatFollow) {
+            Win32WindowHelper::setupFloatFollow(entry.handle,
+                                                (quintptr)winId(),
+                                                entry.useFloatOwner,
+                                                entry.useFloatToolWindow);
+            qInfo() << "[MainWindow] 浮窗跟随设置:" << entry.platformName;
+        }
+        entry.wasSetup = true;
+    }
+
+    // Switch stack
+    m_centerStack->setCurrentWidget(entry.stackPage);
+    m_activeWindowId = platformId;
+
+    // Ensure embedded window填满 CenterContent（解决首次嵌入宽高为 0 的问题）
+    if (entry.mode == WindowDisplayMode::Embed && entry.container && entry.wasSetup) {
+        QTimer::singleShot(0, this, [this, platformId]() {
+            if (!m_managedWindows.contains(platformId)) return;
+            auto& currentEntry = m_managedWindows[platformId];
+            if (currentEntry.handle && currentEntry.container) {
+                Win32WindowHelper::resizeEmbeddedWindow(currentEntry.handle, currentEntry.container);
+                QPoint topLeft = currentEntry.container->mapToGlobal(QPoint(0, 0));
+                currentEntry.lastDisplayGeometry = QRect(topLeft, currentEntry.container->size());
+            }
+        });
+    }
+
+    // Show float window if needed
+    if (entry.mode == WindowDisplayMode::FloatFollow) {
+        updateFloatFollowPosition();
+    }
+}
+
+void MainWindow::hideCurrentFloatWindow()
+{
+    if (m_activeWindowId.isEmpty()) return;
+    if (!m_managedWindows.contains(m_activeWindowId)) return;
+
+    auto& entry = m_managedWindows[m_activeWindowId];
+    if (entry.mode == WindowDisplayMode::FloatFollow && entry.wasSetup) {
+        Win32WindowHelper::hideWindow(entry.handle);
+    }
+}
+
+void MainWindow::checkManagedWindowsState()
+{
+    if (m_managedWindows.isEmpty()) {
+        return;
+    }
+
+    QStringList invalidPlatformIds;
+    for (auto it = m_managedWindows.cbegin(); it != m_managedWindows.cend(); ++it) {
+        if (!Win32WindowHelper::isWindowValid(it.value().handle)) {
+            invalidPlatformIds.append(it.key());
+        }
+    }
+
+    if (invalidPlatformIds.isEmpty() && !m_activeWindowId.isEmpty()
+        && m_managedWindows.contains(m_activeWindowId)) {
+        auto& activeEntry = m_managedWindows[m_activeWindowId];
+        const bool isInvisible = !Win32WindowHelper::isWindowVisible(activeEntry.handle);
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const bool usesCloseIntentDetection = activeEntry.mode == WindowDisplayMode::FloatFollow;
+
+        if (usesCloseIntentDetection && activeEntry.wasSetup) {
+            const QRect currentRect = displayRectForEntry(activeEntry);
+            const QPoint cursorPos = QCursor::pos();
+            const bool inCloseHotspot = isInWindowCloseHotspot(currentRect, cursorPos);
+            const bool overManagedWindow = Win32WindowHelper::isPointInsideWindow(activeEntry.handle, cursorPos);
+            const bool leftButtonPressed = Win32WindowHelper::isLeftMouseButtonPressed();
+            if (!isInvisible && inCloseHotspot && overManagedWindow && leftButtonPressed) {
+                if (activeEntry.closeIntentSinceMs == 0) {
+                    activeEntry.closeIntentSinceMs = nowMs;
+                    if (m_centerStack->currentWidget() == activeEntry.stackPage) {
+                        showSystemReadyPage();
+                    }
+                }
+            } else if (activeEntry.closeIntentSinceMs > 0
+                       && (nowMs - activeEntry.closeIntentSinceMs) > 1500) {
+                activeEntry.closeIntentSinceMs = 0;
+            }
+        }
+
+        if (!isInvisible) {
+            activeEntry.invisibleSinceMs = 0;
+        } else if (activeEntry.invisibleSinceMs == 0) {
+            activeEntry.invisibleSinceMs = nowMs;
+        }
+
+        const bool invisibleForLongEnough = activeEntry.invisibleSinceMs > 0
+                                            && (nowMs - activeEntry.invisibleSinceMs) >= 600;
+        const bool invisibleAfterCloseIntent = usesCloseIntentDetection
+                                               && activeEntry.closeIntentSinceMs > 0
+                                               && activeEntry.invisibleSinceMs > 0
+                                               && activeEntry.invisibleSinceMs >= activeEntry.closeIntentSinceMs
+                                               && (nowMs - activeEntry.closeIntentSinceMs) <= 1500;
+
+        const bool shouldDisconnect = usesCloseIntentDetection
+                                          ? invisibleAfterCloseIntent
+                                          : invisibleForLongEnough;
+
+        if (activeEntry.wasSetup && shouldDisconnect) {
+            invalidPlatformIds.append(m_activeWindowId);
+        }
+    }
+
+    if (invalidPlatformIds.isEmpty()) {
+        return;
+    }
+
+    invalidPlatformIds.removeDuplicates();
+    for (const QString& platformId : invalidPlatformIds) {
+        if (!m_managedWindows.contains(platformId)) {
+            continue;
+        }
+
+        const QString platformName = m_managedWindows[platformId].platformName;
+        qInfo() << "[MainWindow] 检测到外部窗口已关闭或隐藏，自动断开:" << platformId << platformName;
+        removeOnlinePlatformItem(platformId, false, false);
+        statusBar()->showMessage(QStringLiteral("已检测到“%1”窗口关闭或隐藏，已自动断开关联")
+                                     .arg(platformName),
+                                 3000);
+    }
+}
+
+void MainWindow::updateFloatFollowPosition()
+{
+    if (m_activeWindowId.isEmpty()) return;
+    if (!m_managedWindows.contains(m_activeWindowId)) return;
+
+    auto& entry = m_managedWindows[m_activeWindowId];
+    if (entry.mode != WindowDisplayMode::FloatFollow) return;
+    if (!entry.wasSetup) return;
+    if (entry.closeIntentSinceMs > 0) return;
+
+    if (isMinimized()) {
+        Win32WindowHelper::hideWindow(entry.handle);
+        return;
+    }
+
+    QPoint logicalTopLeft = m_centerStack->mapToGlobal(QPoint(0, 0));
+    QSize logicalSize = m_centerStack->size();
+    QScreen* screen = m_centerStack->screen();
+    if (!screen && windowHandle()) {
+        screen = windowHandle()->screen();
+    }
+
+    const qreal scale = screen ? screen->devicePixelRatio() : 1.0;
+    const QRect targetWindowRect(qRound(logicalTopLeft.x() * scale),
+                                 qRound(logicalTopLeft.y() * scale),
+                                 qRound(logicalSize.width() * scale),
+                                 qRound(logicalSize.height() * scale));
+
+    entry.lastDisplayGeometry = targetWindowRect;
+    entry.invisibleSinceMs = 0;
+    entry.closeIntentSinceMs = 0;
+    Win32WindowHelper::showWindowAt(entry.handle,
+                                    entry.lastDisplayGeometry.x(),
+                                    entry.lastDisplayGeometry.y(),
+                                    entry.lastDisplayGeometry.width(),
+                                    entry.lastDisplayGeometry.height(),
+                                    entry.useFloatRaiseAbove);
+}
+
+QRect MainWindow::displayRectForEntry(const ManagedWindowEntry& entry) const
+{
+    if (entry.mode == WindowDisplayMode::Embed && entry.container && entry.container->isVisible()) {
+        QPoint topLeft = entry.container->mapToGlobal(QPoint(0, 0));
+        return QRect(topLeft, entry.container->size());
+    }
+
+    if (entry.mode == WindowDisplayMode::FloatFollow && entry.wasSetup
+        && m_activeWindowId == entry.platformId) {
+        QRect rect = Win32WindowHelper::windowRect(entry.handle);
+        if (rect.isValid()) {
+            return rect;
+        }
+    }
+
+    return entry.lastDisplayGeometry;
+}
+
+void MainWindow::releaseManagedWindow(ManagedWindowEntry& entry,
+                                      bool keepVisible,
+                                      bool showWindowAfterRelease)
+{
+    if (!entry.wasSetup) return;
+
+    const QRect targetRect = displayRectForEntry(entry);
+    const bool isWechatSpecialFloat = entry.mode == WindowDisplayMode::FloatFollow
+                                      && !entry.useFloatOwner
+                                      && !entry.useFloatToolWindow;
+
+    if (entry.mode == WindowDisplayMode::Embed) {
+        Win32WindowHelper::detachWindow(entry.handle, targetRect);
+    } else if (isWechatSpecialFloat) {
+        if (showWindowAfterRelease && keepVisible && targetRect.isValid()) {
+            Win32WindowHelper::showWindowAt(entry.handle,
+                                            targetRect.x(),
+                                            targetRect.y(),
+                                            targetRect.width(),
+                                            targetRect.height(),
+                                            entry.useFloatRaiseAbove);
+        } else if (!showWindowAfterRelease) {
+            Win32WindowHelper::hideWindow(entry.handle);
+        }
+    } else {
+        const bool restoreTaskbarEntry = entry.useFloatToolWindow
+                                             ? showWindowAfterRelease
+                                             : true;
+        Win32WindowHelper::detachFloatFollow(entry.handle,
+                                             showWindowAfterRelease,
+                                             restoreTaskbarEntry,
+                                             entry.useFloatOwner);
+        if (keepVisible && showWindowAfterRelease && targetRect.isValid()) {
+            Win32WindowHelper::showWindowAt(entry.handle, targetRect.x(), targetRect.y(),
+                                            targetRect.width(), targetRect.height());
+        }
+    }
+
+    if (!keepVisible && showWindowAfterRelease) {
+        Win32WindowHelper::minimizeWindow(entry.handle);
+    }
+}
+
+void MainWindow::removeOnlinePlatformItem(const QString& platformId,
+                                          bool keepVisible,
+                                          bool showWindowAfterRelease)
+{
+    if (!m_managedWindows.contains(platformId)) return;
+    auto& entry = m_managedWindows[platformId];
+
+    if (m_activeWindowId == platformId) {
+        if (!showWindowAfterRelease) {
+            showSystemReadyPage();
+        }
+        if (showWindowAfterRelease) {
+            hideCurrentFloatWindow();
+        }
+        m_activeWindowId.clear();
+    }
+
+    releaseManagedWindow(entry, keepVisible, showWindowAfterRelease);
+
+    // Remove stack page
+    if (entry.stackPage) {
+        m_centerStack->removeWidget(entry.stackPage);
+        entry.stackPage->deleteLater();
+    }
+
+    // Remove tree item
+    if (entry.isCustomerService) {
+        auto* csItem = findChildItem(m_csGroup, platformId);
+        if (csItem) csItem->setData(false, IsActivatedRole);
+    } else {
+        auto* item = findChildItem(m_onlineGroup, platformId);
+        if (item) m_onlineGroup->removeRow(item->row());
+    }
+
+    m_managedWindows.remove(platformId);
+    updateTreeViewHeight();
+    showSystemReadyPage();
+    qInfo() << "[MainWindow] 移除平台:" << platformId;
+}
+
+void MainWindow::detachAllWindows()
+{
+    for (auto it = m_managedWindows.begin(); it != m_managedWindows.end(); ++it) {
+        auto& entry = it.value();
+        if (!entry.wasSetup) continue;
+        const bool keepVisible = (entry.platformId == m_activeWindowId);
+        releaseManagedWindow(entry, keepVisible);
+    }
+    m_managedWindows.clear();
+    m_activeWindowId.clear();
+}
+
+// ==================== Context Menu ====================
+
+void MainWindow::showPlatformContextMenu(const QPoint& pos)
+{
+    QModelIndex idx = m_platformTree->indexAt(pos);
+    if (!idx.isValid()) return;
+
+    QString id = idx.data(PlatformIdRole).toString();
+    bool isCS = idx.data(IsCustomerServiceItemRole).toBool();
+    bool isGroup = idx.data(IsGroupRole).toBool();
+    if (isGroup) return;
+
+    if (!m_managedWindows.contains(id)) return;
+
+    QMenu menu(this);
+    if (isCS) {
+        QAction* actDisconnect = menu.addAction(QStringLiteral("断开关联"));
+        QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
+        if (chosen == actDisconnect) {
+            removeOnlinePlatformItem(id);
+        }
+    } else {
+        QAction* actRemove = menu.addAction(QStringLiteral("删除"));
+        QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
+        if (chosen == actRemove) {
+            removeOnlinePlatformItem(id);
+        }
+    }
+}
+
+// ==================== Aggregate Chat ====================
 
 void MainWindow::openAggregateChatForm()
 {
     if (!m_aggregateChatForm) {
         m_aggregateChatForm = new AggregateChatForm(nullptr);
         m_aggregateChatForm->setAttribute(Qt::WA_DeleteOnClose, true);
-        connect(m_aggregateChatForm, &QObject::destroyed, this, [this]() { m_aggregateChatForm = nullptr; });
+        connect(m_aggregateChatForm, &QObject::destroyed, this, [this]() {
+            m_aggregateChatForm = nullptr;
+        });
     }
     m_aggregateChatForm->show();
     m_aggregateChatForm->raise();
     m_aggregateChatForm->activateWindow();
 }
+
+// ==================== EmbeddedWindowContainer ====================
 
 EmbeddedWindowContainer::EmbeddedWindowContainer(QWidget* parent)
     : QWidget(parent)
@@ -504,6 +1236,7 @@ void EmbeddedWindowContainer::setEmbeddedHandle(quintptr handle)
     m_handle = handle;
     if (m_handle) {
         Win32WindowHelper::embedWindowIntoWidget(m_handle, this);
+        Win32WindowHelper::resizeEmbeddedWindow(m_handle, this);
     }
 }
 
@@ -512,7 +1245,7 @@ quintptr EmbeddedWindowContainer::embeddedHandle() const
     return m_handle;
 }
 
-void EmbeddedWindowContainer::resizeEvent(QResizeEvent *event)
+void EmbeddedWindowContainer::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
     if (m_handle) {
@@ -520,11 +1253,250 @@ void EmbeddedWindowContainer::resizeEvent(QResizeEvent *event)
     }
 }
 
-void MainWindow::closeEvent(QCloseEvent *event)
+// ==================== Window Events ====================
+
+void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (m_embeddedHandle) {
-        Win32WindowHelper::detachWindow(m_embeddedHandle);
-        m_embeddedHandle = 0;
-    }
+    detachAllWindows();
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::moveEvent(QMoveEvent* event)
+{
+    QMainWindow::moveEvent(event);
+    updateFloatFollowPosition();
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event)
+{
+    QMainWindow::resizeEvent(event);
+    updateFloatFollowPosition();
+}
+
+void MainWindow::changeEvent(QEvent* event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+        if (isMinimized()) {
+            hideCurrentFloatWindow();
+        } else {
+            QTimer::singleShot(100, this, &MainWindow::updateFloatFollowPosition);
+        }
+    } else if (event->type() == QEvent::ActivationChange) {
+        if (isActiveWindow()) {
+            QTimer::singleShot(50, this, &MainWindow::updateFloatFollowPosition);
+        }
+    }
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_statusMessage) {
+        if (event->type() == QEvent::MouseButtonRelease) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                refreshStatusMessage();
+                return true;
+            }
+        } else if (event->type() == QEvent::ContextMenu) {
+            auto* contextEvent = static_cast<QContextMenuEvent*>(event);
+            QMenu menu(this);
+            QAction* actManage = menu.addAction(QStringLiteral("管理文案"));
+            QAction* chosen = menu.exec(contextEvent->globalPos());
+            if (chosen == actManage) {
+                openStatusMessageManager();
+            }
+            return true;
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::refreshStatusMessage()
+{
+    if (!m_statusMessage)
+        return;
+
+    const QStringList messages = allEncouragementMessages(m_customStatusMessages);
+    m_statusMessage->setText(randomEncouragementText(messages, m_statusMessage->text()));
+}
+
+void MainWindow::openStatusMessageManager()
+{
+    QDialog dialog(this, Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    dialog.setWindowTitle(QStringLiteral("管理文案"));
+    dialog.setModal(true);
+    dialog.resize(420, 320);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(10);
+
+    auto* tipLabel = new QLabel(QStringLiteral("这里管理自定义文案；内置文案仍会默认参与随机显示。"), &dialog);
+    tipLabel->setWordWrap(true);
+
+    auto* listWidget = new QListWidget(&dialog);
+    listWidget->addItems(m_customStatusMessages);
+
+    auto* editor = new QLineEdit(&dialog);
+    editor->setPlaceholderText(QStringLiteral("输入一句想展示的话"));
+
+    auto* buttonRow = new QHBoxLayout();
+    buttonRow->setSpacing(8);
+    auto* addButton = new QPushButton(QStringLiteral("新增"), &dialog);
+    auto* updateButton = new QPushButton(QStringLiteral("修改"), &dialog);
+    auto* deleteButton = new QPushButton(QStringLiteral("删除"), &dialog);
+    auto* closeButton = new QPushButton(QStringLiteral("关闭"), &dialog);
+    buttonRow->addWidget(addButton);
+    buttonRow->addWidget(updateButton);
+    buttonRow->addWidget(deleteButton);
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(closeButton);
+
+    layout->addWidget(tipLabel);
+    layout->addWidget(listWidget, 1);
+    layout->addWidget(editor);
+    layout->addLayout(buttonRow);
+
+    auto syncCustomMessages = [this, listWidget]() {
+        QStringList messages;
+        for (int i = 0; i < listWidget->count(); ++i)
+            messages.append(listWidget->item(i)->text());
+        m_customStatusMessages = normalizedMessages(messages);
+        saveCustomEncouragementMessages(m_customStatusMessages);
+        refreshStatusMessage();
+    };
+
+    auto findRowByText = [listWidget](const QString& text, int ignoreRow = -1) {
+        for (int i = 0; i < listWidget->count(); ++i) {
+            if (i != ignoreRow && listWidget->item(i)->text() == text)
+                return i;
+        }
+        return -1;
+    };
+
+    connect(listWidget, &QListWidget::currentTextChanged, &dialog, [editor](const QString& text) {
+        editor->setText(text);
+        editor->selectAll();
+    });
+    connect(addButton, &QPushButton::clicked, &dialog, [=]() {
+        const QString text = editor->text().trimmed();
+        if (text.isEmpty()) {
+            editor->setFocus();
+            return;
+        }
+
+        const int existingRow = findRowByText(text);
+        if (existingRow >= 0) {
+            listWidget->setCurrentRow(existingRow);
+            editor->setFocus();
+            return;
+        }
+
+        listWidget->addItem(text);
+        listWidget->setCurrentRow(listWidget->count() - 1);
+        syncCustomMessages();
+        editor->clear();
+        editor->setFocus();
+    });
+    connect(updateButton, &QPushButton::clicked, &dialog, [=]() {
+        auto* currentItem = listWidget->currentItem();
+        if (!currentItem) {
+            editor->setFocus();
+            return;
+        }
+
+        const QString text = editor->text().trimmed();
+        if (text.isEmpty()) {
+            editor->setFocus();
+            return;
+        }
+
+        const int currentRow = listWidget->row(currentItem);
+        const int existingRow = findRowByText(text, currentRow);
+        if (existingRow >= 0) {
+            listWidget->setCurrentRow(existingRow);
+            editor->setFocus();
+            return;
+        }
+
+        currentItem->setText(text);
+        syncCustomMessages();
+    });
+    connect(deleteButton, &QPushButton::clicked, &dialog, [=]() {
+        auto* currentItem = listWidget->currentItem();
+        if (!currentItem)
+            return;
+
+        delete listWidget->takeItem(listWidget->row(currentItem));
+        syncCustomMessages();
+        editor->clear();
+        editor->setFocus();
+    });
+    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(editor, &QLineEdit::returnPressed, &dialog, [=]() {
+        if (listWidget->currentItem())
+            updateButton->click();
+        else
+            addButton->click();
+    });
+
+    dialog.adjustSize();
+
+    if (m_statusMessage) {
+        const QSize dialogSize = dialog.size();
+        QPoint anchor = m_statusMessage->mapToGlobal(QPoint(m_statusMessage->width(), 0));
+        QScreen* screen = QGuiApplication::screenAt(anchor);
+        if (!screen && windowHandle())
+            screen = windowHandle()->screen();
+        if (!screen)
+            screen = QGuiApplication::primaryScreen();
+
+        QRect available = screen ? screen->availableGeometry() : QRect();
+        int x = anchor.x() - dialogSize.width();
+        int y = anchor.y() - dialogSize.height() - 8;
+        if (screen) {
+            x = qBound(available.left(), x, available.right() - dialogSize.width());
+            if (y < available.top())
+                y = qMin(anchor.y() + m_statusMessage->height() + 8, available.bottom() - dialogSize.height());
+        }
+        dialog.move(x, y);
+    }
+
+    dialog.exec();
+}
+
+void MainWindow::buildStatusBar()
+{
+    m_customStatusMessages = loadCustomEncouragementMessages();
+    auto* statusWrap = new QWidget(this);
+    statusWrap->setObjectName("statusBarWrap");
+    auto* statusLayout = new QHBoxLayout(statusWrap);
+    statusLayout->setContentsMargins(0, 0, 0, 0);
+    statusLayout->setSpacing(0);
+
+    m_statusMessage = new QLabel(statusWrap);
+    m_statusSeparator = new QLabel(statusWrap);
+    m_statusTime = new QLabel(statusWrap);
+    m_statusMessage->setObjectName("statusMessage");
+    m_statusSeparator->setObjectName("statusSeparator");
+    m_statusTime->setObjectName("statusTime");
+    m_statusMessage->setCursor(Qt::PointingHandCursor);
+    m_statusMessage->setToolTip(QStringLiteral("左键换一句，右键管理文案"));
+    m_statusSeparator->setText(QStringLiteral(" | "));
+    m_statusMessage->installEventFilter(this);
+    statusLayout->addWidget(m_statusMessage);
+    statusLayout->addWidget(m_statusSeparator);
+    statusLayout->addWidget(m_statusTime);
+    statusBar()->addPermanentWidget(statusWrap);
+    auto* timeTimer = new QTimer(this);
+    connect(timeTimer, &QTimer::timeout, this, [this]() {
+        m_statusTime->setText(QDateTime::currentDateTime().toString(
+            QStringLiteral("yyyy年MM月dd日 hh:mm:ss")));
+    });
+    timeTimer->start(1000);
+    refreshStatusMessage();
+    m_statusTime->setText(QDateTime::currentDateTime().toString(
+        QStringLiteral("yyyy年MM月dd日 hh:mm:ss")));
 }

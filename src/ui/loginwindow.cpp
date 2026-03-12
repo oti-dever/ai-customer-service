@@ -12,6 +12,7 @@
 #include <QScreen>
 #include <QGuiApplication>
 #include <QDateTime>
+#include <QIcon>
 
 LoginWindow::LoginWindow(QWidget* parent)
     : QDialog(parent)
@@ -40,6 +41,7 @@ LoginWindow::~LoginWindow()
 void LoginWindow::setupUI()
 {
     setWindowTitle("AI客服 - 登录");
+    setWindowIcon(QIcon(QStringLiteral(":/app_icon.svg")));
     setFixedSize(440, 520);
     setWindowFlags(Qt::Dialog | Qt::WindowCloseButtonHint | Qt::WindowTitleHint);
 

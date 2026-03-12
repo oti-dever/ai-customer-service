@@ -109,9 +109,6 @@ void AddWindowDialog::applyFilter()
             continue;
         }
         const WindowInfo& info = m_allWindows.at(idx);
-        if (info.isBrowserLike) {
-            continue;
-        }
         if (!keyword.isEmpty()) {
             const bool match = info.windowTitle.contains(keyword, Qt::CaseInsensitive) ||
                                info.processName.contains(keyword, Qt::CaseInsensitive);
@@ -123,7 +120,7 @@ void AddWindowDialog::applyFilter()
         m_table->setItem(row, 1, new QTableWidgetItem(info.processName));
         m_table->setItem(row, 2, new QTableWidgetItem(info.className));
         m_table->setItem(row, 3, new QTableWidgetItem(info.handle == 0 ? QStringLiteral("-")
-            : QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(info.handle), 16))));
+                                                                       : QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(info.handle), 16))));
     }
 
     if (m_table->rowCount() > 0) {
