@@ -1,4 +1,5 @@
 #include "win32windowhelper.h"
+#include "logger.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -173,6 +174,12 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 
     const QString procLower = processName.toLower();
     const QString clsLower = qClass.toLower();
+
+    if (procLower == QStringLiteral("textinputhost.exe")
+        || qTitle.contains(QStringLiteral("Windows 输入体验"))
+        || qTitle.contains(QStringLiteral("Windows Input Experience"))) {
+        return TRUE;
+    }
     if (procLower.contains(QStringLiteral("chrome"))
         || procLower.contains(QStringLiteral("msedge"))
         || procLower.contains(QStringLiteral("qqbrowser"))
@@ -209,6 +216,14 @@ bool Win32WindowHelper::embedWindowIntoWidget(quintptr handle, QWidget* containe
     if (!IsWindow(hwnd)) return false;
     HWND parent = reinterpret_cast<HWND>(container->winId());
     if (!IsWindow(parent)) return false;
+
+    // 若窗口处于最小化，SetWindowPos 会忽略传入尺寸；先最大化再添加，避免 SW_RESTORE 恢复成旧尺寸
+    const bool iconic = (IsIconic(hwnd) != 0);
+    // qInfo() << "[Win32WindowHelper] embedWindowIntoWidget: IsIconic(handle=" << handle << ") =" << iconic;
+    if (iconic) {
+        qInfo() << "[Win32WindowHelper] 嵌入前检测到窗口最小化，先最大化再添加";
+        ShowWindow(hwnd, SW_MAXIMIZE);
+    }
 
     LONG style = GetWindowLongW(hwnd, GWL_STYLE);
     style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX);
@@ -305,6 +320,10 @@ void Win32WindowHelper::showWindowAt(quintptr handle,
     if (!handle) return;
     HWND hwnd = toHwnd(handle);
     if (!IsWindow(hwnd)) return;
+    // const bool iconic = (IsIconic(hwnd) != 0);
+    // qInfo() << "[Win32WindowHelper] showWindowAt: IsIconic(handle=" << handle << ") =" << iconic
+    //         << "target=(" << x << "," << y << "," << w << "x" << h << "), raiseAbove=" << raiseAbove;
+    // 与旧项目一致：始终使用 SW_RESTORE，恢复为普通窗口后 SetWindowPos 才能生效
     ShowWindow(hwnd, SW_RESTORE);
     SetWindowPos(hwnd, raiseAbove ? HWND_TOPMOST : HWND_TOP, x, y, w, h,
                  SWP_SHOWWINDOW | SWP_NOACTIVATE);
