@@ -36,6 +36,8 @@ struct MessageRecord {
     QString sender; // "customer", "agent", "system"
     QDateTime createdAt;
     QString platformMsgId;
+    int syncStatus = 1;      // 1=normal, 10=pending_send, 11=sent_ok, 12=sent_failed
+    QString errorReason;
 };
 
 Q_DECLARE_METATYPE(PlatformMessage)

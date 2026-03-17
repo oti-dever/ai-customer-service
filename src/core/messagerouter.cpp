@@ -58,8 +58,13 @@ void MessageRouter::sendMessage(int conversationId, const QString& text)
 
     MessageDao msgDao;
     QDateTime now = QDateTime::currentDateTime();
-    int msgId = msgDao.create(conversationId, QStringLiteral("out"),
-                              text, QStringLiteral("agent"));
+    // 标记为待发送，等待 Python RPA 组件实际送达平台
+    int msgId = msgDao.create(conversationId,
+                              QStringLiteral("out"),
+                              text,
+                              QStringLiteral("agent"),
+                              QString(),  // platformMsgId 由 Python 侧补充
+                              10);        // sync_status = 10 (pending_send)
 
     convDao.updateLastMessage(conversationId, text, now);
 
@@ -71,6 +76,7 @@ void MessageRouter::sendMessage(int conversationId, const QString& text)
         rec.content = text;
         rec.sender = QStringLiteral("agent");
         rec.createdAt = now;
+        rec.syncStatus = 10;
         emit messageSentOk(conversationId, rec);
     }
 
@@ -93,7 +99,12 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
     if (convId <= 0) return;
 
     QDateTime now = msg.createdAt.isValid() ? msg.createdAt : QDateTime::currentDateTime();
-    int msgId = msgDao.create(convId, msg.direction, msg.content, msg.sender, msg.platformMsgId);
+    int msgId = msgDao.create(convId,
+                              msg.direction,
+                              msg.content,
+                              msg.sender,
+                              msg.platformMsgId,
+                              1); // 正常消息
 
     ConversationDao convDao;
     convDao.updateLastMessage(convId, msg.content, now);
