@@ -74,6 +74,10 @@ target_include_directories(demo1 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+target_compile_definitions(demo1 PRIVATE
+    PROJECT_ROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
 target_link_libraries(demo1 PRIVATE
     Qt6::Core
     Qt6::Gui
