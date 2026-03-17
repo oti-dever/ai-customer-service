@@ -18,5 +18,8 @@
         <file>chrome_logo.svg</file>
         <file>aggregate_reception_icons/home_icon.svg</file>
         <file>aggregate_reception_icons/message_icon.svg</file>
+        <file>aggregate_reception_icons/search_icon.svg</file>
+        <file>question_mark_icon.svg</file>
+        <file>bug_log_icon.svg</file>
     </qresource>
 </RCC>
