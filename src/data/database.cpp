@@ -2,14 +2,13 @@
 #include <QDir>
 #include <QSqlError>
 #include <QSqlQuery>
-#include <QStandardPaths>
 #include <QDebug>
 
 bool Database::open(const QString& path)
 {
     if (m_path.isEmpty()) {
         if (path.isEmpty()) {
-            QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+            QString dataDir = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/database");
             QDir().mkpath(dataDir);
             m_path = dataDir + QDir::separator() + "app.db";
         } else {
@@ -77,6 +76,8 @@ bool Database::runMigrations()
         "  sender TEXT NOT NULL,"
         "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
         "  platform_msg_id TEXT,"
+        "  sync_status INTEGER NOT NULL DEFAULT 1,"
+        "  error_reason TEXT DEFAULT '',"
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
         ")",
 
