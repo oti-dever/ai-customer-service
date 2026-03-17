@@ -5,16 +5,20 @@
 
 int MessageDao::create(int conversationId, const QString& direction,
                        const QString& content, const QString& sender,
-                       const QString& platformMsgId)
+                       const QString& platformMsgId,
+                       int syncStatus,
+                       const QString& errorReason)
 {
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare("INSERT INTO messages (conversation_id, direction, content, sender, platform_msg_id) "
-              "VALUES (:cid, :dir, :content, :sender, :pmid)");
+    q.prepare("INSERT INTO messages (conversation_id, direction, content, sender, platform_msg_id, sync_status, error_reason) "
+              "VALUES (:cid, :dir, :content, :sender, :pmid, :status, :reason)");
     q.bindValue(":cid", conversationId);
     q.bindValue(":dir", direction);
     q.bindValue(":content", content);
     q.bindValue(":sender", sender);
     q.bindValue(":pmid", platformMsgId.isEmpty() ? QVariant() : platformMsgId);
+    q.bindValue(":status", syncStatus);
+    q.bindValue(":reason", errorReason);
 
     if (!q.exec()) {
         qWarning() << "MessageDao::create 失败:" << q.lastError().text();
@@ -43,6 +47,8 @@ QVector<MessageRecord> MessageDao::listByConversation(int conversationId, int li
         m.sender = q.value("sender").toString();
         m.createdAt = q.value("created_at").toDateTime();
         m.platformMsgId = q.value("platform_msg_id").toString();
+        m.syncStatus = q.value("sync_status").isNull() ? 1 : q.value("sync_status").toInt();
+        m.errorReason = q.value("error_reason").toString();
         result.append(m);
     }
     return result;
