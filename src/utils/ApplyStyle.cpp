@@ -198,82 +198,84 @@ QString ApplyStyle::aggregateChatFormStyle()
     return QStringLiteral(R"QSS(
         /* ----- 聚合对话接待窗口（管理后台） ----- */
         QMainWindow {
-            background: #f9fafb;
+            background: #E0F2FE;
+        }
+        QLabel, QComboBox {
+            color: #000000;
         }
         QWidget#aggregateLeftPanel {
-            background: #2d2d30;
-            border-right: 1px solid #3e3e42;
-        }
-        QLabel#aggregateLeftTitle {
-            font-size: 14px;
-            font-weight: bold;
-            color: #e8e8e8;
+            background: qlineargradient(
+                x1:0, y1:0, x2:0, y2:1,
+                stop:0 #BAE6FD,
+                stop:1 #E0F2FE
+            );
+            border-right: 1px solid #BAE6FD;
         }
         QPushButton#simulateButton {
-            background: #52c41a;
+            background: #0EA5E9;
             color: white;
             border: none;
-            border-radius: 4px;
-            padding: 4px 10px;
+            border-radius: 6px;
+            padding: 5px 12px;
             font-size: 12px;
         }
         QPushButton#simulateButton:hover {
-            background: #73d13d;
+            background: #38BDF8;
         }
         QPushButton#simulateButton:pressed {
-            background: #389e0d;
+            background: #0EA5E9;
         }
         QPushButton#aggregateTabPending {
-            background: #ff7d00;
-            color: white;
+            background: transparent;
+            color: #0f172a;
             border: none;
-            border-radius: 4px;
-            padding: 6px 12px;
+            border-radius: 6px;
+            padding: 6px 14px;
             font-size: 13px;
         }
         QPushButton#aggregateTabPending:checked {
-            background: #ff7d00;
+            background: #0EA5E9;
             color: white;
         }
         QPushButton#aggregateTabPending:!checked {
-            background: #444;
-            color: #ccc;
+            background: transparent;
+            color: #0f172a;
         }
         QPushButton#aggregateTabPending:hover:!checked {
-            background: #555;
+            background: rgba(14,165,233,0.08);
         }
         QPushButton#aggregateTabAll {
-            background: #444;
-            color: #ccc;
+            background: transparent;
+            color: #0f172a;
             border: none;
-            border-radius: 4px;
-            padding: 6px 12px;
+            border-radius: 6px;
+            padding: 6px 14px;
             font-size: 13px;
         }
         QPushButton#aggregateTabAll:checked {
-            background: #ff7d00;
+            background: #0EA5E9;
             color: white;
         }
         QPushButton#aggregateTabAll:hover:!checked {
-            background: #555;
+            background: rgba(14,165,233,0.08);
         }
         QLineEdit#aggregateSearch {
-            padding: 8px 12px 8px 36px;
-            border: 1px solid #3e3e42;
-            border-radius: 6px;
+            padding: 6px 8px;
+            border: 1px solid #BAE6FD;
+            border-radius: 8px;
             font-size: 13px;
-            background: #3c3c3f;
-            color: #e8e8e8;
+            background: rgba(255,255,255,0.85);
+            color: #0f172a;
         }
         QLineEdit#aggregateSearch:focus {
-            border-color: #1890FF;
+            border-color: #0EA5E9;
         }
         QWidget#aggregateListEmpty {
             background: transparent;
         }
         QLabel#aggregateListEmptyText {
             font-size: 12px;
-            color: #888;
+            color: #000000;
         }
         QListWidget#aggregateConversationList {
             background: transparent;
@@ -285,18 +287,26 @@ QString ApplyStyle::aggregateChatFormStyle()
             border-radius: 6px;
         }
         QListWidget#aggregateConversationList::item:hover {
-            background: rgba(255,255,255,0.06);
+            background: rgba(148, 210, 255, 0.25);
         }
         QListWidget#aggregateConversationList::item:selected {
-            background: rgba(24,144,255,0.2);
+            background: #7DD3FC;
+            border-radius: 8px;
         }
 
         QWidget#aggregateCenterPanel {
-            background: #f5f5f5;
+            background: #E0F2FE;
+        }
+        QWidget#chatArea {
+            background: #E0F2FE;
+        }
+        QSplitter::handle {
+            background: #E0F2FE;
+            border: none;
         }
         QFrame#aggregateEmptyIcon {
-            background: #ff7d00;
-            border-radius: 12px;
+            background: #7DD3FC;
+            border-radius: 16px;
         }
         QLabel#aggregateEmptyMain {
             font-size: 16px;
@@ -310,123 +320,199 @@ QString ApplyStyle::aggregateChatFormStyle()
 
         /* ----- Chat area ----- */
         QLabel#chatHeader {
-            background: #ffffff;
+            background: #E0F2FE;
             font-size: 14px;
             font-weight: bold;
-            color: #333;
-            border-bottom: 1px solid #e8e8e8;
+            color: #0f172a;
+            border-bottom: 1px solid #BAE6FD;
         }
         QScrollArea#messageScroll {
-            background: #f5f5f5;
+            background: #E0F2FE;
             border: none;
+        }
+        QScrollArea#messageScroll QWidget {
+            background: transparent;
+        }
+        QScrollArea#messageScroll QScrollBar:vertical {
+            width: 0px;
+            background: transparent;
+        }
+        QScrollArea#messageScroll QScrollBar::handle:vertical {
+            background: transparent;
         }
         QFrame#inputDivider {
             color: #e0e0e0;
         }
         QPlainTextEdit#messageInput {
             background: #ffffff;
-            border: 1px solid #d9d9d9;
-            border-radius: 6px;
-            padding: 8px;
+            border: 1px solid #BAE6FD;
+            border-radius: 8px;
+            padding: 10px;
             font-size: 13px;
-            color: #333;
+            color: #0f172a;
         }
         QPlainTextEdit#messageInput:focus {
-            border-color: #1890FF;
+            border-color: #0EA5E9;
         }
         QPushButton#sendButton {
-            background: #1890FF;
+            background: #0EA5E9;
             color: white;
             border: none;
-            border-radius: 6px;
-            padding: 8px 16px;
+            border-radius: 8px;
+            padding: 8px 18px;
             font-size: 13px;
             font-weight: bold;
         }
         QPushButton#sendButton:hover {
-            background: #40a9ff;
+            background: #38BDF8;
         }
         QPushButton#sendButton:pressed {
-            background: #096dd9;
+            background: #0EA5E9;
         }
 
         /* ----- Message bubbles ----- */
-        QFrame#bubbleIn {
-            background: #ffffff;
-            border: 1px solid #e8e8e8;
-            border-radius: 12px;
-            border-top-left-radius: 2px;
+        QWidget#chatArea QFrame#bubbleIn {
+            background: #BAE6FD;
+            border: 1px solid #7DD3FC;
+            border-radius: 14px;
+            border-top-left-radius: 4px;
         }
-        QFrame#bubbleOut {
-            background: #1890FF;
+        QWidget#chatArea QFrame#bubbleOut {
+            background: #0EA5E9;
             border: none;
-            border-radius: 12px;
-            border-top-right-radius: 2px;
+            border-radius: 14px;
+            border-top-right-radius: 4px;
         }
         QLabel#bubbleTextIn {
             font-size: 13px;
-            color: #333;
+            color: #0f172a;
         }
         QLabel#bubbleTextOut {
             font-size: 13px;
             color: #ffffff;
         }
-        QLabel#bubbleMeta {
+        QLabel#bubbleMetaIn {
             font-size: 10px;
-            color: #999;
+            color: #64748b;
+        }
+        QLabel#bubbleMetaOut {
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.75);
+        }
+        QFrame#dateSeparatorLine {
+            background: #BAE6FD;
+            border: none;
+        }
+        QLabel#dateSeparatorText {
+            font-size: 11px;
+            color: #6b7280;
+            background: transparent;
         }
 
         /* ----- Right panel ----- */
         QWidget#aggregateRightPanel {
-            background: #FFFFFF;
+            background: qlineargradient(
+                x1:0, y1:0, x2:0, y2:1,
+                stop:0 #BAE6FD,
+                stop:1 #E0F2FE
+            );
         }
         QWidget#aggregateRightHeader {
-            background: #1f2937;
+            background: qlineargradient(
+                x1:0, y1:0, x2:0, y2:1,
+                stop:0 #BAE6FD,
+                stop:1 #E0F2FE
+            );
         }
         QLabel#aggregateRightHeaderTitle {
             font-size: 14px;
             font-weight: bold;
-            color: white;
+            color: #000000;
         }
         QLabel#aggregateRightHeaderSub {
             font-size: 12px;
-            color: rgba(255,255,255,0.8);
-        }
-        QPushButton#aggregateRightHeaderClose {
-            background: transparent;
-            color: white;
-            border: none;
-            font-size: 18px;
-        }
-        QPushButton#aggregateRightHeaderClose:hover {
-            background: rgba(255,255,255,0.15);
-            border-radius: 4px;
+            color: #000000;
         }
         QFrame#aggregateRightEmptyIcon {
-            background: #f3f4f6;
-            border-radius: 12px;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f0f3f6, stop:1 #e8ecf0);
+            border-radius: 14px;
         }
         QLabel#aggregateRightEmptyMain {
             font-size: 12px;
             font-weight: bold;
-            color: #333;
+            color: #000000;
         }
         QLabel#aggregateRightEmptySub {
             font-size: 11px;
-            color: #6b7280;
+            color: #000000;
         }
         QLabel#customerName {
             font-size: 14px;
             font-weight: bold;
-            color: #333;
+            color: #000000;
         }
         QLabel#customerPlatform {
             font-size: 12px;
-            color: #666;
+            color: #000000;
         }
         QLabel#customerStatus {
             font-size: 12px;
-            color: #52c41a;
+            color: #000000;
+        }
+
+    )QSS");
+}
+
+QString ApplyStyle::helpDialogStyle()
+{
+    return QStringLiteral(R"QSS(
+        HelpDialog {
+            background: #1e293b;
+        }
+        QSplitter {
+            background: #1e293b;
+        }
+        QSplitter::handle {
+            background: #334155;
+            width: 1px;
+        }
+
+        #helpToc {
+            background: #0f172a;
+            border: none;
+            outline: none;
+            font-size: 13px;
+            color: #cbd5e1;
+            padding: 6px 0;
+        }
+        #helpToc::item {
+            padding: 7px 12px;
+            border: none;
+        }
+        #helpToc::item:selected {
+            background: #1e3a5f;
+            color: #38bdf8;
+            border-left: 3px solid #38bdf8;
+        }
+        #helpToc::item:hover:!selected {
+            background: #1e293b;
+        }
+        #helpToc::item:disabled {
+            color: #64748b;
+            font-weight: bold;
+            font-size: 12px;
+            padding: 10px 8px 4px 8px;
+            background: transparent;
+        }
+
+        #helpBrowser {
+            background: #1e293b;
+            border: none;
+            padding: 8px 16px;
+            font-size: 13px;
+            color: #e2e8f0;
+            selection-background-color: #38bdf8;
+            selection-color: #0f172a;
         }
     )QSS");
 }
