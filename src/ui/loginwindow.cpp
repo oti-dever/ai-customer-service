@@ -28,8 +28,13 @@ LoginWindow::LoginWindow(QWidget* parent)
     });
     connect(m_auth, &AuthManager::loginFailed, this, &LoginWindow::showError);
     connect(m_auth, &AuthManager::registerSucceeded, this, [this]() {
-        showError(QString());
+        QString registeredUsername = m_registerUsernameEdit->text().trimmed();
         showLoginForm();
+        m_usernameEdit->setText(registeredUsername);
+        m_passwordEdit->setFocus();
+        m_errorLabel->setStyleSheet("color: #52c41a;");
+        m_errorLabel->setText(QStringLiteral("注册成功，请登录"));
+        m_errorLabel->setVisible(true);
     });
     connect(m_auth, &AuthManager::registerFailed, this, &LoginWindow::showError);
 }
@@ -134,6 +139,8 @@ void LoginWindow::buildLoginForm()
     layout->addLayout(linkLayout);
 
     connect(m_loginBtn, &QPushButton::clicked, this, &LoginWindow::onLoginClicked);
+    connect(m_usernameEdit, &QLineEdit::returnPressed, this, &LoginWindow::onLoginClicked);
+    connect(m_passwordEdit, &QLineEdit::returnPressed, this, &LoginWindow::onLoginClicked);
     connect(m_switchToRegisterBtn, &QPushButton::clicked, this, &LoginWindow::onSwitchToRegister);
     connect(m_passwordVisibleCheck, &QCheckBox::toggled, this, &LoginWindow::onPasswordVisibleToggled);
 }
@@ -215,6 +222,7 @@ void LoginWindow::showError(const QString& msg)
     if (msg.isEmpty()) {
         m_errorLabel->setVisible(false);
     } else {
+        m_errorLabel->setStyleSheet("");
         m_errorLabel->setText(msg);
         m_errorLabel->setVisible(true);
     }
