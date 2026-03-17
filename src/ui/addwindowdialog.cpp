@@ -1,10 +1,14 @@
 #include "addwindowdialog.h"
+#include "mainwindow.h"
 
+#include <QCheckBox>
 #include <QDialogButtonBox>
+#include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
+#include <QProgressBar>
+#include <QPushButton>
 #include <QVBoxLayout>
-#include <qheaderview.h>
-#include <qpushbutton.h>
 
 AddWindowDialog::AddWindowDialog(QWidget *parent) : QDialog(parent)
 {
@@ -32,12 +36,16 @@ void AddWindowDialog::setupUI()
     mainLayout->addLayout(searchRow);
 
     m_table = new QTableWidget(this);
-    m_table->setColumnCount(4);
+    m_table->setColumnCount(5);
     QStringList headers;
-    headers << QStringLiteral("窗口标题") << QStringLiteral("进程名") << QStringLiteral("窗口类名") << QStringLiteral("句柄");
+    headers << QStringLiteral(" ") << QStringLiteral("窗口标题") << QStringLiteral("进程名") << QStringLiteral("窗口类名") << QStringLiteral("句柄");
     m_table->setHorizontalHeaderLabels(headers);
     m_table->horizontalHeader()->setStretchLastSection(true);
-    m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
+    m_table->setColumnWidth(0, 36);
+    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -81,7 +89,7 @@ void AddWindowDialog::setupUI()
     connect(m_searchEdit, &QLineEdit::textChanged, this, &AddWindowDialog::onSearchTextChanged);
     connect(m_table, &QTableWidget::itemSelectionChanged, this, &AddWindowDialog::onWindowSelectionChanged);
     connect(m_btnRefresh, &QPushButton::clicked, this, &AddWindowDialog::onRefreshClicked);
-    connect(buttonBox, &QDialogButtonBox::accepted, this, &AddWindowDialog::accept);
+    connect(buttonBox, &QDialogButtonBox::accepted, this, &AddWindowDialog::onOkClicked);
     connect(buttonBox, &QDialogButtonBox::rejected, this, &AddWindowDialog::reject);
 }
 
@@ -93,10 +101,6 @@ void AddWindowDialog::onRefreshClicked()
 
 void AddWindowDialog::rebuildTable()
 {
-    m_filteredIndexes.clear();
-    for(int i = 0; i < m_allWindows.size(); i++) {
-        m_filteredIndexes.append(i);
-    }
     applyFilter();
 }
 
@@ -104,11 +108,10 @@ void AddWindowDialog::applyFilter()
 {
     const QString keyword = m_searchEdit->text().trimmed();
     m_table->setRowCount(0);
-    for(int idx : std::as_const(m_filteredIndexes)) {
-        if (idx < 0 || idx >= m_allWindows.size()) {
-            continue;
-        }
-        const WindowInfo& info = m_allWindows.at(idx);
+    m_filteredIndexes.clear();
+
+    for (int i = 0; i < m_allWindows.size(); ++i) {
+        const WindowInfo& info = m_allWindows.at(i);
         if (!keyword.isEmpty()) {
             const bool match = info.windowTitle.contains(keyword, Qt::CaseInsensitive) ||
                                info.processName.contains(keyword, Qt::CaseInsensitive);
@@ -116,11 +119,19 @@ void AddWindowDialog::applyFilter()
         }
         const int row = m_table->rowCount();
         m_table->insertRow(row);
-        m_table->setItem(row, 0, new QTableWidgetItem(info.windowTitle));
-        m_table->setItem(row, 1, new QTableWidgetItem(info.processName));
-        m_table->setItem(row, 2, new QTableWidgetItem(info.className));
-        m_table->setItem(row, 3, new QTableWidgetItem(info.handle == 0 ? QStringLiteral("-")
+        auto* check = new QCheckBox(this);
+        check->setStyleSheet("margin-left: 8px;");
+        auto* checkWrap = new QWidget(this);
+        auto* checkLayout = new QHBoxLayout(checkWrap);
+        checkLayout->setContentsMargins(0, 0, 0, 0);
+        checkLayout->addWidget(check);
+        m_table->setCellWidget(row, 0, checkWrap);
+        m_table->setItem(row, 1, new QTableWidgetItem(info.windowTitle));
+        m_table->setItem(row, 2, new QTableWidgetItem(info.processName));
+        m_table->setItem(row, 3, new QTableWidgetItem(info.className));
+        m_table->setItem(row, 4, new QTableWidgetItem(info.handle == 0 ? QStringLiteral("-")
                                                                        : QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(info.handle), 16))));
+        m_filteredIndexes.append(i);
     }
 
     if (m_table->rowCount() > 0) {
@@ -140,10 +151,10 @@ void AddWindowDialog::onWindowSelectionChanged()
     if (row < 0 || row >= m_table->rowCount()) {
         return;
     }
-    const QString title = m_table->item(row, 0)->text();
-    const QString process = m_table->item(row, 1)->text();
-    const QString cls = m_table->item(row, 2)->text();
-    const QString handleStr = m_table->item(row, 3)->text();
+    const QString title = m_table->item(row, 1)->text();
+    const QString process = m_table->item(row, 2)->text();
+    const QString cls = m_table->item(row, 3)->text();
+    const QString handleStr = m_table->item(row, 4)->text();
 
     m_editPlatformName->setText(title);
     m_editProcessName->setText(process);
@@ -152,23 +163,60 @@ void AddWindowDialog::onWindowSelectionChanged()
     m_editHandle->setText(handleStr);
 }
 
-WindowInfo AddWindowDialog::selectedWindow() const
+QVector<WindowInfo> AddWindowDialog::selectedWindows() const
 {
-    if (m_filteredIndexes.isEmpty()) {
-        return {};
+    QVector<WindowInfo> result;
+    const int currentRow = m_table->currentRow();
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        auto* wrap = m_table->cellWidget(row, 0);
+        if (!wrap) continue;
+        auto* check = wrap->findChild<QCheckBox*>();
+        if (!check || !check->isChecked()) continue;
+        if (row < 0 || row >= m_filteredIndexes.size()) continue;
+        int idx = m_filteredIndexes.at(row);
+        if (idx < 0 || idx >= m_allWindows.size()) continue;
+        WindowInfo info = m_allWindows.at(idx);
+        info.platformName = m_table->item(row, 1)->text();
+        info.processName = m_table->item(row, 2)->text();
+        info.windowTitle = m_table->item(row, 1)->text();
+        info.className = m_table->item(row, 3)->text();
+        if (info.platformName.isEmpty()) info.platformName = info.windowTitle;
+        if (row == currentRow) {
+            info.platformName = m_editPlatformName->text();
+            info.processName = m_editProcessName->text();
+            info.windowTitle = m_editWindowTitle->text();
+            info.className = m_editClassName->text();
+        }
+        result.append(info);
     }
-    int row = m_table->currentRow();
-    if (row < 0 || row >= m_filteredIndexes.size()) {
-        return {};
+    return result;
+}
+
+void AddWindowDialog::onOkClicked()
+{
+    QVector<WindowInfo> list = selectedWindows();
+    if (list.isEmpty()) {
+        int row = m_table->currentRow();
+        if (row >= 0 && row < m_filteredIndexes.size()) {
+            int idx = m_filteredIndexes.at(row);
+            if (idx >= 0 && idx < m_allWindows.size()) {
+                WindowInfo info = m_allWindows.at(idx);
+                info.platformName = m_editPlatformName->text();
+                info.processName = m_editProcessName->text();
+                info.windowTitle = m_editWindowTitle->text();
+                info.className = m_editClassName->text();
+                if (info.platformName.isEmpty()) info.platformName = info.windowTitle;
+                list.append(info);
+            }
+        }
     }
-    int idx = m_filteredIndexes.at(row);
-    if (idx < 0 || idx >= m_allWindows.size()) {
-        return {};
+    if (list.isEmpty()) {
+        return;
     }
-    WindowInfo info = m_allWindows.at(idx);
-    info.platformName = m_editPlatformName->text();
-    info.processName = m_editProcessName->text();
-    info.windowTitle = m_editWindowTitle->text();
-    info.className = m_editClassName->text();
-    return info;
+
+    auto* mainWin = qobject_cast<MainWindow*>(parent());
+    if (!mainWin) return;
+
+    mainWin->startBatchAddWindows(list);
+    accept();
 }

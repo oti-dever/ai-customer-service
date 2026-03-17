@@ -5,14 +5,18 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTableWidget>
+#include <QLabel>
+#include <QVector>
 #include "../utils/win32windowhelper.h"
+
+class MainWindow;
 
 class AddWindowDialog : public QDialog
 {
     Q_OBJECT
 public:
     explicit AddWindowDialog(QWidget* parent = nullptr);
-    WindowInfo selectedWindow() const;
+    QVector<WindowInfo> selectedWindows() const;
 private:
     void setupUI();
     void rebuildTable();
@@ -22,6 +26,7 @@ private slots:
     void onSearchTextChanged();
     void onRefreshClicked();
     void onWindowSelectionChanged();
+    void onOkClicked();
 
 private:
     QLineEdit* m_searchEdit = nullptr;
