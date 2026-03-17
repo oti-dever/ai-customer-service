@@ -1,9 +1,7 @@
 #include "logger.h"
-#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QMutexLocker>
-#include <QStandardPaths>
 #include <QTextStream>
 #include <QtGlobal>
 #include <cstdio>
@@ -53,9 +51,9 @@ void Logger::init()
     if (s_initialized)
         return;
 
-    QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    QDir().mkpath(logDir + "/logs");
-    QString logPath = logDir + "/logs/"
+    QString logDir = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/logs");
+    QDir().mkpath(logDir);
+    QString logPath = logDir + "/"
                       + QDateTime::currentDateTime().toString("yyyy-MM-dd") + ".log";
 
     s_logFile.setFileName(logPath);
