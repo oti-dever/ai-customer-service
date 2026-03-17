@@ -587,6 +587,7 @@ void MainWindow::onPlatformTreeSelectionChanged()
     QModelIndex idx = m_platformTree->currentIndex();
     if (!idx.isValid()) {
         hideCurrentFloatWindow();
+        m_activeWindowId.clear();
         showSystemReadyPage();
         return;
     }
@@ -596,16 +597,19 @@ void MainWindow::onPlatformTreeSelectionChanged()
 
     if (isGroup) {
         hideCurrentFloatWindow();
+        m_activeWindowId.clear();
         showSystemReadyPage();
         return;
     }
     if (id == QLatin1String("aggregate")) {
         hideCurrentFloatWindow();
+        m_activeWindowId.clear();
         openAggregateChatForm();
         return;
     }
     if (id == QLatin1String("manage") || id == QLatin1String("robot")) {
         hideCurrentFloatWindow();
+        m_activeWindowId.clear();
         showPlaceholderPage(idx.data(Qt::DisplayRole).toString());
         return;
     }
@@ -615,6 +619,7 @@ void MainWindow::onPlatformTreeSelectionChanged()
     bool isActivated = idx.data(IsActivatedRole).toBool();
     if (isCS && !isActivated) {
         hideCurrentFloatWindow();
+        m_activeWindowId.clear();
         QString name = idx.data(Qt::DisplayRole).toString();
         showPlaceholderPage(QStringLiteral("请通过顶部「添加新窗口」按钮关联 %1 窗口").arg(name));
         return;
@@ -627,6 +632,7 @@ void MainWindow::onPlatformTreeSelectionChanged()
     }
 
     hideCurrentFloatWindow();
+    m_activeWindowId.clear();
     showPlaceholderPage(idx.data(Qt::DisplayRole).toString());
 }
 
@@ -1505,7 +1511,8 @@ void MainWindow::checkManagedWindowsState()
                                                    ? (nowMs - activeEntry.closeIntentSinceMs) : 0;
         const bool gracePeriodElapsed = usesCloseIntentDetection
                                         && activeEntry.closeIntentSinceMs > 0
-                                        && elapsedSinceCloseIntent >= 800;
+                                        && elapsedSinceCloseIntent >= 800
+                                        && isInvisible;
 
         const bool shouldDisconnect = usesCloseIntentDetection
                                           ? (invisibleAfterCloseIntent || gracePeriodElapsed)
@@ -1642,13 +1649,9 @@ void MainWindow::removeOnlinePlatformItem(const QString& platformId,
     if (!m_managedWindows.contains(platformId)) return;
     auto& entry = m_managedWindows[platformId];
 
-    if (m_activeWindowId == platformId) {
-        if (!showWindowAfterRelease) {
-            showSystemReadyPage();
-        }
-        if (showWindowAfterRelease) {
-            hideCurrentFloatWindow();
-        }
+    const bool wasActive = (m_activeWindowId == platformId);
+    if (wasActive) {
+        hideCurrentFloatWindow();
         m_activeWindowId.clear();
     }
 
@@ -1671,7 +1674,9 @@ void MainWindow::removeOnlinePlatformItem(const QString& platformId,
 
     m_managedWindows.remove(platformId);
     updateTreeViewHeight();
-    showSystemReadyPage();
+    if (wasActive) {
+        showSystemReadyPage();
+    }
     qInfo() << "[MainWindow] 移除平台:" << platformId;
 }
 
