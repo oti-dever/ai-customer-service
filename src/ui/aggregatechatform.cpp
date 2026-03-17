@@ -12,19 +12,13 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include <QSplitter>
-#include <QStatusBar>
 #include <QStyle>
 #include <QTimer>
 #include <QToolButton>
 
 AggregateChatForm::AggregateChatForm(QWidget* parent)
-    : QMainWindow(parent)
+    : QWidget(parent)
 {
-    setWindowTitle(QStringLiteral("管理后台-对话接待"));
-    setWindowIcon(QIcon(QStringLiteral(":/app_icon.svg")));
-    setMinimumSize(1000, 640);
-    resize(1200, 720);
-
     setupUI();
     setupStyles();
     connectSignals();
@@ -37,12 +31,11 @@ AggregateChatForm::~AggregateChatForm()
 
 void AggregateChatForm::setupUI()
 {
-    auto* central = new QWidget(this);
-    setCentralWidget(central);
-    auto* mainLayout = new QHBoxLayout(central);
-    mainLayout->setContentsMargins(0, 0, 0, 0);
-    mainLayout->setSpacing(0);
-    auto* splitter = new QSplitter(Qt::Horizontal, central);
+    auto* outerLayout = new QVBoxLayout(this);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->setSpacing(0);
+
+    auto* splitter = new QSplitter(Qt::Horizontal, this);
     splitter->addWidget(buildLeftPanel());
     splitter->addWidget(buildCenterPanel());
     splitter->addWidget(buildRightPanel());
@@ -50,7 +43,9 @@ void AggregateChatForm::setupUI()
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setStretchFactor(2, 0);
-    mainLayout->addWidget(splitter);
+    outerLayout->addWidget(splitter, 1);
+
+    m_statusLabel = nullptr;
 }
 
 void AggregateChatForm::setupStyles()
@@ -71,7 +66,7 @@ void AggregateChatForm::connectSignals()
     connect(&mgr, &ConversationManager::messageSendFailed,
             this, [this](int convId, const QString& reason) {
                 Q_UNUSED(convId)
-                statusBar()->showMessage(QStringLiteral("发送失败: %1").arg(reason), 5000);
+                showStatusMessage(QStringLiteral("发送失败: %1").arg(reason), 5000);
             });
 
     auto* shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
@@ -89,20 +84,6 @@ QWidget* AggregateChatForm::buildLeftPanel()
     auto* layout = new QVBoxLayout(panel);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(10);
-
-    // Header
-    auto* header = new QWidget(panel);
-    auto* headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(4, 0, 0, 0);
-    headerLayout->setSpacing(8);
-    auto* logo = new QLabel(header);
-    logo->setPixmap(qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation).pixmap(22, 22));
-    auto* title = new QLabel(QStringLiteral("聚合对话接待"), header);
-    title->setObjectName("aggregateLeftTitle");
-    headerLayout->addWidget(logo);
-    headerLayout->addWidget(title);
-    headerLayout->addStretch(1);
-    layout->addWidget(header);
 
     // Mode row
     auto* modeRow = new QWidget(panel);
@@ -150,13 +131,21 @@ QWidget* AggregateChatForm::buildLeftPanel()
     connect(m_btnAll, &QPushButton::clicked, this, &AggregateChatForm::onTabAllClicked);
 
     // Search
-    m_searchEdit = new QLineEdit(panel);
+    auto* searchRow = new QWidget(panel);
+    auto* searchLayout = new QHBoxLayout(searchRow);
+    searchLayout->setContentsMargins(0, 0, 0, 0);
+    searchLayout->setSpacing(6);
+    auto* searchIconLabel = new QLabel(searchRow);
+    searchIconLabel->setFixedSize(20, 20);
+    searchIconLabel->setAlignment(Qt::AlignCenter);
+    searchIconLabel->setPixmap(QIcon(QStringLiteral(":/aggregate_reception_icons/search_icon.svg")).pixmap(16, 16));
+    m_searchEdit = new QLineEdit(searchRow);
     m_searchEdit->setObjectName("aggregateSearch");
     m_searchEdit->setPlaceholderText(QStringLiteral("搜索会话或客户名"));
-    m_searchEdit->addAction(qApp->style()->standardIcon(QStyle::SP_FileDialogContentsView),
-                            QLineEdit::LeadingPosition);
     connect(m_searchEdit, &QLineEdit::textChanged, this, [this]() { refreshConversationList(); });
-    layout->addWidget(m_searchEdit);
+    searchLayout->addWidget(searchIconLabel);
+    searchLayout->addWidget(m_searchEdit, 1);
+    layout->addWidget(searchRow);
 
     // Conversation list
     m_leftStack = new QStackedWidget(panel);
@@ -227,6 +216,7 @@ QWidget* AggregateChatForm::buildCenterPanel()
 
     // Chat area
     m_chatArea = new QWidget(panel);
+    m_chatArea->setObjectName("chatArea");
     auto* chatLayout = new QVBoxLayout(m_chatArea);
     chatLayout->setContentsMargins(0, 0, 0, 0);
     chatLayout->setSpacing(0);
@@ -308,14 +298,8 @@ QWidget* AggregateChatForm::buildRightPanel()
     auto* headerRow = new QHBoxLayout();
     auto* rightTitle = new QLabel(QStringLiteral("客户信息"), rightHeader);
     rightTitle->setObjectName("aggregateRightHeaderTitle");
-    auto* closeBtn = new QPushButton(QStringLiteral("\u00d7"), rightHeader);
-    closeBtn->setObjectName("aggregateRightHeaderClose");
-    closeBtn->setFixedSize(24, 24);
-    closeBtn->setCursor(Qt::PointingHandCursor);
-    connect(closeBtn, &QPushButton::clicked, this, &QWidget::close);
     headerRow->addWidget(rightTitle);
     headerRow->addStretch(1);
-    headerRow->addWidget(closeBtn);
     auto* rightSubtitle = new QLabel(QStringLiteral("统一客户服务平台"), rightHeader);
     rightSubtitle->setObjectName("aggregateRightHeaderSub");
     headerLayout->addLayout(headerRow);
@@ -391,7 +375,7 @@ QWidget* AggregateChatForm::createConversationItem(const ConversationInfo& conv)
     auto* dot = new QLabel(widget);
     dot->setFixedSize(10, 10);
     QString dotColor = (conv.platform == QLatin1String("simulator"))
-                           ? "#52c41a" : "#1890ff";
+                           ? "#5aaf68" : "#7eb8e8";
     dot->setStyleSheet(QString("background: %1; border-radius: 5px;").arg(dotColor));
     layout->addWidget(dot, 0, Qt::AlignTop | Qt::AlignLeft);
 
@@ -402,7 +386,7 @@ QWidget* AggregateChatForm::createConversationItem(const ConversationInfo& conv)
     auto* nameRow = new QHBoxLayout();
     auto* nameLabel = new QLabel(conv.customerName, widget);
     nameLabel->setObjectName("convItemName");
-    nameLabel->setStyleSheet("font-weight: bold; font-size: 13px; color: #e8e8e8;");
+    nameLabel->setStyleSheet("font-weight: bold; font-size: 13px; color: #000000;");
     nameRow->addWidget(nameLabel);
     nameRow->addStretch(1);
 
@@ -414,13 +398,13 @@ QWidget* AggregateChatForm::createConversationItem(const ConversationInfo& conv)
             timeStr = conv.lastTime.toString("MM-dd HH:mm");
     }
     auto* timeLabel = new QLabel(timeStr, widget);
-    timeLabel->setStyleSheet("font-size: 11px; color: #888;");
+    timeLabel->setStyleSheet("font-size: 11px; color: #000000;");
     nameRow->addWidget(timeLabel);
     textCol->addLayout(nameRow);
 
     auto* msgRow = new QHBoxLayout();
     auto* msgLabel = new QLabel(conv.lastMessage.left(30), widget);
-    msgLabel->setStyleSheet("font-size: 12px; color: #aaa;");
+    msgLabel->setStyleSheet("font-size: 12px; color: #000000;");
     msgLabel->setMaximumWidth(180);
     msgRow->addWidget(msgLabel);
     msgRow->addStretch(1);
@@ -431,7 +415,7 @@ QWidget* AggregateChatForm::createConversationItem(const ConversationInfo& conv)
         badge->setAlignment(Qt::AlignCenter);
         badge->setFixedSize(20, 20);
         badge->setStyleSheet(
-            "background: #ff4d4f; color: white; font-size: 11px; "
+            "background: #e8736b; color: white; font-size: 11px; "
             "font-weight: bold; border-radius: 10px;");
         msgRow->addWidget(badge);
     }
@@ -470,7 +454,7 @@ QWidget* AggregateChatForm::createBubble(const QString& text, const QString& sen
     if (!sender.isEmpty() && !isOutgoing)
         meta = sender + "  " + meta;
     auto* metaLabel = new QLabel(meta, bubble);
-    metaLabel->setObjectName("bubbleMeta");
+    metaLabel->setObjectName(isOutgoing ? "bubbleMetaOut" : "bubbleMetaIn");
     bubbleLayout->addWidget(metaLabel);
 
     bubble->setMaximumWidth(420);
@@ -478,6 +462,42 @@ QWidget* AggregateChatForm::createBubble(const QString& text, const QString& sen
 
     if (!isOutgoing)
         rowLayout->addStretch(1);
+
+    return row;
+}
+
+// ===================== Date Separator =====================
+
+QWidget* AggregateChatForm::createDateSeparator(const QDate& date)
+{
+    auto* row = new QWidget();
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(40, 10, 40, 6);
+    layout->setSpacing(10);
+
+    auto* leftLine = new QFrame(row);
+    leftLine->setFixedHeight(1);
+    leftLine->setObjectName("dateSeparatorLine");
+
+    QString dateText;
+    if (date == QDate::currentDate())
+        dateText = QStringLiteral("今天");
+    else if (date == QDate::currentDate().addDays(-1))
+        dateText = QStringLiteral("昨天");
+    else
+        dateText = date.toString(QStringLiteral("yyyy年M月d日"));
+
+    auto* label = new QLabel(dateText, row);
+    label->setObjectName("dateSeparatorText");
+    label->setAlignment(Qt::AlignCenter);
+
+    auto* rightLine = new QFrame(row);
+    rightLine->setFixedHeight(1);
+    rightLine->setObjectName("dateSeparatorLine");
+
+    layout->addWidget(leftLine, 1);
+    layout->addWidget(label);
+    layout->addWidget(rightLine, 1);
 
     return row;
 }
@@ -525,6 +545,7 @@ void AggregateChatForm::showConversation(int conversationId)
     }
 
     // Load messages
+    m_lastBubbleDate = QDate();
     auto messages = mgr.messages(conversationId);
     for (const auto& msg : messages) {
         appendMessageBubble(msg);
@@ -546,6 +567,13 @@ void AggregateChatForm::showConversation(int conversationId)
 
 void AggregateChatForm::appendMessageBubble(const MessageRecord& msg)
 {
+    QDate msgDate = msg.createdAt.isValid() ? msg.createdAt.date() : QDate::currentDate();
+    if (!m_lastBubbleDate.isValid() || msgDate != m_lastBubbleDate) {
+        int sepIdx = m_messageLayout->count() - 1;
+        m_messageLayout->insertWidget(sepIdx, createDateSeparator(msgDate));
+        m_lastBubbleDate = msgDate;
+    }
+
     bool isOut = (msg.direction == QLatin1String("out"));
     auto* bubble = createBubble(msg.content, msg.sender, msg.createdAt, isOut);
     int idx = m_messageLayout->count() - 1;
@@ -635,8 +663,7 @@ void AggregateChatForm::onNewMessage(int conversationId, const MessageRecord& ms
         QTimer::singleShot(50, this, &AggregateChatForm::scrollToBottom);
     }
     refreshConversationList();
-    statusBar()->showMessage(
-        QStringLiteral("新消息: %1").arg(msg.content.left(30)), 3000);
+    showStatusMessage(QStringLiteral("新消息: %1").arg(msg.content.left(30)), 3000);
 }
 
 void AggregateChatForm::onSentOk(int conversationId, const MessageRecord& msg)
@@ -646,4 +673,16 @@ void AggregateChatForm::onSentOk(int conversationId, const MessageRecord& msg)
         QTimer::singleShot(50, this, &AggregateChatForm::scrollToBottom);
     }
     refreshConversationList();
+}
+
+void AggregateChatForm::showStatusMessage(const QString& text, int timeoutMs)
+{
+    if (!m_statusLabel) return;
+    m_statusLabel->setText(text);
+    if (timeoutMs > 0) {
+        QTimer::singleShot(timeoutMs, this, [this, text]() {
+            if (m_statusLabel && m_statusLabel->text() == text)
+                m_statusLabel->clear();
+        });
+    }
 }

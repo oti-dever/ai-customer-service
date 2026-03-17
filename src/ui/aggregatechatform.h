@@ -5,7 +5,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
-#include <QMainWindow>
+#include <QWidget>
 #include <QMap>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -16,7 +16,7 @@
 
 class ConversationManager;
 
-class AggregateChatForm : public QMainWindow
+class AggregateChatForm : public QWidget
 {
     Q_OBJECT
 public:
@@ -39,10 +39,12 @@ private:
     void updateCustomerInfo(const ConversationInfo& conv);
     void showCenterEmptyState();
     void showRightEmptyState();
+    void showStatusMessage(const QString& text, int timeoutMs);
 
     QWidget* createConversationItem(const ConversationInfo& conv);
     QWidget* createBubble(const QString& text, const QString& sender,
                           const QDateTime& time, bool isOutgoing);
+    QWidget* createDateSeparator(const QDate& date);
 
 private slots:
     void onTabPendingClicked();
@@ -81,9 +83,11 @@ private:
     QLabel* m_customerName = nullptr;
     QLabel* m_customerPlatform = nullptr;
     QLabel* m_customerStatus = nullptr;
+    QLabel* m_statusLabel = nullptr;
 
     bool m_currentTabIsPending = true;
     int m_currentConvId = -1;
+    QDate m_lastBubbleDate;
 };
 
 #endif // AGGREGATECHATFORM_H
