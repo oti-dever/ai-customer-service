@@ -4,6 +4,7 @@
 #include <QLabel>
 #include <QMainWindow>
 #include <QMap>
+#include <QVector>
 #include <QStringList>
 #include <QtGlobal>
 #include <QStackedWidget>
@@ -13,6 +14,11 @@
 #include "../utils/win32windowhelper.h"
 
 class AggregateChatForm;
+
+struct QuickLaunchApp {
+    QString name;
+    QString path;
+};
 
 enum class WindowDisplayMode {
     Embed,
@@ -76,8 +82,16 @@ private:
     void showPlaceholderPage(const QString& title);
     void openAddWindowDialog();
     void openAggregateChatForm();
+    void openQuickLaunchManager();
+    void runQuickLaunchApps();
+    void openAppHelpDialog();
+    void openBugLogDialog();
 
+public:
     void addWindowToPlatform(const WindowInfo& info);
+    void startBatchAddWindows(const QVector<WindowInfo>& list);
+
+private:
     void switchToWindow(const QString& platformId);
     void hideCurrentFloatWindow();
     void removeOnlinePlatformItem(const QString& platformId,
@@ -102,6 +116,7 @@ private slots:
     void onPlatformTreeSelectionChanged();
     void onPlatformTreeClicked(const QModelIndex& idx);
     void checkManagedWindowsState();
+    void processNextBatchAdd();
 
 private:
     QString m_username;
@@ -129,6 +144,15 @@ private:
     QString m_activeWindowId;
     int m_nextOnlineId = 0;
     QTimer* m_windowStateTimer = nullptr;
+
+    QVector<WindowInfo> m_batchAddList;
+    int m_batchAddIndex = 0;
+    int m_batchAddSuccessCount = 0;
+    QWidget* m_batchAddOverlay = nullptr;
+    QLabel* m_batchAddPrompt = nullptr;
+
+    QVector<QuickLaunchApp> m_quickLaunchApps;
+    bool m_quickLaunchOnlyIfNotRunning = true;
 };
 
 #endif // MAINWINDOW_H

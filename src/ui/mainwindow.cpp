@@ -12,19 +12,49 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QCheckBox>
+#include <QProcess>
+#include <QDir>
+#include <QToolButton>
+#include <QMessageBox>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QRandomGenerator>
 #include <QScreen>
 #include <QSettings>
 #include <QStatusBar>
+#include <QSplitter>
 #include <QStyledItemDelegate>
+#include <QTextBrowser>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
 #include <QWindow>
+
+// ==================== Batch add overlay ====================
+
+class BatchAddOverlayWidget : public QWidget
+{
+public:
+    explicit BatchAddOverlayWidget(QWidget* parent = nullptr)
+        : QWidget(parent, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint)
+    {
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_TransparentForMouseEvents, false);
+        setAutoFillBackground(false);
+    }
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter p(this);
+        p.fillRect(rect(), QColor(100, 100, 110, 55));
+    }
+};
 
 // ==================== Tree roles & delegate ====================
 
@@ -309,8 +339,8 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
     setWindowTitle(QString("AI客服 - %1").arg(username));
     setWindowIcon(resourceIcon(QStringLiteral(":/app_icon.svg"),
                                qApp->style()->standardIcon(QStyle::SP_DesktopIcon)));
-    setMinimumSize(1024, 640);
-    resize(1320, 760);
+    setMinimumSize(1100, 680);
+    resize(1440, 840);
 
     auto* root = new QWidget(this);
     root->setObjectName("root");
@@ -332,7 +362,7 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
     setupStyles();
     buildStatusBar();
     m_windowStateTimer = new QTimer(this);
-    m_windowStateTimer->setInterval(100);
+    m_windowStateTimer->setInterval(250);
     connect(m_windowStateTimer, &QTimer::timeout,
             this, &MainWindow::checkManagedWindowsState);
     m_windowStateTimer->start();
@@ -480,8 +510,10 @@ QWidget* MainWindow::buildTopBar()
                                                    qApp->style()->standardIcon(QStyle::SP_FileDialogNewFolder)), QStringLiteral("添加新窗口"));
     m_btnRefresh = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/refresh_platform_list_icon.svg"),
                                                        qApp->style()->standardIcon(QStyle::SP_BrowserReload)), QStringLiteral("刷新平台列表"));
-    m_btnQuickStart = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/quick_launch_application_icon.svg"),
-                                                          qApp->style()->standardIcon(QStyle::SP_MediaPlay)), QStringLiteral("快速启动应用"));
+    auto* bugBtn = makeTopIconButton(bar, QIcon(QStringLiteral(":/bug_log_icon.svg")),
+                                     QStringLiteral("查看 Bug 修复日志"));
+    auto* helpBtn = makeTopIconButton(bar, QIcon(QStringLiteral(":/question_mark_icon.svg")),
+                                      QStringLiteral("查看软件使用说明"));
     layout->addWidget(m_btnAdd);
     layout->addWidget(m_btnRefresh);
 
@@ -499,11 +531,13 @@ QWidget* MainWindow::buildTopBar()
     readyLayout->addWidget(readyText);
     layout->addWidget(readyWrap);
     layout->addStretch(1);
-    layout->addWidget(m_btnQuickStart);
+    layout->addWidget(bugBtn);
+    layout->addWidget(helpBtn);
 
     connect(m_btnAdd, &QToolButton::clicked, this, &MainWindow::openAddWindowDialog);
     connect(m_btnRefresh, &QToolButton::clicked, this, &MainWindow::showSystemReadyPage);
-    connect(m_btnQuickStart, &QToolButton::clicked, this, &MainWindow::showSystemReadyPage);
+    connect(bugBtn, &QToolButton::clicked, this, &MainWindow::openBugLogDialog);
+    connect(helpBtn, &QToolButton::clicked, this, &MainWindow::openAppHelpDialog);
     return bar;
 }
 
@@ -699,9 +733,19 @@ QWidget* MainWindow::buildReadyPage()
     auto* btnStart = makeQuick(resourceIcon(QStringLiteral(":/quick_launch_application_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_DialogOkButton)),
                                QStringLiteral("快速启动应用"));
+    m_btnQuickStart = btnStart;
     connect(btnPick, &QToolButton::clicked, this, [this]() { m_platformTree->setFocus(); });
     connect(btnEmbed, &QToolButton::clicked, this, &MainWindow::openAddWindowDialog);
-    connect(btnStart, &QToolButton::clicked, this, [this]() { showSystemReadyPage(); });
+    connect(btnStart, &QToolButton::clicked, this, &MainWindow::runQuickLaunchApps);
+    btnStart->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(btnStart, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QMenu menu(m_btnQuickStart);
+        QAction* manage = menu.addAction(QStringLiteral("管理应用列表"));
+        QAction* triggered = menu.exec(m_btnQuickStart->mapToGlobal(pos));
+        if (triggered == manage) {
+            openQuickLaunchManager();
+        }
+    });
     quickLayout->addWidget(btnPick);
     quickLayout->addWidget(btnEmbed);
     quickLayout->addWidget(btnStart);
@@ -717,12 +761,472 @@ QWidget* MainWindow::buildReadyPage()
 void MainWindow::openAddWindowDialog()
 {
     AddWindowDialog dlg(this);
-    if (dlg.exec() != QDialog::Accepted) return;
+    if (dlg.exec() == QDialog::Accepted) {
+        showSystemReadyPage();
+    }
+}
 
-    const WindowInfo info = dlg.selectedWindow();
-    if (info.handle == 0) return;
+static void loadQuickLaunchConfig(QVector<QuickLaunchApp>& apps,
+                                  bool& onlyIfNotRunning)
+{
+    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    const int size = settings.beginReadArray(QStringLiteral("quickLaunch/apps"));
+    apps.clear();
+    for (int i = 0; i < size; ++i) {
+        settings.setArrayIndex(i);
+        QuickLaunchApp app;
+        app.name = settings.value(QStringLiteral("name")).toString();
+        app.path = settings.value(QStringLiteral("path")).toString();
+        if (!app.path.isEmpty())
+            apps.append(app);
+    }
+    settings.endArray();
+    onlyIfNotRunning = settings.value(QStringLiteral("quickLaunch/onlyIfNotRunning"), true).toBool();
+}
 
-    addWindowToPlatform(info);
+static void saveQuickLaunchConfig(const QVector<QuickLaunchApp>& apps,
+                                  bool onlyIfNotRunning)
+{
+    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    settings.beginWriteArray(QStringLiteral("quickLaunch/apps"));
+    for (int i = 0; i < apps.size(); ++i) {
+        settings.setArrayIndex(i);
+        settings.setValue(QStringLiteral("name"), apps[i].name);
+        settings.setValue(QStringLiteral("path"), apps[i].path);
+    }
+    settings.endArray();
+    settings.setValue(QStringLiteral("quickLaunch/onlyIfNotRunning"), onlyIfNotRunning);
+}
+
+void MainWindow::openQuickLaunchManager()
+{
+    loadQuickLaunchConfig(m_quickLaunchApps, m_quickLaunchOnlyIfNotRunning);
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("管理应用列表"));
+    dlg.resize(520, 360);
+
+    auto* mainLayout = new QVBoxLayout(&dlg);
+    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setSpacing(10);
+
+    auto* list = new QListWidget(&dlg);
+    list->setSelectionMode(QAbstractItemView::SingleSelection);
+    for (const auto& app : m_quickLaunchApps) {
+        auto* item = new QListWidgetItem(list);
+        item->setText(app.name.isEmpty() ? QFileInfo(app.path).completeBaseName() : app.name);
+        item->setData(Qt::UserRole, app.name);
+        item->setData(Qt::UserRole + 1, app.path);
+    }
+    mainLayout->addWidget(list, 1);
+
+    auto* onlyRow = new QWidget(&dlg);
+    auto* onlyLayout = new QHBoxLayout(onlyRow);
+    onlyLayout->setContentsMargins(0, 0, 0, 0);
+    onlyLayout->setSpacing(6);
+    auto* onlyBox = new QCheckBox(QStringLiteral("只启动未运行的应用"), onlyRow);
+    onlyBox->setChecked(m_quickLaunchOnlyIfNotRunning);
+    auto* helpBtn = new QToolButton(onlyRow);
+    helpBtn->setAutoRaise(true);
+    helpBtn->setIcon(QIcon(QStringLiteral(":/question_mark_icon.svg")));
+    helpBtn->setToolTip(QStringLiteral("查看使用说明"));
+    helpBtn->setCursor(Qt::PointingHandCursor);
+    onlyLayout->addWidget(onlyBox);
+    onlyLayout->addStretch(1);
+    onlyLayout->addWidget(helpBtn);
+    mainLayout->addWidget(onlyRow);
+
+    auto* btnRow = new QHBoxLayout();
+    btnRow->addStretch(1);
+    auto* btnAdd = new QPushButton(QStringLiteral("添加应用..."), &dlg);
+    auto* btnRemove = new QPushButton(QStringLiteral("删除选中"), &dlg);
+    auto* btnOk = new QPushButton(QStringLiteral("确定"), &dlg);
+    auto* btnCancel = new QPushButton(QStringLiteral("取消"), &dlg);
+    btnRow->addWidget(btnAdd);
+    btnRow->addWidget(btnRemove);
+    btnRow->addSpacing(10);
+    btnRow->addWidget(btnOk);
+    btnRow->addWidget(btnCancel);
+    mainLayout->addLayout(btnRow);
+
+    connect(btnAdd, &QPushButton::clicked, &dlg, [&]() {
+        const QString path = QFileDialog::getOpenFileName(
+            &dlg,
+            QStringLiteral("选择应用程序"),
+            QString(),
+            QStringLiteral("应用程序 (*.exe);;所有文件 (*.*)"));
+        if (path.isEmpty())
+            return;
+        QFileInfo info(path);
+        auto* item = new QListWidgetItem(list);
+        item->setText(info.completeBaseName());
+        item->setData(Qt::UserRole, info.completeBaseName());
+        item->setData(Qt::UserRole + 1, path);
+    });
+
+    connect(btnRemove, &QPushButton::clicked, &dlg, [&]() {
+        auto* item = list->currentItem();
+        if (!item)
+            return;
+        delete item;
+    });
+
+    connect(btnOk, &QPushButton::clicked, &dlg, [&]() {
+        m_quickLaunchApps.clear();
+        for (int i = 0; i < list->count(); ++i) {
+            auto* item = list->item(i);
+            QuickLaunchApp app;
+            app.name = item->data(Qt::UserRole).toString();
+            app.path = item->data(Qt::UserRole + 1).toString();
+            if (!app.path.isEmpty())
+                m_quickLaunchApps.append(app);
+        }
+        m_quickLaunchOnlyIfNotRunning = onlyBox->isChecked();
+        saveQuickLaunchConfig(m_quickLaunchApps, m_quickLaunchOnlyIfNotRunning);
+        dlg.accept();
+    });
+
+    connect(btnCancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    connect(helpBtn, &QToolButton::clicked, &dlg, [&dlg]() {
+        const QString text = QStringLiteral(
+            "【快速启动应用使用说明】\n\n"
+            "1. 通过「添加应用...」选择常用程序的可执行文件（*.exe）。\n"
+            "2. 「只启动未运行的应用」勾选后，每次快速启动只会启动当前未在运行的应用，"
+            "   避免重复打开多个实例。\n"
+            "3. 快速启动入口位于主界面「快速启动应用」卡片：\n"
+            "   - 左键：按列表依次启动应用；\n"
+            "   - 右键：「管理应用列表」，可增删应用并修改该选项。\n"
+            "4. 微信为特例，将按系统默认方式启动，其它应用则按各自默认窗口状态启动。\n");
+        QMessageBox msgBox(&dlg);
+        msgBox.setWindowTitle(QStringLiteral("快速启动应用 - 使用说明"));
+        msgBox.setText(text);
+        msgBox.setIconPixmap(QIcon(QStringLiteral(":/question_mark_icon.svg")).pixmap(32, 32));
+        msgBox.setStandardButtons(QMessageBox::Close);
+        msgBox.exec();
+    });
+
+    dlg.exec();
+}
+
+static bool isProcessRunningByName(const QString& exeName)
+{
+    if (exeName.isEmpty())
+        return false;
+    QProcess proc;
+    proc.start(QStringLiteral("cmd"),
+               {QStringLiteral("/c"),
+                QStringLiteral("tasklist /FI \"IMAGENAME eq %1\" /NH").arg(exeName)});
+    if (!proc.waitForFinished(2000))
+        return false;
+    const QByteArray out = proc.readAllStandardOutput().toLower();
+    return out.contains(exeName.toLower().toLatin1());
+}
+
+void MainWindow::runQuickLaunchApps()
+{
+    loadQuickLaunchConfig(m_quickLaunchApps, m_quickLaunchOnlyIfNotRunning);
+    if (m_quickLaunchApps.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("尚未配置要快速启动的应用，右键「快速启动应用」可进行管理。"), 5000);
+        return;
+    }
+
+    for (const auto& app : m_quickLaunchApps) {
+        if (app.path.isEmpty())
+            continue;
+        QFileInfo info(app.path);
+        const QString exeName = info.fileName();
+        if (m_quickLaunchOnlyIfNotRunning && isProcessRunningByName(exeName))
+            continue;
+        // 直接启动可执行文件，避免通过 cmd/start 时因路径中空格或括号导致解析错误
+        const QString program = info.absoluteFilePath();
+        const QString workDir = info.absolutePath();
+        QProcess::startDetached(program, QStringList(), workDir);
+    }
+
+    statusBar()->showMessage(QStringLiteral("已尝试启动配置的应用。"), 5000);
+}
+
+// ==================== Help Dialog ====================
+
+class HelpDialog : public QDialog
+{
+public:
+    explicit HelpDialog(const QString& initialSection, QWidget* parent = nullptr)
+        : QDialog(parent)
+    {
+        setWindowTitle(QStringLiteral("帮助中心"));
+        setMinimumSize(600, 400);
+        resize(780, 540);
+
+        auto* root = new QHBoxLayout(this);
+        root->setContentsMargins(0, 0, 0, 0);
+        root->setSpacing(0);
+
+        auto* splitter = new QSplitter(Qt::Horizontal, this);
+        splitter->setChildrenCollapsible(false);
+        root->addWidget(splitter);
+
+        m_toc = new QListWidget;
+        m_toc->setObjectName("helpToc");
+        m_toc->setFixedWidth(170);
+        splitter->addWidget(m_toc);
+
+        m_browser = new QTextBrowser;
+        m_browser->setObjectName("helpBrowser");
+        m_browser->setOpenExternalLinks(false);
+        m_browser->setOpenLinks(false);
+        splitter->addWidget(m_browser);
+        splitter->setStretchFactor(0, 0);
+        splitter->setStretchFactor(1, 1);
+
+        populateContent();
+
+        connect(m_toc, &QListWidget::currentItemChanged, this,
+                [this](QListWidgetItem* current, QListWidgetItem*) {
+                    if (!current) return;
+                    const QString anchor = current->data(Qt::UserRole).toString();
+                    if (!anchor.isEmpty())
+                        m_browser->scrollToAnchor(anchor);
+                });
+
+        setStyleSheet(ApplyStyle::helpDialogStyle());
+
+        QListWidgetItem* startItem = nullptr;
+        for (int i = 0; i < m_toc->count(); ++i) {
+            auto* item = m_toc->item(i);
+            const QString anchor = item->data(Qt::UserRole).toString();
+            if (anchor.isEmpty()) continue;
+            if (!startItem) startItem = item;
+            if (initialSection == QLatin1String("buglog")
+                && anchor.startsWith(QLatin1String("bug"))) {
+                startItem = item;
+                break;
+            }
+        }
+        if (startItem)
+            m_toc->setCurrentItem(startItem);
+    }
+
+private:
+    QListWidget* m_toc = nullptr;
+    QTextBrowser* m_browser = nullptr;
+
+    struct Section {
+        QString anchor;
+        QString tocLabel;
+        QString html;
+    };
+
+    void populateContent()
+    {
+        QVector<Section> sections;
+
+        // ---- 使用说明 ----
+        sections.append({
+            "help_overview", QStringLiteral("\u2022 基本操作"),
+            QStringLiteral(
+                "<h3>基本操作</h3>"
+                "<p>1. 左侧「在线平台」「客服平台」列表用于选择和管理各个平台窗口。</p>"
+                "<p>2. 点击顶部「添加新窗口」可从当前已打开的窗口中选择并关联到平台项。</p>"
+                "<p>3. 支持多选窗口批量添加，添加过程中会显示进度提示。</p>")
+        });
+        sections.append({
+            "help_aggregate", QStringLiteral("\u2022 聚合接待"),
+            QStringLiteral(
+                "<h3>聚合接待</h3>"
+                "<p>管理后台中的「聚合接待」用于统一查看各平台会话并手动回复客户。</p>"
+                "<p>点击左侧「聚合接待」即可进入，浮窗窗口会自动隐藏，切回平台项后自动恢复。</p>")
+        });
+        sections.append({
+            "help_disconnect", QStringLiteral("\u2022 断开窗口关联"),
+            QStringLiteral(
+                "<h3>断开窗口关联</h3>"
+                "<p>在左侧「在线平台」列表中，<b>右键</b>点击对应平台项，选择「断开关联」或「删除」即可安全释放窗口。</p>"
+                "<p style='color:#f59e0b;'>&#9888; 请勿直接点击外部窗口自身的关闭按钮来断开关联，以免出现白屏或未正确移除等异常。</p>")
+        });
+        sections.append({
+            "help_quicklaunch", QStringLiteral("\u2022 快速启动应用"),
+            QStringLiteral(
+                "<h3>快速启动应用</h3>"
+                "<p>主界面中部的「快速启动应用」卡片，可一键启动常用外部应用。</p>"
+                "<p><b>左键</b>：按列表依次启动应用。</p>"
+                "<p><b>右键</b>：「管理应用列表」，可增删应用并修改启动选项。</p>"
+                "<p>微信为特例，将按系统默认方式启动，其它应用则按各自默认窗口状态启动。</p>")
+        });
+        sections.append({
+            "help_troubleshoot", QStringLiteral("\u2022 故障排查"),
+            QStringLiteral(
+                "<h3>故障排查</h3>"
+                "<p>若遇到窗口嵌入、浮窗跟随或快速启动异常，可从状态栏日志或控制台查看详细信息。</p>")
+        });
+
+        // ---- Bug 修复日志 ----
+        sections.append({
+            "bug_float_style", QStringLiteral("\u2022 浮窗样式异常"),
+            QStringLiteral(
+                "<h3>浮窗跟随窗口样式异常</h3>"
+                "<p><b>问题：</b>部分外部窗口被修改了原始样式（标题栏、边框丢失或恢复异常）。</p>"
+                "<p><b>原因：</b>在 setupFloatFollow / detachFloatFollow 中直接改写了窗口的样式标志。</p>"
+                "<p><b>修复：</b>仅调整必要的扩展样式和 Owner，不再强制改写 WS_OVERLAPPEDWINDOW 等样式。</p>")
+        });
+        sections.append({
+            "bug_disconnect", QStringLiteral("\u2022 窗口断开关联"),
+            QStringLiteral(
+                "<h3>外部窗口断开关联</h3>"
+                "<p><b>问题：</b>直接点击外部窗口（如微信）自身的关闭按钮时，可能出现白屏、列表未移除等异常。</p>"
+                "<p><b>原因：</b>外部窗口关闭行为因应用和系统环境差异大（隐藏到托盘、白屏挂起等），无法统一可靠检测。</p>"
+                "<p><b>建议：</b>请通过左侧平台列表「右键 &rarr; 断开关联 / 删除」来安全释放窗口。</p>")
+        });
+        sections.append({
+            "bug_batch_add", QStringLiteral("\u2022 多选与进度提示"),
+            QStringLiteral(
+                "<h3>\"添加新窗口\"多选与进度提示</h3>"
+                "<p><b>问题：</b>一次只能添加一个窗口，重复操作繁琐；添加过程缺乏进度反馈。</p>"
+                "<p><b>修复：</b>支持列表多选加入队列逐个添加，并增加遮罩 + 进度文本提示。</p>")
+        });
+        sections.append({
+            "bug_enum_noise", QStringLiteral("\u2022 枚举噪声过滤"),
+            QStringLiteral(
+                "<h3>顶层窗口枚举噪声</h3>"
+                "<p><b>问题：</b>窗口列表中出现系统输入法等辅助窗口，容易误选。</p>"
+                "<p><b>原因：</b>枚举顶层窗口时仅按可见和 Owner 过滤，未按进程/标题进一步排除。</p>"
+                "<p><b>修复：</b>对 TextInputHost.exe 进程以及标题包含\"Windows 输入体验\"的窗口进行过滤。</p>")
+        });
+        sections.append({
+            "bug_aggregate_ui", QStringLiteral("\u2022 聚合接待界面优化"),
+            QStringLiteral(
+                "<h3>聚合接待界面视觉与体验</h3>"
+                "<p><b>问题：</b>早期版本风格偏暗，缺少渐变和明确分区，消息区域滚动条和气泡样式不统一。</p>"
+                "<p><b>修复：</b>采用柔和蓝色渐变背景，统一三栏布局；调整消息气泡配色、隐藏滚动条、统一文字为黑色，并对空态/搜索框做了细致优化。</p>")
+        });
+        sections.append({
+            "bug_quicklaunch", QStringLiteral("\u2022 快速启动路径修复"),
+            QStringLiteral(
+                "<h3>快速启动应用功能</h3>"
+                "<p><b>问题：</b>最初使用 cmd/start 启动时，在包含空格或括号的路径下会出现\"找不到\"之类错误提示。</p>"
+                "<p><b>原因：</b>命令行参数拼接方式不当，导致 Windows 对带空格路径解析失败。</p>"
+                "<p><b>修复：</b>改为直接使用 QProcess::startDetached 启动 exe，并增加「只启动未运行的应用」选项。</p>")
+        });
+
+        QString html = QStringLiteral(
+            "<html><body style='font-family: \"Microsoft YaHei\", \"Segoe UI\", sans-serif; "
+            "font-size: 13px; color: #e2e8f0; padding: 16px;'>");
+
+        bool helpGroupAdded = false;
+        bool bugGroupAdded = false;
+
+        for (const auto& s : sections) {
+            if (!helpGroupAdded && s.anchor.startsWith(QLatin1String("help"))) {
+                helpGroupAdded = true;
+                auto* header = new QListWidgetItem(QStringLiteral("  软件使用说明"));
+                header->setFlags(Qt::NoItemFlags);
+                m_toc->addItem(header);
+            }
+            if (!bugGroupAdded && s.anchor.startsWith(QLatin1String("bug"))) {
+                bugGroupAdded = true;
+                auto* header = new QListWidgetItem(QStringLiteral("  Bug 修复日志"));
+                header->setFlags(Qt::NoItemFlags);
+                m_toc->addItem(header);
+            }
+
+            auto* item = new QListWidgetItem(s.tocLabel);
+            item->setData(Qt::UserRole, s.anchor);
+            m_toc->addItem(item);
+
+            html += QStringLiteral("<a name=\"%1\"></a>%2<hr style='border: none; "
+                                   "border-top: 1px solid #334155; margin: 18px 0;'>")
+                        .arg(s.anchor, s.html);
+        }
+
+        html += QStringLiteral("</body></html>");
+        m_browser->setHtml(html);
+    }
+};
+
+// ==================== Help / Bug dialogs ====================
+
+void MainWindow::openAppHelpDialog()
+{
+    HelpDialog dlg(QStringLiteral("help"), this);
+    dlg.exec();
+}
+
+void MainWindow::openBugLogDialog()
+{
+    HelpDialog dlg(QStringLiteral("buglog"), this);
+    dlg.exec();
+}
+
+void MainWindow::startBatchAddWindows(const QVector<WindowInfo>& list)
+{
+    if (list.isEmpty()) return;
+
+    m_batchAddIndex = 0;
+    m_batchAddList = list;
+    m_batchAddIndex = 0;
+    m_batchAddSuccessCount = 0;
+
+    if (!m_batchAddOverlay) {
+        m_batchAddOverlay = new BatchAddOverlayWidget(nullptr);
+        auto* layout = new QVBoxLayout(m_batchAddOverlay);
+        layout->setAlignment(Qt::AlignCenter);
+        layout->setContentsMargins(24, 24, 24, 24);
+        m_batchAddPrompt = new QLabel(m_batchAddOverlay);
+        m_batchAddPrompt->setObjectName("batchAddPrompt");
+        m_batchAddPrompt->setStyleSheet(
+            "QLabel#batchAddPrompt { background-color: rgba(255, 255, 255, 0.95); "
+            "color: #333; font-size: 16px; padding: 20px 32px; border-radius: 12px; }");
+        m_batchAddPrompt->setAlignment(Qt::AlignCenter);
+        layout->addWidget(m_batchAddPrompt, 0, Qt::AlignHCenter);
+    }
+
+    QRect screenRect = QGuiApplication::primaryScreen()->availableGeometry();
+    m_batchAddOverlay->setGeometry(screenRect);
+    m_batchAddPrompt->setText(QStringLiteral("正在添加 0/%1...").arg(list.size()));
+    m_batchAddOverlay->show();
+    m_batchAddOverlay->raise();
+    m_batchAddOverlay->activateWindow();
+
+    QTimer::singleShot(80, this, &MainWindow::processNextBatchAdd);
+}
+
+void MainWindow::processNextBatchAdd()
+{
+    if (m_batchAddIndex >= m_batchAddList.size()) {
+        if (!m_batchAddOverlay || !m_batchAddPrompt) return;
+        m_batchAddPrompt->setText(QStringLiteral("共 %1 个，成功添加 %2 个")
+                                      .arg(m_batchAddList.size()).arg(m_batchAddSuccessCount));
+        const int total = m_batchAddList.size();
+        const int success = m_batchAddSuccessCount;
+        m_batchAddList.clear();
+        m_batchAddIndex = -1;
+        m_batchAddSuccessCount = 0;
+        QTimer::singleShot(2000, this, [this, total, success]() {
+            if (m_batchAddIndex < 0 && m_batchAddOverlay) {
+                m_batchAddOverlay->deleteLater();
+                m_batchAddOverlay = nullptr;
+                m_batchAddPrompt = nullptr;
+            }
+            showSystemReadyPage();
+        });
+        return;
+    }
+
+    const WindowInfo& info = m_batchAddList.at(m_batchAddIndex);
+    bool ok = false;
+    if (info.handle != 0 && Win32WindowHelper::isWindowValid(info.handle)) {
+        addWindowToPlatform(info);
+        ok = true;
+        ++m_batchAddSuccessCount;
+    }
+    ++m_batchAddIndex;
+
+    if (m_batchAddPrompt) {
+        m_batchAddPrompt->setText(QStringLiteral("正在添加 %1/%2...")
+                                      .arg(m_batchAddIndex).arg(m_batchAddList.size()));
+    }
+    QTimer::singleShot(ok ? 120 : 50, this, &MainWindow::processNextBatchAdd);
 }
 
 // ==================== Window Management ====================
@@ -997,8 +1501,14 @@ void MainWindow::checkManagedWindowsState()
                                                && activeEntry.invisibleSinceMs >= activeEntry.closeIntentSinceMs
                                                && (nowMs - activeEntry.closeIntentSinceMs) <= 1500;
 
+        const qint64 elapsedSinceCloseIntent = activeEntry.closeIntentSinceMs > 0
+                                                   ? (nowMs - activeEntry.closeIntentSinceMs) : 0;
+        const bool gracePeriodElapsed = usesCloseIntentDetection
+                                        && activeEntry.closeIntentSinceMs > 0
+                                        && elapsedSinceCloseIntent >= 800;
+
         const bool shouldDisconnect = usesCloseIntentDetection
-                                          ? invisibleAfterCloseIntent
+                                          ? (invisibleAfterCloseIntent || gracePeriodElapsed)
                                           : invisibleForLongEnough;
 
         if (activeEntry.wasSetup && shouldDisconnect) {
@@ -1035,7 +1545,7 @@ void MainWindow::updateFloatFollowPosition()
     if (!entry.wasSetup) return;
     if (entry.closeIntentSinceMs > 0) return;
 
-    if (isMinimized()) {
+    if (isMinimized() || m_centerStack->currentWidget() != entry.stackPage) {
         Win32WindowHelper::hideWindow(entry.handle);
         return;
     }
@@ -1212,15 +1722,10 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
 void MainWindow::openAggregateChatForm()
 {
     if (!m_aggregateChatForm) {
-        m_aggregateChatForm = new AggregateChatForm(nullptr);
-        m_aggregateChatForm->setAttribute(Qt::WA_DeleteOnClose, true);
-        connect(m_aggregateChatForm, &QObject::destroyed, this, [this]() {
-            m_aggregateChatForm = nullptr;
-        });
+        m_aggregateChatForm = new AggregateChatForm(this);
+        m_centerStack->addWidget(m_aggregateChatForm);
     }
-    m_aggregateChatForm->show();
-    m_aggregateChatForm->raise();
-    m_aggregateChatForm->activateWindow();
+    m_centerStack->setCurrentWidget(m_aggregateChatForm);
 }
 
 // ==================== EmbeddedWindowContainer ====================
