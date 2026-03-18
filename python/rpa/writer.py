@@ -5,9 +5,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = PROJECT_ROOT / "database" / "app.db"
 
+def open_db():
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=3000;")
+    return conn
 
 def process_pending_send():
-    conn = sqlite3.connect(DB_PATH)
+    conn = open_db()
     cur = conn.cursor()
 
     cur.execute(
