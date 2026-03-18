@@ -37,6 +37,8 @@ set(SOURCES
     src/core/messagerouter.cpp
     src/core/conversationmanager.cpp
     src/services/platforms/simplatformadapter.cpp
+    src/services/platforms/qianniurp_adapter.cpp
+    src/services/platforms/wechatrp_adapter.cpp
     src/ui/loginwindow.cpp
     src/ui/mainwindow.cpp
     src/ui/addwindowdialog.cpp
@@ -58,6 +60,8 @@ set(HEADERS
     src/core/conversationmanager.h
     src/services/platforms/iplatformadapter.h
     src/services/platforms/simplatformadapter.h
+    src/services/platforms/qianniurp_adapter.h
+    src/services/platforms/wechatrp_adapter.h
     src/ui/loginwindow.h
     src/ui/mainwindow.h
     src/ui/addwindowdialog.h
