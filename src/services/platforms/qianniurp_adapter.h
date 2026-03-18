@@ -2,9 +2,10 @@
 #define QIANNIURP_ADAPTER_H
 
 #include "iplatformadapter.h"
+#include <QTimer>
 
 // 基于共享 SQLite 的千牛 RPA 适配器骨架。
-// 当前版本仅做日志与占位，后续再接入 Python RPA / DB 轮询逻辑。
+// 通过轮询 rpa_inbox_messages 队列消费入站消息（Python Reader -> Qt）。
 class QianniuRPAAdapter : public IPlatformAdapter
 {
     Q_OBJECT
@@ -20,7 +21,11 @@ public:
     bool isConnected() const override { return m_connected; }
 
 private:
+    void pollInboxOnce();
+
     bool m_connected = false;
+    QTimer* m_pollTimer = nullptr;
+    qint64 m_lastInboxId = 0;
 };
 
 #endif // QIANNIURP_ADAPTER_H
