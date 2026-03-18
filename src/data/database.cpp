@@ -24,6 +24,14 @@ bool Database::open(const QString& path)
         return false;
     }
     qDebug() << "数据库打开成功";
+
+    // Multi-process read/write (Qt + Python RPA) recommended defaults
+    {
+        QSqlQuery pragma(db);
+        pragma.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
+        pragma.exec(QStringLiteral("PRAGMA synchronous=NORMAL"));
+        pragma.exec(QStringLiteral("PRAGMA busy_timeout=3000"));
+    }
     return runMigrations();
 }
 
@@ -81,8 +89,26 @@ bool Database::runMigrations()
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
         ")",
 
+        // Python Reader -> Qt consumer inbox queue for inbound messages
+        "CREATE TABLE IF NOT EXISTS rpa_inbox_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  platform TEXT NOT NULL,"
+        "  platform_conversation_id TEXT NOT NULL,"
+        "  customer_name TEXT NOT NULL,"
+        "  content TEXT NOT NULL,"
+        "  created_at DATETIME,"
+        "  platform_msg_id TEXT NOT NULL,"
+        "  consume_status INTEGER NOT NULL DEFAULT 0,"
+        "  error_reason TEXT DEFAULT ''"
+        ")",
+
         "CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)",
         "CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations(status)",
+
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_platform_msg_id "
+        "  ON rpa_inbox_messages(platform, platform_msg_id)",
+        "CREATE INDEX IF NOT EXISTS idx_inbox_consume_status "
+        "  ON rpa_inbox_messages(platform, consume_status, id)",
     };
 
     for (const char* sql : migrations) {
