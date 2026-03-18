@@ -1872,7 +1872,7 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
         {
             const QString name = m_managedWindows[id].platformName;
             if (name.contains(QStringLiteral("微信"))) {
-                actCalibrateWechat = menu.addAction(QStringLiteral("微信RPA校准（框选消息区域）"));
+                actCalibrateWechat = menu.addAction(QStringLiteral("微信OCR校准（备用方案）"));
             }
         }
         QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
