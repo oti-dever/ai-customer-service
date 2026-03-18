@@ -9,6 +9,25 @@
 
 ---
 
+## 0. 总体原则（强约束）
+
+为避免 **Python 先写入 `messages`，Qt 再次写入导致重复**，本项目约定：
+
+- **入站（平台 → 聚合界面）**：默认推荐 Python Reader **只写入“入站队列”表**（见第 3 节 `rpa_inbox_messages`），Qt 侧适配器消费后再交给 `MessageRouter` 统一落库到 `conversations/messages`。
+- **出站（聚合界面 → 平台）**：Qt 侧 `MessageRouter` **写入 `messages(direction='out') + sync_status=10`**，Python Writer 负责执行发送并更新状态（见第 4.2 节）。
+
+这样可以保证：`conversations/messages` 的最终一致性由 Qt 端单点维护，Python 仅做 I/O 与自动化。
+
+### 0.1 方向B（千牛只读里程碑）特例：Python 直写 `messages`
+
+方向B-只读里程碑为了减少一张队列表与中间转换，可采用“Python 直接写入 `messages(direction='in')`，Qt 侧轮询增量行并走 `MessageRouter` 的去重/会话更新管线”。
+
+该模式的强约束是：
+
+- **Python 只写入 `messages` 的入站行**：`direction='in'`、`sender='customer'`，且必须提供 **稳定唯一** 的 `platform_msg_id`。
+- **Qt 侧消费必须幂等**：可重复读取同一批入站行，但不得造成 UI/DB 重复（依赖 `platform_msg_id` 去重）。
+- **并发稳定性必须先做**：SQLite 必须启用 WAL，双方必须设置 busy timeout 并使用批量事务写入（见第 3.5 节）。
+
 ## 1. conversations 表
 
 现有建表 SQL（节选，自 `src/data/database.cpp`）：
@@ -32,9 +51,10 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 - **id**：本地会话自增主键。C++ / Python 在 messages 表中通过 `conversation_id` 引用。
 - **platform**：平台标识，约定为小写字符串，例如：
-  - `qianniu`：千牛客户端
+  - `qianniu_pc`：千牛客户端
   - `pdd_web`：拼多多网页
-  - 后续可以扩展例如 `weixin_pc`、`douyin` 等
+  - `douyin_web`：抖店网页
+  -  `weixin_pc`：微信客户端
 - **platform_conversation_id**：外部平台的会话标识，示例：
   - 千牛：平台自身的会话 id，或 `buyerId + shopId` 组合字符串；
   - 拼多多：聊天窗口 URL 中的会话 id、订单号等。
@@ -51,7 +71,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 - **会话创建方**：
   - C++ 端在收到新消息且未找到对应 `(platform, platform_conversation_id)` 时，可以主动创建会话；
-  - Python 端也可以在写入第一条消息前，先检测并创建对应会话（推荐）。
+  - Python 端默认不创建/更新 conversations（推荐由 Qt 单点维护）；方向B 如确需直写 `messages`，Python 也不应并发写 `conversations`，由 Qt 侧在消费时 `ensureConversation()` 创建/更新。
 - **去重约定**：
   - `(platform, platform_conversation_id)` 组合必须唯一；
   - 如平台侧切换导致 id 变化，应由 Python 侧做好映射或迁移。
@@ -92,6 +112,22 @@ CREATE TABLE IF NOT EXISTS messages (
 - **created_at**：消息创建时间。默认 `CURRENT_TIMESTAMP`，推荐统一使用本地时间即可。
 - **platform_msg_id**：外部平台的消息 id（可选，用于更精细的去重与状态追踪）。
 
+### 2.1.1 方向B（千牛只读）对 `messages` 的写入规范（Python Reader 必须满足）
+
+当采用“Python 直写 `messages` 入站行”的模式时，Python 写入每条入站消息必须满足：
+
+- **direction**：固定为 `"in"`
+- **sender**：固定为 `"customer"`（如后续需要系统消息可用 `"system"`，但里程碑1先不引入）
+- **platform_msg_id（强约束）**：必须稳定唯一，用于跨进程去重。建议格式：
+  - `qianniu:<shopId>:<platformConversationId>:<ts_ms>:<sha1(content)>`
+- **created_at**：尽量写真实时间；若取不到平台时间，可用本地时间字符串，但会影响排序精度
+- **platform / platform_conversation_id / customer_name**：当前 `messages` 表未包含这些字段，方向B 下要求 Qt 消费侧能够从 `platform_msg_id` 或其他旁路信息恢复出：
+  - `platform='qianniu'`
+  - `platformConversationId`
+  - `customer_name`
+
+说明：若现有实现需要 `messages` 直接携带平台维度字段（platform、platform_conversation_id 等），应通过数据库迁移扩展字段并在本协议中补齐（不要靠解析 `platform_msg_id` 的字符串来“偷字段”作为长期方案）。
+
 ### 2.2 扩展字段（计划）
 
 为支持 C++ / Python 之间的同步状态，需要在 messages 表上新增以下字段（最终以实际迁移实现为准）：
@@ -110,9 +146,77 @@ CREATE TABLE IF NOT EXISTS messages (
 
 ---
 
-## 3. C++ 端读写约定
+## 3. 入站队列表（Python → Qt）`rpa_inbox_messages`
 
-### 3.1 读消息（聚合界面展示）
+### 3.1 表用途
+
+`rpa_inbox_messages` 是 **Python Reader 写入、Qt 侧平台适配器消费** 的“入站消息队列”。\n
+Qt 消费到队列消息后，会将其转换为 `PlatformMessage` 并 `emit incomingMessage()`，随后由 `MessageRouter` 统一写入 `conversations/messages`（并负责 `platform_msg_id` 去重）。
+
+> 备注：本表是“默认推荐方案”。方向B-只读里程碑可以不使用本表，改为 Python 直写 `messages`（见第 0.1 与第 2.1.1）。
+
+### 3.2 建表约定（迁移将由 Qt 端创建）
+
+```sql
+CREATE TABLE IF NOT EXISTS rpa_inbox_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  platform TEXT NOT NULL,
+  platform_conversation_id TEXT NOT NULL,
+  customer_name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at DATETIME,
+  platform_msg_id TEXT NOT NULL,
+  consume_status INTEGER NOT NULL DEFAULT 0,
+  error_reason TEXT DEFAULT ''
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_platform_msg_id
+  ON rpa_inbox_messages(platform, platform_msg_id);
+
+CREATE INDEX IF NOT EXISTS idx_inbox_consume_status
+  ON rpa_inbox_messages(platform, consume_status, id);
+```
+
+### 3.3 字段含义与约束
+
+- **platform**：平台标识，推荐直接复用 `conversations.platform`，例如 `qianniu`。\n
+  - 注意：方向B里程碑1只接入 `qianniu`。
+- **platform_conversation_id**：平台会话标识。\n
+  - 里程碑1允许先用“可稳定复现”的拼接键（例如 `buyerNick` 或 `buyerNick|shopName`），后续再替换为更可靠的 id。
+- **customer_name**：买家昵称（用于聚合界面会话列表显示）。\n
+- **content**：入站消息文本。\n
+- **created_at**：消息时间。\n
+  - 推荐写入 Python 侧识别到的时间；若暂时拿不到，可写本地时间字符串。
+- **platform_msg_id（强约束）**：**必须稳定唯一**，用来彻底避免重复消费与重复入库。\n
+  - 推荐格式：`qianniu:<shopId>:<platformConversationId>:<ts_ms>:<sha1(content)>`\n
+  - 若短期拿不到 `shopId`，可用占位 `unknownShop`，但 `platformConversationId` + `ts_ms` + `hash` 必须可靠。
+- **consume_status**：消费状态（仅用于队列自身，不影响 `messages.sync_status`）：\n
+  - `0 = new`：Python 写入完成，等待 Qt 消费\n
+  - `1 = consumed`：Qt 已消费并成功交给 `MessageRouter`\n
+  - `2 = failed`：Qt 消费/解析失败（`error_reason` 记录原因，可重试）\n
+
+### 3.4 Python Reader 写入规则（必须遵守）
+
+- 只允许 `INSERT` 新行或对 `consume_status=2` 的失败行进行修复性重写；\n
+- 不允许修改 `platform_msg_id`（否则会破坏去重）；\n
+- 写入使用事务批量提交，避免锁竞争；\n
+- 必须做“幂等写入”：建议 `INSERT OR IGNORE`（由 `(platform, platform_msg_id)` 唯一索引保证幂等）。
+
+### 3.5 SQLite 并发与稳定性约定（Python / Qt 都必须配置）
+
+多进程（Python 写、Qt 读/写）共享 SQLite 时，必须执行以下配置，否则极易出现 `database is locked`：
+
+- **WAL 模式**：启用 `PRAGMA journal_mode=WAL;`
+- **busy_timeout**：
+  - Python：`sqlite3.connect(..., timeout=...)` 且设置 `PRAGMA busy_timeout = ...;`
+  - Qt：设置 SQLite busy timeout（连接参数或 PRAGMA）
+- **批量事务**：Python Reader 按“每次轮询一批消息 → 单事务提交”，减少锁竞争
+
+---
+
+## 4. C++ 端读写约定
+
+### 4.1 读消息（聚合界面展示）
 
 - C++ 端通过 `MessageDao` / `ConversationDao` 读取：
   - 按 `conversation_id` 查询消息列表时，应无条件包含 `direction in ('in','out')`，不必关心 `sync_status`；
@@ -124,7 +228,7 @@ CREATE TABLE IF NOT EXISTS messages (
     - 如有平台侧的消息 id，写入 `platform_msg_id`；
     - `sync_status` 通常直接写为 `1 (normal)`。
 
-### 3.2 写消息（聚合界面发出）
+### 4.2 写消息（聚合界面发出）
 
 - 聚合界面调用 `sendMessage()` 时，C++ 端应：
   - 在 messages 表中插入一条记录：
@@ -137,24 +241,18 @@ CREATE TABLE IF NOT EXISTS messages (
 
 ---
 
-## 4. Python 端读写约定
+## 5. Python 端读写约定
 
-### 4.1 Reader（从平台读入 → 写入 messages）
+### 5.1 Reader（从平台读入 → 写入 messages）
 
-- Reader 负责从千牛客户端 / 拼多多网页中抓取到新消息，并将其写入 SQLite：
-  - 必须设置：
-    - `conversation_id`：根据 `(platform, platform_conversation_id)` 查询/创建会话后得到；
-    - `direction = 'in'`；
-    - `sender = 'customer'`（如是系统提示可改为 `system`）；
-    - `content`：OCR 或 DOM 提取出来的文字；
-    - `created_at`：建议使用平台时间或本地时间；
-    - `platform_msg_id`：如平台暴露唯一 id，建议写入。
-  - 建议写入时 `sync_status = 1 (normal)`，让 UI 立即视为正常消息。
-- 去重策略建议：
-  - 借助 `(platform, platform_msg_id)` 或 `(platform, platform_conversation_id, content, created_at)` 组合在 Python 端先做一次检查；
-  - 再配合 C++ 端已有的简单指纹去重逻辑，避免重复气泡。
+Reader 负责从千牛客户端 / 拼多多网页中抓取到新消息，并将其写入 SQLite。
 
-### 4.2 Writer（从 messages 读出 → 写回平台）
+- **默认推荐落点**：写入 `rpa_inbox_messages`（第 3 节），再由 Qt 消费并统一落库（更清晰、字段更齐）。
+- **方向B-只读里程碑落点**：允许直接写入 `messages(direction='in')`（见第 2.1.1 的写入规范）。
+
+两种落点的共同硬要求是：`platform_msg_id` 稳定唯一、幂等写入、批量事务、WAL+busy_timeout。
+
+### 5.2 Writer（从 messages 读出 → 写回平台）
 
 - Writer 负责读取“待发送消息”，并在外部平台中模拟输入与发送：
   - 定期查询：
@@ -174,7 +272,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 ---
 
-## 5. 时间与时区约定
+## 6. 时间与时区约定
 
 - 所有 `DATETIME` 字段（`created_at`, `last_time` 等）目前均采用 **本地时间** 存储；
 - C++ 与 Python 端应统一使用同一时区（通常为操作系统当前时区），不做额外的 UTC 转换；
@@ -182,7 +280,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 ---
 
-## 6. 平台与扩展
+## 7. 平台与扩展
 
 - 目前平台枚举建议：
   - `qianniu`：千牛桌面客户端（RPA 主战场）；
@@ -195,7 +293,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 ---
 
-## 7. 开发与调试建议
+## 8. 开发与调试建议
 
 - 建议在开发阶段提供一个轻量级的 **“DB 浏览/诊断工具”**（例如 Python 脚本或简单 GUI），便于：
   - 查看当前会话与消息记录；
