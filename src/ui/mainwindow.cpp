@@ -35,6 +35,11 @@
 #include <QTreeView>
 #include <QVBoxLayout>
 #include <QWindow>
+#include <functional>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 
 // ==================== Batch add overlay ====================
 
@@ -54,6 +59,104 @@ protected:
         QPainter p(this);
         p.fillRect(rect(), QColor(100, 100, 110, 55));
     }
+};
+
+// ==================== WeChat RPA calibration overlay ====================
+
+class WechatCalibrationOverlay : public QWidget
+{
+public:
+    explicit WechatCalibrationOverlay(QWidget* parent = nullptr)
+        : QWidget(parent,
+                  Qt::Tool
+                      | Qt::FramelessWindowHint
+                      | Qt::WindowStaysOnTopHint)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents, false);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setMouseTracking(true);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+
+    void setOnFinished(std::function<void(bool, const QRect&)> cb) { m_onFinished = std::move(cb); }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.fillRect(rect(), QColor(20, 20, 24, 120));
+
+        // help text
+        p.setPen(Qt::white);
+        p.setFont(QFont(p.font().family(), 10));
+        const QString tip = QStringLiteral("框选微信“聊天气泡滚动区”（Esc取消，回车确认）");
+        p.drawText(QRect(0, 8, width(), 24), Qt::AlignHCenter | Qt::AlignVCenter, tip);
+
+        if (m_selecting || m_selection.isValid()) {
+            QRect r = m_selection.normalized();
+            p.setPen(QPen(QColor(70, 170, 255, 220), 2));
+            p.setBrush(QColor(70, 170, 255, 40));
+            p.drawRoundedRect(r, 6, 6);
+
+            p.setPen(Qt::white);
+            p.drawText(r.adjusted(8, 8, -8, -8),
+                       Qt::AlignLeft | Qt::AlignTop,
+                       QStringLiteral("%1x%2").arg(r.width()).arg(r.height()));
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* e) override
+    {
+        if (e->button() != Qt::LeftButton) return;
+        m_selecting = true;
+        m_origin = e->pos();
+        m_selection = QRect(m_origin, m_origin);
+        update();
+    }
+
+    void mouseMoveEvent(QMouseEvent* e) override
+    {
+        if (!m_selecting) return;
+        m_selection = QRect(m_origin, e->pos());
+        update();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* e) override
+    {
+        if (e->button() != Qt::LeftButton) return;
+        m_selecting = false;
+        m_selection = QRect(m_origin, e->pos());
+        update();
+    }
+
+    void keyPressEvent(QKeyEvent* e) override
+    {
+        if (e->key() == Qt::Key_Escape) {
+            finish(false);
+            return;
+        }
+        if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+            finish(true);
+            return;
+        }
+        QWidget::keyPressEvent(e);
+    }
+
+private:
+    void finish(bool ok)
+    {
+        if (m_onFinished) {
+            m_onFinished(ok, m_selection.normalized());
+        }
+        deleteLater();
+    }
+
+    bool m_selecting = false;
+    QPoint m_origin;
+    QRect m_selection;
+    std::function<void(bool, const QRect&)> m_onFinished;
 };
 
 // ==================== Tree roles & delegate ====================
@@ -116,6 +219,12 @@ QStringList normalizedMessages(const QStringList& messages)
         normalized.append(message);
     }
     return normalized;
+}
+
+QString formatRect(const QRect& r)
+{
+    return QStringLiteral("x=%1 y=%2 w=%3 h=%4")
+        .arg(r.x()).arg(r.y()).arg(r.width()).arg(r.height());
 }
 
 QStringList loadCustomEncouragementMessages()
@@ -1401,6 +1510,18 @@ void MainWindow::switchToWindow(const QString& platformId)
         return;
     }
 
+    {
+        const QRect windowRect = Win32WindowHelper::windowRect(entry.handle);
+        const unsigned int dpi = Win32WindowHelper::windowDpi(entry.handle);
+        qInfo() << "[MainWindow] 切换外部窗口:"
+                << "platformId=" << platformId
+                << "name=" << entry.platformName
+                << "mode=" << (entry.mode == WindowDisplayMode::Embed ? "Embed" : "FloatFollow")
+                << "handle=0x" << QString::number(static_cast<qulonglong>(entry.handle), 16)
+                << "dpi=" << dpi
+                << "windowRect(" << formatRect(windowRect) << ")";
+    }
+
     // Hide current float if switching away
     hideCurrentFloatWindow();
 
@@ -1415,7 +1536,11 @@ void MainWindow::switchToWindow(const QString& platformId)
                                                 (quintptr)winId(),
                                                 entry.useFloatOwner,
                                                 entry.useFloatToolWindow);
-            qInfo() << "[MainWindow] 浮窗跟随设置:" << entry.platformName;
+            qInfo() << "[MainWindow] 浮窗跟随设置:"
+                    << "name=" << entry.platformName
+                    << "useOwner=" << entry.useFloatOwner
+                    << "useToolWindow=" << entry.useFloatToolWindow
+                    << "raiseAbove=" << entry.useFloatRaiseAbove;
         }
         entry.wasSetup = true;
     }
@@ -1450,7 +1575,15 @@ void MainWindow::hideCurrentFloatWindow()
 
     auto& entry = m_managedWindows[m_activeWindowId];
     if (entry.mode == WindowDisplayMode::FloatFollow && entry.wasSetup) {
-        Win32WindowHelper::hideWindow(entry.handle);
+        // For WeChat: don't SW_HIDE, keep it renderable for PrintWindow-based OCR.
+        // Move it far off-screen instead (still non-activated).
+        if (entry.platformName.contains(QStringLiteral("微信"))) {
+            const int w = entry.lastDisplayGeometry.isValid() ? entry.lastDisplayGeometry.width() : 800;
+            const int h = entry.lastDisplayGeometry.isValid() ? entry.lastDisplayGeometry.height() : 600;
+            Win32WindowHelper::showWindowAt(entry.handle, -20000, -20000, w, h, false);
+        } else {
+            Win32WindowHelper::hideWindow(entry.handle);
+        }
     }
 }
 
@@ -1553,7 +1686,14 @@ void MainWindow::updateFloatFollowPosition()
     if (entry.closeIntentSinceMs > 0) return;
 
     if (isMinimized() || m_centerStack->currentWidget() != entry.stackPage) {
-        Win32WindowHelper::hideWindow(entry.handle);
+        // For WeChat: keep window renderable for background OCR (PrintWindow).
+        if (entry.platformName.contains(QStringLiteral("微信"))) {
+            const int w = entry.lastDisplayGeometry.isValid() ? entry.lastDisplayGeometry.width() : 800;
+            const int h = entry.lastDisplayGeometry.isValid() ? entry.lastDisplayGeometry.height() : 600;
+            Win32WindowHelper::showWindowAt(entry.handle, -20000, -20000, w, h, false);
+        } else {
+            Win32WindowHelper::hideWindow(entry.handle);
+        }
         return;
     }
 
@@ -1573,6 +1713,19 @@ void MainWindow::updateFloatFollowPosition()
     entry.lastDisplayGeometry = targetWindowRect;
     entry.invisibleSinceMs = 0;
     entry.closeIntentSinceMs = 0;
+    {
+        const QRect windowRect = Win32WindowHelper::windowRect(entry.handle);
+        const unsigned int dpi = Win32WindowHelper::windowDpi(entry.handle);
+        qInfo() << "[MainWindow] 浮窗跟随定位:"
+                << "platformId=" << m_activeWindowId
+                << "name=" << entry.platformName
+                << "handle=0x" << QString::number(static_cast<qulonglong>(entry.handle), 16)
+                << "dpi=" << dpi
+                << "screenScale=" << scale
+                << "centerStackLogical(" << formatRect(QRect(logicalTopLeft, logicalSize)) << ")"
+                << "targetRect(" << formatRect(targetWindowRect) << ")"
+                << "windowRectBefore(" << formatRect(windowRect) << ")";
+    }
     Win32WindowHelper::showWindowAt(entry.handle,
                                     entry.lastDisplayGeometry.x(),
                                     entry.lastDisplayGeometry.y(),
@@ -1715,11 +1868,163 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
         }
     } else {
         QAction* actRemove = menu.addAction(QStringLiteral("删除"));
+        QAction* actCalibrateWechat = nullptr;
+        {
+            const QString name = m_managedWindows[id].platformName;
+            if (name.contains(QStringLiteral("微信"))) {
+                actCalibrateWechat = menu.addAction(QStringLiteral("微信RPA校准（框选消息区域）"));
+            }
+        }
         QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
         if (chosen == actRemove) {
             removeOnlinePlatformItem(id);
+        } else if (chosen == actCalibrateWechat) {
+            startWechatRpaCalibration(id);
         }
     }
+}
+
+void MainWindow::startWechatRpaCalibration(const QString& platformId)
+{
+    if (!m_managedWindows.contains(platformId))
+        return;
+
+    auto& entry = m_managedWindows[platformId];
+    if (!Win32WindowHelper::isWindowValid(entry.handle)) {
+        qWarning() << "[MainWindow] 微信RPA校准失败：窗口无效";
+        return;
+    }
+
+    // Ensure we are showing the correct page so user can see selection area
+    switchToWindow(platformId);
+
+    // Compute the same target rect used by float-follow so we can place overlay above it.
+    QPoint logicalTopLeft = m_centerStack->mapToGlobal(QPoint(0, 0));
+    QSize logicalSize = m_centerStack->size();
+    QScreen* screen = m_centerStack->screen();
+    if (!screen && windowHandle())
+        screen = windowHandle()->screen();
+    const qreal scale = screen ? screen->devicePixelRatio() : 1.0;
+
+    const QRect targetRectPx(qRound(logicalTopLeft.x() * scale),
+                             qRound(logicalTopLeft.y() * scale),
+                             qRound(logicalSize.width() * scale),
+                             qRound(logicalSize.height() * scale));
+    const QRect targetRectLogical(logicalTopLeft, logicalSize);
+
+    // Top-level overlay window stays above external float window.
+    auto* overlay = new WechatCalibrationOverlay(nullptr);
+    overlay->setGeometry(targetRectLogical);
+    overlay->show();
+    overlay->raise();
+    overlay->activateWindow();
+    overlay->setFocus();
+
+    qInfo() << "[MainWindow] 启动微信RPA校准：请框选聊天气泡滚动区，回车确认，Esc取消"
+            << "platformId=" << platformId
+            << "handle=0x" << QString::number(static_cast<qulonglong>(entry.handle), 16)
+            << "scale=" << scale
+            << "targetRectPx(" << formatRect(targetRectPx) << ")"
+            << "targetRectLogical(" << formatRect(QRect(QPoint(0, 0), logicalSize)) << ")";
+
+    overlay->setOnFinished([this, platformId](bool ok, const QRect& selectionLogical) {
+        if (!ok) {
+            qInfo() << "[MainWindow] 微信RPA校准已取消";
+            return;
+        }
+        if (!m_managedWindows.contains(platformId)) {
+            qWarning() << "[MainWindow] 微信RPA校准失败：平台已移除";
+            return;
+        }
+
+        const auto& entry2 = m_managedWindows[platformId];
+        if (!Win32WindowHelper::isWindowValid(entry2.handle)) {
+            qWarning() << "[MainWindow] 微信RPA校准失败：窗口无效";
+            return;
+        }
+
+        // Convert logical selection (relative to m_centerStack) -> window-relative pixels
+        QScreen* screen = m_centerStack->screen();
+        if (!screen && windowHandle())
+            screen = windowHandle()->screen();
+        const qreal scale = screen ? screen->devicePixelRatio() : 1.0;
+
+        const QRect chatRectInWindowPx(qRound(selectionLogical.x() * scale),
+                                       qRound(selectionLogical.y() * scale),
+                                       qRound(selectionLogical.width() * scale),
+                                       qRound(selectionLogical.height() * scale));
+
+        const QSize windowSizePx = entry2.lastDisplayGeometry.isValid()
+                                       ? entry2.lastDisplayGeometry.size()
+                                       : Win32WindowHelper::windowRect(entry2.handle).size();
+
+        const bool saved = writeWechatRpaConfigRelativeToWindow(entry2.handle,
+                                                                chatRectInWindowPx,
+                                                                windowSizePx,
+                                                                QStringLiteral("demo_wechat_conv_1"),
+                                                                QStringLiteral("演示微信联系人"));
+
+        qInfo() << "[MainWindow] 微信RPA校准结果:"
+                << "saved=" << saved
+                << "scale=" << scale
+                << "windowSizePx=" << windowSizePx
+                << "chatRectInWindowPx(" << formatRect(chatRectInWindowPx) << ")";
+
+        statusBar()->showMessage(saved
+                                     ? QStringLiteral("微信RPA校准已保存（python/rpa/wechat_config.json）")
+                                     : QStringLiteral("微信RPA校准保存失败，请查看日志"),
+                                 4000);
+    });
+}
+
+bool MainWindow::writeWechatRpaConfigRelativeToWindow(quintptr hwnd,
+                                                      const QRect& chatRectInWindowPx,
+                                                      const QSize& windowSizePx,
+                                                      const QString& platformConversationId,
+                                                      const QString& customerName) const
+{
+    const QString path = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python/rpa/wechat_config.json");
+
+    QJsonObject root;
+    root.insert(QStringLiteral("platform"), QStringLiteral("wechat_pc"));
+    root.insert(QStringLiteral("poll_interval_sec"), 3);
+
+    QJsonObject windowMatch;
+    // Some distributions use Weixin.exe (common on CN Windows). Use that as default.
+    windowMatch.insert(QStringLiteral("process_name"), QStringLiteral("Weixin.exe"));
+    windowMatch.insert(QStringLiteral("title_contains"), QStringLiteral("微信"));
+    root.insert(QStringLiteral("window_match"), windowMatch);
+
+    // Persist hwnd from the currently managed window if possible.
+    // Python reader can use it directly to avoid EnumWindows ambiguity under Embed/FloatFollow.
+    root.insert(QStringLiteral("hwnd_hex"), QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(hwnd), 16)));
+
+    QJsonObject chatRegion;
+    chatRegion.insert(QStringLiteral("mode"), QStringLiteral("relative_to_window"));
+    chatRegion.insert(QStringLiteral("x"), chatRectInWindowPx.x());
+    chatRegion.insert(QStringLiteral("y"), chatRectInWindowPx.y());
+    chatRegion.insert(QStringLiteral("w"), chatRectInWindowPx.width());
+    chatRegion.insert(QStringLiteral("h"), chatRectInWindowPx.height());
+    root.insert(QStringLiteral("chat_region"), chatRegion);
+
+    QJsonObject windowSize;
+    windowSize.insert(QStringLiteral("w"), windowSizePx.width());
+    windowSize.insert(QStringLiteral("h"), windowSizePx.height());
+    root.insert(QStringLiteral("window_size_px"), windowSize);
+
+    QJsonObject conv;
+    conv.insert(QStringLiteral("platform_conversation_id"), platformConversationId);
+    conv.insert(QStringLiteral("customer_name"), customerName);
+    root.insert(QStringLiteral("conversation"), conv);
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        qWarning() << "[MainWindow] 写入 wechat_config.json 失败:" << path << f.errorString();
+        return false;
+    }
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
+    return true;
 }
 
 // ==================== Aggregate Chat ====================

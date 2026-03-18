@@ -109,6 +109,12 @@ private:
     QStandardItem* findGroupItem(const QString& groupId) const;
     QStandardItem* findChildItem(QStandardItem* parent, const QString& platformId) const;
     void showPlatformContextMenu(const QPoint& pos);
+    void startWechatRpaCalibration(const QString& platformId);
+    bool writeWechatRpaConfigRelativeToWindow(quintptr hwnd,
+                                              const QRect& chatRectInWindowPx,
+                                              const QSize& windowSizePx,
+                                              const QString& platformConversationId,
+                                              const QString& customerName) const;
     void refreshStatusMessage();
     void openStatusMessageManager();
 
