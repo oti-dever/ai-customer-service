@@ -3,6 +3,8 @@
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
 #include "../services/platforms/simplatformadapter.h"
+#include "../services/platforms/qianniurp_adapter.h"
+#include "../services/platforms/wechatrp_adapter.h"
 
 ConversationManager& ConversationManager::instance()
 {
@@ -23,6 +25,16 @@ void ConversationManager::initialize()
     m_router->registerAdapter(m_simulator);
     m_simulator->connectPlatform();
     m_simulator->startListening();
+
+    m_qianniu = new QianniuRPAAdapter(this);
+    m_router->registerAdapter(m_qianniu);
+    m_qianniu->connectPlatform();
+    m_qianniu->startListening();
+
+    m_wechat = new WechatRPAAdapter(this);
+    m_router->registerAdapter(m_wechat);
+    m_wechat->connectPlatform();
+    m_wechat->startListening();
 
     connect(m_router, &MessageRouter::conversationCreated, this, [this](const ConversationInfo& conv) {
         qDebug() << "[ConversationManager] 新会话:" << conv.customerName;
@@ -47,7 +59,7 @@ void ConversationManager::initialize()
         emit messageSendFailed(convId, reason);
     });
 
-    qInfo() << "[ConversationManager] 初始化完成，模拟平台已就绪";
+    qInfo() << "[ConversationManager] 初始化完成，模拟平台/千牛RPA/微信RPA适配器已就绪";
 }
 
 QVector<ConversationInfo> ConversationManager::conversations(bool pendingOnly) const
