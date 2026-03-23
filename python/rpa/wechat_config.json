@@ -1,0 +1,24 @@
+{
+    "chat_region": {
+        "h": 546,
+        "mode": "relative_to_window",
+        "w": 846,
+        "x": 289,
+        "y": 69
+    },
+    "conversation": {
+        "customer_name": "演示微信联系人",
+        "platform_conversation_id": "demo_wechat_conv_1"
+    },
+    "hwnd_hex": "0xc06fa",
+    "platform": "wechat_pc",
+    "poll_interval_sec": 3,
+    "window_match": {
+        "process_name": "Weixin.exe",
+        "title_contains": "微信"
+    },
+    "window_size_px": {
+        "h": 768,
+        "w": 1160
+    }
+}
