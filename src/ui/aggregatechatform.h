@@ -13,6 +13,7 @@
 #include <QStackedWidget>
 #include <QVBoxLayout>
 #include "../core/types.h"
+#include "../utils/applystyle.h"
 
 class ConversationManager;
 
@@ -22,6 +23,7 @@ class AggregateChatForm : public QWidget
 public:
     explicit AggregateChatForm(QWidget* parent = nullptr);
     ~AggregateChatForm();
+    void applyTheme(ApplyStyle::MainWindowTheme theme);
 
 private:
     void setupUI();

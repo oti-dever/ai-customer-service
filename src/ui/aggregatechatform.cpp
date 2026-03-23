@@ -50,7 +50,12 @@ void AggregateChatForm::setupUI()
 
 void AggregateChatForm::setupStyles()
 {
-    setStyleSheet(ApplyStyle::aggregateChatFormStyle());
+    setStyleSheet(ApplyStyle::aggregateChatFormStyle(ApplyStyle::loadSavedMainWindowTheme()));
+}
+
+void AggregateChatForm::applyTheme(ApplyStyle::MainWindowTheme theme)
+{
+    setStyleSheet(ApplyStyle::aggregateChatFormStyle(theme));
 }
 
 void AggregateChatForm::connectSignals()
