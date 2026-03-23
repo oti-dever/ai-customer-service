@@ -2001,7 +2001,77 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
     QString id = idx.data(PlatformIdRole).toString();
     bool isCS = idx.data(IsCustomerServiceItemRole).toBool();
     bool isGroup = idx.data(IsGroupRole).toBool();
-    if (isGroup) return;
+    if (isGroup) {
+        // Group node context menu (e.g. "在线平台")
+        if (id == QLatin1String("online")) {
+            QList<QString> onlinePlatformIds;
+            for (auto it = m_managedWindows.cbegin(); it != m_managedWindows.cend(); ++it) {
+                if (!it.value().isCustomerService) {
+                    onlinePlatformIds.append(it.key());
+                }
+            }
+
+            if (onlinePlatformIds.isEmpty())
+                return;
+
+            QMenu menu(this);
+            QAction* actRemoveAll = menu.addAction(QStringLiteral("删除全部平台"));
+            QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
+            if (chosen == actRemoveAll) {
+                const QMessageBox::StandardButton btn = QMessageBox::question(
+                    this,
+                    QStringLiteral("确认"),
+                    QStringLiteral("确定要删除“在线平台”下的所有平台项吗？删除后仅解除关联，不会关闭外部窗口。"),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No);
+
+                if (btn == QMessageBox::Yes) {
+                    // Copy list first: removeOnlinePlatformItem will mutate tree/model.
+                    const auto ids = onlinePlatformIds;
+                    for (const QString& pid : ids) {
+                        removeOnlinePlatformItem(pid, true, true);
+                    }
+
+                    m_activeWindowId.clear();
+                    showSystemReadyPage();
+                }
+            }
+        }
+        // Customer service group: "客服平台"
+        else if (id == QLatin1String("cs")) {
+            QList<QString> csPlatformIds;
+            for (auto it = m_managedWindows.cbegin(); it != m_managedWindows.cend(); ++it) {
+                if (it.value().isCustomerService) {
+                    csPlatformIds.append(it.key());
+                }
+            }
+
+            if (csPlatformIds.isEmpty())
+                return;
+
+            QMenu menu(this);
+            QAction* actDisconnectAll = menu.addAction(QStringLiteral("断开所有关联"));
+            QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
+            if (chosen == actDisconnectAll) {
+                const QMessageBox::StandardButton btn = QMessageBox::question(
+                    this,
+                    QStringLiteral("确认"),
+                    QStringLiteral("确定要断开“客服平台”下所有已关联平台的关联吗？断开后仅解除与本软件的嵌入/跟随关联，不会关闭外部窗口。"),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No);
+
+                if (btn == QMessageBox::Yes) {
+                    const auto ids = csPlatformIds;
+                    for (const QString& pid : ids) {
+                        removeOnlinePlatformItem(pid, true, true);
+                    }
+                    m_activeWindowId.clear();
+                    showSystemReadyPage();
+                }
+            }
+        }
+        return;
+    }
 
     if (!m_managedWindows.contains(id)) return;
 
