@@ -1,5 +1,6 @@
 #include "addwindowdialog.h"
 #include "mainwindow.h"
+#include "../utils/applystyle.h"
 
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -8,11 +9,13 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSet>
 #include <QVBoxLayout>
 
 AddWindowDialog::AddWindowDialog(QWidget *parent) : QDialog(parent)
 {
     setWindowTitle(QStringLiteral("添加新窗口"));
+    setStyleSheet(ApplyStyle::addWindowDialogStyle());
     resize(760, 520);
     setupUI();
     onRefreshClicked();
@@ -107,11 +110,17 @@ void AddWindowDialog::rebuildTable()
 void AddWindowDialog::applyFilter()
 {
     const QString keyword = m_searchEdit->text().trimmed();
+    QSet<quintptr> managedHandles;
+    if (MainWindow* mw = qobject_cast<MainWindow*>(parent()))
+        managedHandles = mw->managedWindowHandles();
+
     m_table->setRowCount(0);
     m_filteredIndexes.clear();
 
     for (int i = 0; i < m_allWindows.size(); ++i) {
         const WindowInfo& info = m_allWindows.at(i);
+        if (managedHandles.contains(info.handle))
+            continue;
         if (!keyword.isEmpty()) {
             const bool match = info.windowTitle.contains(keyword, Qt::CaseInsensitive) ||
                                info.processName.contains(keyword, Qt::CaseInsensitive);
