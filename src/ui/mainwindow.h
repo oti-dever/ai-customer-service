@@ -1,6 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <QSet>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMap>
@@ -11,6 +12,7 @@
 #include <QStandardItemModel>
 #include <QTreeView>
 #include <QRect>
+#include "../utils/applystyle.h"
 #include "../utils/win32windowhelper.h"
 
 class AggregateChatForm;
@@ -62,6 +64,8 @@ public:
     explicit MainWindow(const QString& username, QWidget* parent = nullptr);
     ~MainWindow();
 
+    static bool isWechatWindowInfo(const WindowInfo& info);
+
 protected:
     void closeEvent(QCloseEvent* event) override;
     void moveEvent(QMoveEvent* event) override;
@@ -82,6 +86,7 @@ private:
     void showPlaceholderPage(const QString& title);
     void openAddWindowDialog();
     void openAggregateChatForm();
+    void startOneClickAggregate();
     void openQuickLaunchManager();
     void runQuickLaunchApps();
     void openAppHelpDialog();
@@ -90,6 +95,7 @@ private:
 public:
     void addWindowToPlatform(const WindowInfo& info);
     void startBatchAddWindows(const QVector<WindowInfo>& list);
+    QSet<quintptr> managedWindowHandles() const;
 
 private:
     void switchToWindow(const QString& platformId);
@@ -117,6 +123,10 @@ private:
                                               const QString& customerName) const;
     void refreshStatusMessage();
     void openStatusMessageManager();
+    void applyMainWindowTheme(ApplyStyle::MainWindowTheme theme);
+    int oneClickMaxOnlineLimit() const;
+    void setOneClickMaxOnlineLimit(int n);
+    void updateOneClickAggregateTooltip();
 
 private slots:
     void onPlatformTreeSelectionChanged();
@@ -134,15 +144,19 @@ private:
     QToolButton* m_btnAdd = nullptr;
     QToolButton* m_btnRefresh = nullptr;
     QToolButton* m_btnQuickStart = nullptr;
+    QToolButton* m_btnOneClickAggregate = nullptr;
     QFrame* m_readyCard = nullptr;
     QLabel* m_readyTitle = nullptr;
     QLabel* m_readySubtitle = nullptr;
     QLabel* m_statusMessage = nullptr;
     QLabel* m_statusSeparator = nullptr;
     QLabel* m_statusTime = nullptr;
+    QToolButton* m_btnThemeSwitch = nullptr;
+    ApplyStyle::MainWindowTheme m_mainWindowTheme = ApplyStyle::MainWindowTheme::Default;
     AggregateChatForm* m_aggregateChatForm = nullptr;
 
     QStandardItem* m_onlineGroup = nullptr;
+    QStandardItem* m_manageGroup = nullptr;
     QStandardItem* m_csGroup = nullptr;
 
     QMap<QString, ManagedWindowEntry> m_managedWindows;

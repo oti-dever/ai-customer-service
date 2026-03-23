@@ -9,6 +9,7 @@
 #include <QDialog>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
@@ -268,11 +269,7 @@ QString randomEncouragementText(const QStringList& messages, const QString& curr
 
 bool isWechatWindow(const WindowInfo& info)
 {
-    const QString proc = info.processName.toLower();
-    const QString title = info.platformName.toLower();
-    return proc.contains(QStringLiteral("wechat"))
-           || title.contains(QStringLiteral("wechat"))
-           || info.platformName.contains(QStringLiteral("微信"));
+    return MainWindow::isWechatWindowInfo(info);
 }
 
 bool isInWindowCloseHotspot(const QRect& rect, const QPoint& cursorPos)
@@ -325,6 +322,9 @@ public:
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing, true);
 
+        const ApplyStyle::MainWindowTheme theme = ApplyStyle::loadSavedMainWindowTheme();
+        const PlatformTreeColors c = ApplyStyle::platformTreeColors(theme);
+
         const QString title = index.data(Qt::DisplayRole).toString();
         const bool isGroup = index.data(IsGroupRole).toBool();
         const bool expanded = m_tree && m_tree->isExpanded(index);
@@ -335,9 +335,9 @@ public:
 
         if (isGroup) {
             const QColor dotColor = index.data(DotColorRole).value<QColor>();
-            QColor bg(245, 245, 247);
-            if (hover) bg = QColor(238, 240, 245);
-            if (sel) bg = QColor(232, 235, 245);
+            QColor bg = c.groupBgDefault;
+            if (hover) bg = c.groupBgHover;
+            if (sel) bg = c.groupBgSelected;
             painter->setPen(Qt::NoPen);
             painter->setBrush(bg);
             painter->drawRoundedRect(r, 8, 8);
@@ -350,29 +350,36 @@ public:
             QFont f = option.font;
             f.setBold(true);
             painter->setFont(f);
-            painter->setPen(QColor(40, 40, 40));
+            painter->setPen(c.groupTextColor);
             const bool hasChildren = index.model() && index.model()->rowCount(index) > 0;
             const int textRight = hasChildren ? r.right() - 28 : r.right() - 8;
             QRect textRect(r.left() + 12 + dot + 8, r.top(), textRight - (r.left() + 12 + dot + 8), r.height());
             painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, title);
 
             if (hasChildren) {
-                painter->setPen(QColor(120, 120, 120));
-                painter->drawText(QRect(r.right() - 24, r.top(), 20, r.height()), Qt::AlignCenter,
-                                  expanded ? QStringLiteral("\u25be") : QStringLiteral("\u25b8"));
+                const QIcon expandIcon(QStringLiteral(":/fold_arrow_to_expand_icon.svg"));
+                const QIcon collapseIcon(QStringLiteral(":/fold_arrow_to_collapse_icon.svg"));
+                const QSize arrowSize(16, 16);
+                QRect arrowRect(r.right() - 24, r.top(), 20, r.height());
+                QPixmap pix = (expanded ? collapseIcon : expandIcon).pixmap(arrowSize);
+                if (!pix.isNull()) {
+                    QPoint pt(arrowRect.center().x() - pix.width() / 2, arrowRect.center().y() - pix.height() / 2);
+                    painter->drawPixmap(pt, pix);
+                }
             }
         } else {
             bool isCS = index.data(IsCustomerServiceItemRole).toBool();
             bool isActivated = index.data(IsActivatedRole).toBool();
 
-            QColor bg(255, 255, 255);
+            QColor bg;
             if (isCS && !isActivated) {
-                bg = QColor(248, 248, 250);
-                if (hover) bg = QColor(244, 244, 248);
-                if (sel) bg = QColor(240, 242, 250);
+                bg = c.itemInactiveBgDefault;
+                if (hover) bg = c.itemInactiveBgHover;
+                if (sel) bg = c.itemInactiveBgSelected;
             } else {
-                if (hover) bg = QColor(248, 249, 252);
-                if (sel) bg = QColor(235, 243, 255);
+                bg = c.itemBgDefault;
+                if (hover) bg = c.itemBgHover;
+                if (sel) bg = c.itemBgSelected;
             }
             painter->setPen(Qt::NoPen);
             painter->setBrush(bg);
@@ -382,7 +389,7 @@ public:
 
             if (isCS) {
                 int dotSz = 8;
-                QColor dotClr = isActivated ? QColor(82, 196, 26) : QColor(190, 190, 190);
+                QColor dotClr = isActivated ? c.csDotActivated : c.csDotInactive;
                 QRect dotR(xOff, r.center().y() - dotSz / 2, dotSz, dotSz);
                 painter->setBrush(dotClr);
                 painter->drawEllipse(dotR);
@@ -395,7 +402,7 @@ public:
             if (!icon.isNull()) {
                 if (isCS && !isActivated) {
                     auto pix = icon.pixmap(iconSize);
-                    painter->setOpacity(0.35);
+                    painter->setOpacity(c.itemInactiveIconOpacity);
                     painter->drawPixmap(iconRect, pix);
                     painter->setOpacity(1.0);
                 } else {
@@ -404,14 +411,14 @@ public:
             }
             xOff += iconSize.width() + 10;
 
-            QColor textClr = (isCS && !isActivated) ? QColor(170, 170, 170) : QColor(40, 40, 40);
+            QColor textClr = (isCS && !isActivated) ? c.itemInactiveTextColor : c.itemTextColor;
             painter->setPen(textClr);
             QRect textRect(xOff, r.top(), r.right() - 8 - xOff, r.height());
             painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, title);
 
             if (sel && !isCS) {
                 painter->setPen(Qt::NoPen);
-                painter->setBrush(QColor(24, 144, 255));
+                painter->setBrush(c.itemAccentBarColor);
                 painter->drawRoundedRect(QRect(r.left(), r.top() + 6, 3, r.height() - 12), 1, 1);
             }
         }
@@ -504,14 +511,12 @@ QWidget* MainWindow::buildLeftSidebar()
     m_onlineGroup->setData(QColor(0, 200, 120), DotColorRole);
     m_onlineGroup->setFlags(m_onlineGroup->flags() & ~Qt::ItemIsDropEnabled);
 
-    // -- 管理后台 --
-    const QIcon iconManage = resourceIcon(QStringLiteral(":/back_end_management.svg"),
-                                          qApp->style()->standardIcon(QStyle::SP_FileDialogContentsView));
-    auto* manageConsole = new QStandardItem(iconManage, QStringLiteral("管理后台"));
-    manageConsole->setData(QStringLiteral("manage"), PlatformIdRole);
-    manageConsole->setData(false, IsGroupRole);
-    manageConsole->setData(false, IsCustomerServiceItemRole);
-    manageConsole->setFlags(manageConsole->flags() & ~Qt::ItemIsDropEnabled);
+    // -- 管理后台（可折叠分组） --
+    m_manageGroup = new QStandardItem(QStringLiteral("管理后台"));
+    m_manageGroup->setData(QStringLiteral("manage"), PlatformIdRole);
+    m_manageGroup->setData(true, IsGroupRole);
+    m_manageGroup->setData(QColor(24, 144, 255), DotColorRole);
+    m_manageGroup->setFlags(m_manageGroup->flags() & ~Qt::ItemIsDropEnabled);
 
     const QIcon iconRobot = resourceIcon(QStringLiteral(":/platform_management_icon.svg"),
                                          qApp->style()->standardIcon(QStyle::SP_ComputerIcon));
@@ -519,7 +524,7 @@ QWidget* MainWindow::buildLeftSidebar()
     itemRobot->setData(QStringLiteral("robot"), PlatformIdRole);
     itemRobot->setData(false, IsGroupRole);
     itemRobot->setData(false, IsCustomerServiceItemRole);
-    manageConsole->appendRow(itemRobot);
+    m_manageGroup->appendRow(itemRobot);
 
     const QIcon iconReception = resourceIcon(QStringLiteral(":/aggregate_reception_icons/message_icon.svg"),
                                              qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation));
@@ -527,7 +532,7 @@ QWidget* MainWindow::buildLeftSidebar()
     itemReception->setData(QStringLiteral("aggregate"), PlatformIdRole);
     itemReception->setData(false, IsGroupRole);
     itemReception->setData(false, IsCustomerServiceItemRole);
-    manageConsole->appendRow(itemReception);
+    m_manageGroup->appendRow(itemReception);
 
     // -- 客服平台 --
     m_csGroup = new QStandardItem(QStringLiteral("客服平台"));
@@ -553,7 +558,7 @@ QWidget* MainWindow::buildLeftSidebar()
     }
 
     m_platformTreeModel->appendRow(m_onlineGroup);
-    m_platformTreeModel->appendRow(manageConsole);
+    m_platformTreeModel->appendRow(m_manageGroup);
     m_platformTreeModel->appendRow(m_csGroup);
 
     m_platformTree = new QTreeView(left);
@@ -769,8 +774,23 @@ void MainWindow::showPlaceholderPage(const QString& title)
 
 void MainWindow::setupStyles()
 {
-    setStyleSheet(ApplyStyle::mainWindowStyle());
+    m_mainWindowTheme = ApplyStyle::loadSavedMainWindowTheme();
+    setStyleSheet(ApplyStyle::mainWindowStyle(m_mainWindowTheme));
 }
+
+void MainWindow::applyMainWindowTheme(ApplyStyle::MainWindowTheme theme)
+{
+    m_mainWindowTheme = theme;
+    ApplyStyle::saveMainWindowTheme(theme);
+    setStyleSheet(ApplyStyle::mainWindowStyle(theme));
+    if (m_platformTree && m_platformTree->viewport())
+        m_platformTree->viewport()->update();
+    if (m_aggregateChatForm)
+        m_aggregateChatForm->applyTheme(theme);
+}
+
+static constexpr int kOneClickMinOnline = 2;
+static constexpr int kOneClickMaxOnline = 50;
 
 QWidget* MainWindow::buildReadyPage()
 {
@@ -818,7 +838,7 @@ QWidget* MainWindow::buildReadyPage()
 
     cardLayout->addWidget(rocketWrap);
     cardLayout->addWidget(m_readyTitle);
-    cardLayout->addWidget(divider);
+    cardLayout->addWidget(divider, 0, Qt::AlignHCenter);
     cardLayout->addWidget(m_readySubtitle);
 
     auto* quickRow = new QWidget(center);
@@ -841,7 +861,26 @@ QWidget* MainWindow::buildReadyPage()
     };
     auto* btnPick = makeQuick(resourceIcon(QStringLiteral(":/click_to_select_platform_icon.svg"),
                                            qApp->style()->standardIcon(QStyle::SP_ArrowRight)),
-                              QStringLiteral("点击选择平台"));
+                              QStringLiteral("一键聚合"));
+    m_btnOneClickAggregate = btnPick;
+    updateOneClickAggregateTooltip();
+    btnPick->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(btnPick, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QMenu menu(m_btnOneClickAggregate);
+        QAction* setLimit = menu.addAction(QStringLiteral("设置在线窗口上限..."));
+        QAction* triggered = menu.exec(m_btnOneClickAggregate->mapToGlobal(pos));
+        if (triggered == setLimit) {
+            const int cur = oneClickMaxOnlineLimit();
+            bool ok = false;
+            int v = QInputDialog::getInt(this, QStringLiteral("在线窗口上限"),
+                                         QStringLiteral("上限为 %1～%2，建议不超过 30 以保持流畅：")
+                                             .arg(kOneClickMinOnline).arg(kOneClickMaxOnline),
+                                         cur, kOneClickMinOnline, kOneClickMaxOnline, 1, &ok);
+            if (ok)
+                setOneClickMaxOnlineLimit(v);
+        }
+    });
+    connect(btnPick, &QToolButton::clicked, this, &MainWindow::startOneClickAggregate);
     auto* btnEmbed = makeQuick(resourceIcon(QStringLiteral(":/auto_embed_window_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_FileDialogListView)),
                                QStringLiteral("添加新窗口"));
@@ -849,7 +888,6 @@ QWidget* MainWindow::buildReadyPage()
                                             qApp->style()->standardIcon(QStyle::SP_DialogOkButton)),
                                QStringLiteral("快速启动应用"));
     m_btnQuickStart = btnStart;
-    connect(btnPick, &QToolButton::clicked, this, [this]() { m_platformTree->setFocus(); });
     connect(btnEmbed, &QToolButton::clicked, this, &MainWindow::openAddWindowDialog);
     connect(btnStart, &QToolButton::clicked, this, &MainWindow::runQuickLaunchApps);
     btnStart->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -876,9 +914,79 @@ QWidget* MainWindow::buildReadyPage()
 void MainWindow::openAddWindowDialog()
 {
     AddWindowDialog dlg(this);
-    if (dlg.exec() == QDialog::Accepted) {
-        showSystemReadyPage();
+    dlg.exec();
+}
+
+int MainWindow::oneClickMaxOnlineLimit() const
+{
+    QSettings s(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    int v = s.value(QStringLiteral("oneClickAggregate/maxOnline"), 10).toInt();
+    return qBound(kOneClickMinOnline, v, kOneClickMaxOnline);
+}
+
+void MainWindow::setOneClickMaxOnlineLimit(int n)
+{
+    int v = qBound(kOneClickMinOnline, n, kOneClickMaxOnline);
+    QSettings s(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    s.setValue(QStringLiteral("oneClickAggregate/maxOnline"), v);
+    updateOneClickAggregateTooltip();
+}
+
+void MainWindow::updateOneClickAggregateTooltip()
+{
+    if (m_btnOneClickAggregate) {
+        const int limit = oneClickMaxOnlineLimit();
+        m_btnOneClickAggregate->setToolTip(
+            QStringLiteral("自动聚合可识别窗口（客服平台/微信/浏览器及普通应用），在线窗口上限为 %1（右键可修改）").arg(limit));
     }
+}
+
+void MainWindow::startOneClickAggregate()
+{
+    const QVector<WindowInfo> list = Win32WindowHelper::enumTopLevelWindows();
+    QVector<WindowInfo> queue;
+    queue.reserve(list.size());
+
+    int onlineCount = 0;
+    const int maxOnline = oneClickMaxOnlineLimit();
+
+    for (const auto& info : list) {
+        if (!info.handle)
+            continue;
+        bool alreadyManaged = false;
+        for (auto it = m_managedWindows.constBegin(); it != m_managedWindows.constEnd(); ++it) {
+            if (it.value().handle == info.handle) {
+                alreadyManaged = true;
+                break;
+            }
+        }
+        if (alreadyManaged)
+            continue;
+
+        const QString csId = matchCustomerServicePlatform(info);
+        if (!csId.isEmpty()) {
+            queue.append(info);
+            continue;
+        }
+
+        if (onlineCount >= maxOnline)
+            continue;
+
+        if (MainWindow::isWechatWindowInfo(info) || info.isBrowserLike) {
+            queue.append(info);
+            ++onlineCount;
+        } else {
+            queue.append(info);
+            ++onlineCount;
+        }
+    }
+
+    if (queue.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("未发现可聚合窗口"), 4000);
+        return;
+    }
+
+    startBatchAddWindows(queue);
 }
 
 static void loadQuickLaunchConfig(QVector<QuickLaunchApp>& apps,
@@ -916,8 +1024,10 @@ static void saveQuickLaunchConfig(const QVector<QuickLaunchApp>& apps,
 void MainWindow::openQuickLaunchManager()
 {
     loadQuickLaunchConfig(m_quickLaunchApps, m_quickLaunchOnlyIfNotRunning);
+    const ApplyStyle::MainWindowTheme theme = m_mainWindowTheme;
 
     QDialog dlg(this);
+    dlg.setObjectName(QStringLiteral("quickLaunchManagerDialog"));
     dlg.setWindowTitle(QStringLiteral("管理应用列表"));
     dlg.resize(520, 360);
 
@@ -926,6 +1036,7 @@ void MainWindow::openQuickLaunchManager()
     mainLayout->setSpacing(10);
 
     auto* list = new QListWidget(&dlg);
+    list->setObjectName(QStringLiteral("quickLaunchAppList"));
     list->setSelectionMode(QAbstractItemView::SingleSelection);
     for (const auto& app : m_quickLaunchApps) {
         auto* item = new QListWidgetItem(list);
@@ -940,8 +1051,10 @@ void MainWindow::openQuickLaunchManager()
     onlyLayout->setContentsMargins(0, 0, 0, 0);
     onlyLayout->setSpacing(6);
     auto* onlyBox = new QCheckBox(QStringLiteral("只启动未运行的应用"), onlyRow);
+    onlyBox->setObjectName(QStringLiteral("quickLaunchOnlyBox"));
     onlyBox->setChecked(m_quickLaunchOnlyIfNotRunning);
     auto* helpBtn = new QToolButton(onlyRow);
+    helpBtn->setObjectName(QStringLiteral("quickLaunchHelpButton"));
     helpBtn->setAutoRaise(true);
     helpBtn->setIcon(QIcon(QStringLiteral(":/question_mark_icon.svg")));
     helpBtn->setToolTip(QStringLiteral("查看使用说明"));
@@ -954,9 +1067,13 @@ void MainWindow::openQuickLaunchManager()
     auto* btnRow = new QHBoxLayout();
     btnRow->addStretch(1);
     auto* btnAdd = new QPushButton(QStringLiteral("添加应用..."), &dlg);
+    btnAdd->setObjectName(QStringLiteral("quickLaunchAddButton"));
     auto* btnRemove = new QPushButton(QStringLiteral("删除选中"), &dlg);
+    btnRemove->setObjectName(QStringLiteral("quickLaunchRemoveButton"));
     auto* btnOk = new QPushButton(QStringLiteral("确定"), &dlg);
+    btnOk->setObjectName(QStringLiteral("quickLaunchOkButton"));
     auto* btnCancel = new QPushButton(QStringLiteral("取消"), &dlg);
+    btnCancel->setObjectName(QStringLiteral("quickLaunchCancelButton"));
     btnRow->addWidget(btnAdd);
     btnRow->addWidget(btnRemove);
     btnRow->addSpacing(10);
@@ -1003,12 +1120,11 @@ void MainWindow::openQuickLaunchManager()
 
     connect(btnCancel, &QPushButton::clicked, &dlg, &QDialog::reject);
 
-    connect(helpBtn, &QToolButton::clicked, &dlg, [&dlg]() {
+    connect(helpBtn, &QToolButton::clicked, &dlg, [&dlg, theme]() {
         const QString text = QStringLiteral(
             "【快速启动应用使用说明】\n\n"
             "1. 通过「添加应用...」选择常用程序的可执行文件（*.exe）。\n"
-            "2. 「只启动未运行的应用」勾选后，每次快速启动只会启动当前未在运行的应用，"
-            "   避免重复打开多个实例。\n"
+            "2. 「只启动未运行的应用」勾选后，每次快速启动只会启动当前未在运行的应用，避免重复打开多个实例。\n"
             "3. 快速启动入口位于主界面「快速启动应用」卡片：\n"
             "   - 左键：按列表依次启动应用；\n"
             "   - 右键：「管理应用列表」，可增删应用并修改该选项。\n"
@@ -1018,9 +1134,11 @@ void MainWindow::openQuickLaunchManager()
         msgBox.setText(text);
         msgBox.setIconPixmap(QIcon(QStringLiteral(":/question_mark_icon.svg")).pixmap(32, 32));
         msgBox.setStandardButtons(QMessageBox::Close);
+        msgBox.setStyleSheet(ApplyStyle::quickLaunchHelpMessageBoxStyle(theme));
         msgBox.exec();
     });
 
+    dlg.setStyleSheet(ApplyStyle::quickLaunchManagerStyle(theme));
     dlg.exec();
 }
 
@@ -1094,6 +1212,7 @@ public:
         splitter->addWidget(m_browser);
         splitter->setStretchFactor(0, 0);
         splitter->setStretchFactor(1, 1);
+        splitter->setSizes({170, 610});
 
         populateContent();
 
@@ -1105,7 +1224,8 @@ public:
                         m_browser->scrollToAnchor(anchor);
                 });
 
-        setStyleSheet(ApplyStyle::helpDialogStyle());
+        setStyleSheet(
+            ApplyStyle::helpDialogStyle(ApplyStyle::loadSavedMainWindowTheme()));
 
         QListWidgetItem* startItem = nullptr;
         for (int i = 0; i < m_toc->count(); ++i) {
@@ -1136,6 +1256,7 @@ private:
     void populateContent()
     {
         QVector<Section> sections;
+        const ApplyStyle::MainWindowTheme theme = ApplyStyle::loadSavedMainWindowTheme();
 
         // ---- 使用说明 ----
         sections.append({
@@ -1157,8 +1278,9 @@ private:
             "help_disconnect", QStringLiteral("\u2022 断开窗口关联"),
             QStringLiteral(
                 "<h3>断开窗口关联</h3>"
-                "<p>在左侧「在线平台」列表中，<b>右键</b>点击对应平台项，选择「断开关联」或「删除」即可安全释放窗口。</p>"
-                "<p style='color:#f59e0b;'>&#9888; 请勿直接点击外部窗口自身的关闭按钮来断开关联，以免出现白屏或未正确移除等异常。</p>")
+                "<p>在左侧「在线平台」或「客服平台」列表中，<b>右键</b>点击对应平台项，选择「断开关联」或「删除」即可断开与主窗口的关联（不会关闭该应用窗口本身）。</p>"
+                "<p style='color:%1;'>&#9888; 请勿使用嵌入窗口标题栏上的「最小化」「最大化」「关闭」按钮，可能引发异常或白屏。需断开关联时请通过上述右键菜单操作。</p>")
+                .arg(ApplyStyle::helpDialogHtmlWarningColor(theme))
         });
         sections.append({
             "help_quicklaunch", QStringLiteral("\u2022 快速启动应用"),
@@ -1226,7 +1348,8 @@ private:
 
         QString html = QStringLiteral(
             "<html><body style='font-family: \"Microsoft YaHei\", \"Segoe UI\", sans-serif; "
-            "font-size: 13px; color: #e2e8f0; padding: 16px;'>");
+            "font-size: 13px; color: %1; margin: 0; padding: 16px 16px 16px 0;'>")
+                            .arg(ApplyStyle::helpDialogHtmlBodyTextColor(theme));
 
         bool helpGroupAdded = false;
         bool bugGroupAdded = false;
@@ -1250,12 +1373,13 @@ private:
             m_toc->addItem(item);
 
             html += QStringLiteral("<a name=\"%1\"></a>%2<hr style='border: none; "
-                                   "border-top: 1px solid #334155; margin: 18px 0;'>")
-                        .arg(s.anchor, s.html);
+                                   "border-top: 1px solid %3; margin: 18px 0;'>")
+                        .arg(s.anchor, s.html, ApplyStyle::helpDialogHtmlHrBorderColor(theme));
         }
 
         html += QStringLiteral("</body></html>");
         m_browser->setHtml(html);
+        m_browser->document()->setDocumentMargin(0);
     }
 };
 
@@ -1323,7 +1447,8 @@ void MainWindow::processNextBatchAdd()
                 m_batchAddOverlay = nullptr;
                 m_batchAddPrompt = nullptr;
             }
-            showSystemReadyPage();
+            if (success == 0)
+                showSystemReadyPage();
         });
         return;
     }
@@ -1353,6 +1478,23 @@ WindowDisplayMode MainWindow::determineDisplayMode(const WindowInfo& info)
         || proc.contains("aliim") || proc.contains("qianniu"))
         return WindowDisplayMode::Embed;
     return WindowDisplayMode::FloatFollow;
+}
+
+bool MainWindow::isWechatWindowInfo(const WindowInfo& info)
+{
+    const QString proc = info.processName.toLower();
+    const QString title = info.platformName.toLower();
+    return proc.contains(QStringLiteral("wechat"))
+           || title.contains(QStringLiteral("wechat"))
+           || info.platformName.contains(QStringLiteral("微信"));
+}
+
+QSet<quintptr> MainWindow::managedWindowHandles() const
+{
+    QSet<quintptr> set;
+    for (auto it = m_managedWindows.constBegin(); it != m_managedWindows.constEnd(); ++it)
+        set.insert(it.value().handle);
+    return set;
 }
 
 QString MainWindow::matchCustomerServicePlatform(const WindowInfo& info) const
@@ -1827,9 +1969,13 @@ void MainWindow::removeOnlinePlatformItem(const QString& platformId,
 
     m_managedWindows.remove(platformId);
     updateTreeViewHeight();
-    if (wasActive) {
-        showSystemReadyPage();
-    }
+    // 删除「当前正在显示」的托管项时，removeRow 会先触发一次 currentChanged；
+    // 若此处再无条件 showSystemReadyPage()，会覆盖已切到的下一项（如微信）的 stack，
+    // 造成树选中与 m_centerStack、m_activeWindowId 不一致，随后 move 时
+    // updateFloatFollowPosition 会把 FloatFollow 微信误判为「非当前页」而挪到屏外。
+    // 在数据与树结构都更新完后，再按当前选中项统一同步一次中间区域（幂等）。
+    if (wasActive)
+        onPlatformTreeSelectionChanged();
     qInfo() << "[MainWindow] 移除平台:" << platformId;
 }
 
@@ -1878,7 +2024,7 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
         QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
         if (chosen == actRemove) {
             removeOnlinePlatformItem(id);
-        } else if (chosen == actCalibrateWechat) {
+        } else if (actCalibrateWechat && chosen == actCalibrateWechat) {
             startWechatRpaCalibration(id);
         }
     }
@@ -2139,10 +2285,12 @@ void MainWindow::refreshStatusMessage()
 
 void MainWindow::openStatusMessageManager()
 {
+    const ApplyStyle::MainWindowTheme theme = m_mainWindowTheme;
     QDialog dialog(this, Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    dialog.setObjectName(QStringLiteral("statusMessageManagerDialog"));
     dialog.setWindowTitle(QStringLiteral("管理文案"));
     dialog.setModal(true);
-    dialog.resize(420, 320);
+    dialog.resize(450, 320);
 
     auto* layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(12, 12, 12, 12);
@@ -2152,9 +2300,11 @@ void MainWindow::openStatusMessageManager()
     tipLabel->setWordWrap(true);
 
     auto* listWidget = new QListWidget(&dialog);
+    listWidget->setObjectName(QStringLiteral("statusMessageList"));
     listWidget->addItems(m_customStatusMessages);
 
     auto* editor = new QLineEdit(&dialog);
+    editor->setObjectName(QStringLiteral("statusMessageEditor"));
     editor->setPlaceholderText(QStringLiteral("输入一句想展示的话"));
 
     auto* buttonRow = new QHBoxLayout();
@@ -2163,6 +2313,10 @@ void MainWindow::openStatusMessageManager()
     auto* updateButton = new QPushButton(QStringLiteral("修改"), &dialog);
     auto* deleteButton = new QPushButton(QStringLiteral("删除"), &dialog);
     auto* closeButton = new QPushButton(QStringLiteral("关闭"), &dialog);
+    addButton->setObjectName(QStringLiteral("statusMessageAddButton"));
+    updateButton->setObjectName(QStringLiteral("statusMessageUpdateButton"));
+    deleteButton->setObjectName(QStringLiteral("statusMessageDeleteButton"));
+    closeButton->setObjectName(QStringLiteral("statusMessageCloseButton"));
     buttonRow->addWidget(addButton);
     buttonRow->addWidget(updateButton);
     buttonRow->addWidget(deleteButton);
@@ -2257,6 +2411,7 @@ void MainWindow::openStatusMessageManager()
             addButton->click();
     });
 
+    dialog.setStyleSheet(ApplyStyle::statusMessageManagerStyle(theme));
     dialog.adjustSize();
 
     if (m_statusMessage) {
@@ -2285,6 +2440,25 @@ void MainWindow::openStatusMessageManager()
 void MainWindow::buildStatusBar()
 {
     m_customStatusMessages = loadCustomEncouragementMessages();
+    m_btnThemeSwitch = new QToolButton(this);
+    m_btnThemeSwitch->setObjectName(QStringLiteral("themeSwitchButton"));
+    m_btnThemeSwitch->setText(QStringLiteral("主题"));
+    m_btnThemeSwitch->setCursor(Qt::PointingHandCursor);
+    m_btnThemeSwitch->setPopupMode(QToolButton::InstantPopup);
+    m_btnThemeSwitch->setToolTip(QStringLiteral("默认 / 冷色 / 暖色"));
+    auto* themeMenu = new QMenu(m_btnThemeSwitch);
+    themeMenu->addAction(QStringLiteral("默认"), this, [this]() {
+        applyMainWindowTheme(ApplyStyle::MainWindowTheme::Default);
+    });
+    themeMenu->addAction(QStringLiteral("冷色"), this, [this]() {
+        applyMainWindowTheme(ApplyStyle::MainWindowTheme::Cool);
+    });
+    themeMenu->addAction(QStringLiteral("暖色"), this, [this]() {
+        applyMainWindowTheme(ApplyStyle::MainWindowTheme::Warm);
+    });
+    m_btnThemeSwitch->setMenu(themeMenu);
+    statusBar()->addWidget(m_btnThemeSwitch);
+
     auto* statusWrap = new QWidget(this);
     statusWrap->setObjectName("statusBarWrap");
     auto* statusLayout = new QHBoxLayout(statusWrap);
