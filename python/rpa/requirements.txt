@@ -1,3 +1,8 @@
-winsdk
+# RPA common
 pillow
+numpy
 
+# OCR (PaddleOCR)
+paddlepaddle
+paddleocr
+# 若出现 oneDNN ConvertPirAttribute2RuntimeAttribute 错误，可降级: pip install paddlepaddle==3.2.2

@@ -1,89 +1,79 @@
-import hashlib
-import sqlite3
+"""
+RPA main entry: starts Reader and Writer for configured platforms.
+Run: python -m rpa.main
+Or: python rpa/main.py
+"""
+from __future__ import annotations
+
+import os
+
+# 必须在 import PaddlePaddle 之前设置，避免 oneDNN ConvertPirAttribute2RuntimeAttribute 错误
+# 使用强制赋值，确保覆盖系统已有配置
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["FLAGS_use_dnnl"] = "0"
+
+import argparse
+import sys
+import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = PROJECT_ROOT / "database" / "app.db"
-
-POLL_INTERVAL_SEC = 3
-
-def ensure_db_path():
-    # 仅作为示例，真实路径应与 Qt 端保持一致，可通过配置文件传入
-    print(f"[RPA-Reader] 使用数据库路径: {DB_PATH}")
-
-def open_db():
-    conn = sqlite3.connect(DB_PATH, timeout=5)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=3000;")
-    return conn
-
-def make_platform_msg_id(platform: str, platform_conversation_id: str, content: str, created_at: str) -> str:
-    # 强约束：稳定唯一（尽量不依赖自增 id）
-    digest = hashlib.sha1(f"{platform_conversation_id}|{created_at}|{content}".encode("utf-8")).hexdigest()[:12]
-    ts_ms = int(time.time() * 1000)
-    return f"{platform}:unknownShop:{platform_conversation_id}:{ts_ms}:{digest}"
+# Ensure python/ is on path for "from rpa.xxx import"
+# python/rpa/main.py -> parents[1] = python/
+PYTHON_DIR = Path(__file__).resolve().parents[1]
+if str(PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(PYTHON_DIR))
 
 
-def write_inbox_messages(batch: list[dict]):
-    if not batch:
-        return
-
-    conn = open_db()
-    try:
-        cur = conn.cursor()
-        cur.execute("BEGIN")
-        for item in batch:
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO rpa_inbox_messages
-                (platform, platform_conversation_id, customer_name, content, created_at, platform_msg_id, consume_status, error_reason)
-                VALUES (?, ?, ?, ?, ?, ?, 0, '')
-                """,
-                (
-                    item["platform"],
-                    item["platform_conversation_id"],
-                    item["customer_name"],
-                    item["content"],
-                    item["created_at"],
-                    item["platform_msg_id"],
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
+def run_wechat_reader():
+    from rpa.readers.wechat_reader import run_reader
+    run_reader()
 
 
-def build_demo_batch() -> list[dict]:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    platform = "qianniu"
-    platform_conversation_id = "demo_conv_1"
-    customer_name = "演示买家"
-    content = f"【Python RPA 假消息】{now}"
-    platform_msg_id = make_platform_msg_id(platform, platform_conversation_id, content, now)
-    return [
-        {
-            "platform": platform,
-            "platform_conversation_id": platform_conversation_id,
-            "customer_name": customer_name,
-            "content": content,
-            "created_at": now,
-            "platform_msg_id": platform_msg_id,
-        }
-    ]
+def run_wechat_writer():
+    from rpa.writers.wechat_writer import run_writer
+    run_writer()
 
 
 def main():
-    ensure_db_path()
-    while True:
-        batch = build_demo_batch()
-        write_inbox_messages(batch)
-        print(f"[RPA-Reader] 已写入 {len(batch)} 条 inbox（示例）")
-        time.sleep(POLL_INTERVAL_SEC)
+    parser = argparse.ArgumentParser(description="RPA Reader + Writer")
+    parser.add_argument("--reader-only", action="store_true", help="Only run reader(s)")
+    parser.add_argument("--writer-only", action="store_true", help="Only run writer(s)")
+    parser.add_argument("--platform", choices=["wechat", "qianniu", "all"], default="wechat",
+                        help="Platform to run (default: wechat)")
+    args = parser.parse_args()
+
+    run_reader = args.reader_only or (not args.writer_only)
+    run_writer = args.writer_only or (not args.reader_only)
+
+    if args.platform in ("wechat", "all") and run_reader:
+        t = threading.Thread(target=run_wechat_reader, daemon=True)
+        t.start()
+        print("[RPA] WeChat reader started")
+
+    if args.platform in ("wechat", "all") and run_writer:
+        t = threading.Thread(target=run_wechat_writer, daemon=True)
+        t.start()
+        print("[RPA] WeChat writer started")
+
+    if args.platform in ("qianniu", "all"):
+        if run_reader:
+            from rpa.readers.qianniu_reader import run_reader as run_qn_reader
+            t = threading.Thread(target=run_qn_reader, daemon=True)
+            t.start()
+            print("[RPA] 千牛 reader started")
+        if run_writer:
+            from rpa.writers.qianniu_writer import run_writer as run_qn_writer
+            t = threading.Thread(target=run_qn_writer, daemon=True)
+            t.start()
+            print("[RPA] 千牛 writer started")
+
+    try:
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        print("\n[RPA] 退出")
 
 
 if __name__ == "__main__":
     main()
-
