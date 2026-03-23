@@ -8,7 +8,7 @@ WechatRPAAdapter::WechatRPAAdapter(QObject* parent)
     : IPlatformAdapter(parent)
 {
     m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(800);
+    m_pollTimer->setInterval(500);
     connect(m_pollTimer, &QTimer::timeout, this, &WechatRPAAdapter::pollInboxOnce);
 }
 
