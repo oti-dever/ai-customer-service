@@ -25,12 +25,16 @@ private:
 private slots:
     void onSearchTextChanged();
     void onRefreshClicked();
+    void onSelectAllClicked();
+    void onDeselectAllClicked();
     void onWindowSelectionChanged();
     void onOkClicked();
 
 private:
     QLineEdit* m_searchEdit = nullptr;
     QPushButton* m_btnRefresh = nullptr;
+    QPushButton* m_btnSelectAll = nullptr;
+    QPushButton* m_btnDeselectAll = nullptr;
     QTableWidget* m_table = nullptr;
     QLineEdit* m_editPlatformName = nullptr;
     QLineEdit* m_editProcessName = nullptr;

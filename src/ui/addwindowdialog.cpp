@@ -33,9 +33,15 @@ void AddWindowDialog::setupUI()
     m_searchEdit = new QLineEdit(this);
     m_searchEdit->setPlaceholderText(QStringLiteral("按窗口标题或进程名搜索..."));
     m_btnRefresh = new QPushButton(QStringLiteral("刷新"), this);
+    m_btnSelectAll = new QPushButton(QStringLiteral("全选"), this);
+    m_btnSelectAll->setToolTip(QStringLiteral("勾选当前列表中显示的全部窗口（受搜索过滤影响）"));
+    m_btnDeselectAll = new QPushButton(QStringLiteral("取消全选"), this);
+    m_btnDeselectAll->setToolTip(QStringLiteral("取消勾选当前列表中显示的全部窗口（受搜索过滤影响）"));
     searchRow->addWidget(searchLabel);
     searchRow->addWidget(m_searchEdit, 1);
     searchRow->addWidget(m_btnRefresh);
+    searchRow->addWidget(m_btnSelectAll);
+    searchRow->addWidget(m_btnDeselectAll);
     mainLayout->addLayout(searchRow);
 
     m_table = new QTableWidget(this);
@@ -92,6 +98,8 @@ void AddWindowDialog::setupUI()
     connect(m_searchEdit, &QLineEdit::textChanged, this, &AddWindowDialog::onSearchTextChanged);
     connect(m_table, &QTableWidget::itemSelectionChanged, this, &AddWindowDialog::onWindowSelectionChanged);
     connect(m_btnRefresh, &QPushButton::clicked, this, &AddWindowDialog::onRefreshClicked);
+    connect(m_btnSelectAll, &QPushButton::clicked, this, &AddWindowDialog::onSelectAllClicked);
+    connect(m_btnDeselectAll, &QPushButton::clicked, this, &AddWindowDialog::onDeselectAllClicked);
     connect(buttonBox, &QDialogButtonBox::accepted, this, &AddWindowDialog::onOkClicked);
     connect(buttonBox, &QDialogButtonBox::rejected, this, &AddWindowDialog::reject);
 }
@@ -152,6 +160,30 @@ void AddWindowDialog::applyFilter()
 void AddWindowDialog::onSearchTextChanged()
 {
     applyFilter();
+}
+
+void AddWindowDialog::onSelectAllClicked()
+{
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        auto* wrap = m_table->cellWidget(row, 0);
+        if (!wrap)
+            continue;
+        if (auto* check = wrap->findChild<QCheckBox*>()) {
+            check->setChecked(true);
+        }
+    }
+}
+
+void AddWindowDialog::onDeselectAllClicked()
+{
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        auto* wrap = m_table->cellWidget(row, 0);
+        if (!wrap)
+            continue;
+        if (auto* check = wrap->findChild<QCheckBox*>()) {
+            check->setChecked(false);
+        }
+    }
 }
 
 void AddWindowDialog::onWindowSelectionChanged()
