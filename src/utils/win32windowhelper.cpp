@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #include <QImage>
 #include <QPixmap>
+#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -180,6 +181,8 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
         || qTitle.contains(QStringLiteral("Windows Input Experience"))) {
         return TRUE;
     }
+    if (procLower.contains(QStringLiteral("system")))
+        return TRUE;
     if (procLower.contains(QStringLiteral("chrome"))
         || procLower.contains(QStringLiteral("msedge"))
         || procLower.contains(QStringLiteral("qqbrowser"))
@@ -225,16 +228,13 @@ bool Win32WindowHelper::embedWindowIntoWidget(quintptr handle, QWidget* containe
         ShowWindow(hwnd, SW_MAXIMIZE);
     }
 
-    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
-    style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX);
-    style |= WS_CHILD;
-    SetWindowLongW(hwnd, GWL_STYLE, style);
+    // 仅 SetParent，不设 WS_CHILD，保留窗口原有样式以维持完整标题栏（min/max/close）
     SetParent(hwnd, parent);
 
     RECT rc;
     GetClientRect(parent, &rc);
     SetWindowPos(hwnd, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
-                 SWP_NOZORDER | SWP_SHOWWINDOW);
+                 SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
     return true;
 }
 
@@ -382,6 +382,37 @@ void Win32WindowHelper::minimizeWindow(quintptr handle)
     ShowWindow(hwnd, SW_MINIMIZE);
 }
 
+QString Win32WindowHelper::windowTitle(quintptr handle)
+{
+    if (!handle) return {};
+    HWND hwnd = toHwnd(handle);
+    if (!IsWindow(hwnd)) return {};
+    wchar_t title[512] = {};
+    const int n = GetWindowTextW(hwnd, title, 511);
+    if (n <= 0) return {};
+    return QString::fromWCharArray(title, n);
+}
+
+QString Win32WindowHelper::executableBaseNameForWindow(quintptr handle)
+{
+    if (!handle) return {};
+    HWND hwnd = toHwnd(handle);
+    if (!IsWindow(hwnd)) return {};
+    DWORD pid = 0;
+    if (!GetWindowThreadProcessId(hwnd, &pid) || !pid)
+        return {};
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProcess)
+        return {};
+    wchar_t buffer[MAX_PATH] = {};
+    DWORD size = MAX_PATH;
+    QString name;
+    if (QueryFullProcessImageNameW(hProcess, 0, buffer, &size))
+        name = baseNameFromPath(buffer, size);
+    CloseHandle(hProcess);
+    return name;
+}
+
 bool Win32WindowHelper::isWindowValid(quintptr handle)
 {
     if (!handle) return false;
@@ -430,6 +461,62 @@ QRect Win32WindowHelper::windowRect(quintptr handle)
     RECT rc;
     if (!GetWindowRect(hwnd, &rc)) return {};
     return QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+}
+
+QRect Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(quintptr overlayHwnd,
+                                                                    quintptr targetHwnd,
+                                                                    const QRect& selectionInOverlayClientLogical,
+                                                                    qreal devicePixelRatio,
+                                                                    const QSize& overlayLogicalClientSize)
+{
+    if (!overlayHwnd || !targetHwnd)
+        return {};
+    HWND hOver = reinterpret_cast<HWND>(static_cast<WId>(overlayHwnd));
+    HWND hTgt = reinterpret_cast<HWND>(static_cast<WId>(targetHwnd));
+    if (!IsWindow(hOver) || !IsWindow(hTgt))
+        return {};
+
+    RECT rcClient{};
+    if (!GetClientRect(hOver, &rcClient))
+        return {};
+    const int physW = rcClient.right - rcClient.left;
+    const int physH = rcClient.bottom - rcClient.top;
+    if (physW <= 0 || physH <= 0)
+        return {};
+
+    double sx = 1.0;
+    double sy = 1.0;
+    if (overlayLogicalClientSize.isValid()
+        && overlayLogicalClientSize.width() > 0
+        && overlayLogicalClientSize.height() > 0) {
+        sx = double(physW) / double(overlayLogicalClientSize.width());
+        sy = double(physH) / double(overlayLogicalClientSize.height());
+    } else {
+        const qreal dpr = devicePixelRatio > 0 ? devicePixelRatio : 1.0;
+        sx = sy = dpr;
+    }
+
+    const QRect sel = selectionInOverlayClientLogical.normalized();
+    POINT p0{LONG(qRound(sel.left() * sx)), LONG(qRound(sel.top() * sy))};
+    POINT p1{LONG(qRound(sel.right() * sx)), LONG(qRound(sel.bottom() * sy))};
+    if (!ClientToScreen(hOver, &p0) || !ClientToScreen(hOver, &p1))
+        return {};
+
+    RECT wr{};
+    if (!GetWindowRect(hTgt, &wr))
+        return {};
+
+    const int sx1 = (std::min)(p0.x, p1.x);
+    const int sy1 = (std::min)(p0.y, p1.y);
+    const int sx2 = (std::max)(p0.x, p1.x);
+    const int sy2 = (std::max)(p0.y, p1.y);
+    const int x1 = sx1 - int(wr.left);
+    const int y1 = sy1 - int(wr.top);
+    const int x2 = sx2 - int(wr.left);
+    const int y2 = sy2 - int(wr.top);
+    if (x2 <= x1 || y2 <= y1)
+        return {};
+    return QRect(x1, y1, x2 - x1, y2 - y1);
 }
 
 QRect Win32WindowHelper::windowRectForClientRect(quintptr handle, const QRect& targetClientRect)

@@ -40,6 +40,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QJsonValue>
 
 // ==================== Batch add overlay ====================
@@ -62,12 +63,12 @@ protected:
     }
 };
 
-// ==================== WeChat RPA calibration overlay ====================
+// ==================== RPA region calibration overlay (WeChat / 千牛 OCR) ====================
 
-class WechatCalibrationOverlay : public QWidget
+class RpaRegionCalibrationOverlay : public QWidget
 {
 public:
-    explicit WechatCalibrationOverlay(QWidget* parent = nullptr)
+    explicit RpaRegionCalibrationOverlay(QWidget* parent = nullptr)
         : QWidget(parent,
                   Qt::Tool
                       | Qt::FramelessWindowHint
@@ -81,19 +82,20 @@ public:
     }
 
     void setOnFinished(std::function<void(bool, const QRect&)> cb) { m_onFinished = std::move(cb); }
+    void setHelpTip(const QString& s) { m_helpTip = s; }
+    void setDimColor(const QColor& c) { m_dimColor = c; }
 
 protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
-        p.fillRect(rect(), QColor(20, 20, 24, 120));
+        p.fillRect(rect(), m_dimColor);
 
         // help text
         p.setPen(Qt::white);
         p.setFont(QFont(p.font().family(), 10));
-        const QString tip = QStringLiteral("框选微信“聊天气泡滚动区”（Esc取消，回车确认）");
-        p.drawText(QRect(0, 8, width(), 24), Qt::AlignHCenter | Qt::AlignVCenter, tip);
+        p.drawText(QRect(0, 8, width(), 44), Qt::AlignHCenter | Qt::AlignTop | Qt::TextWordWrap, m_helpTip);
 
         if (m_selecting || m_selection.isValid()) {
             QRect r = m_selection.normalized();
@@ -158,6 +160,8 @@ private:
     QPoint m_origin;
     QRect m_selection;
     std::function<void(bool, const QRect&)> m_onFinished;
+    QString m_helpTip = QStringLiteral("框选微信“聊天气泡滚动区”（Esc取消，回车确认）");
+    QColor m_dimColor = QColor(20, 20, 24, 120);
 };
 
 // ==================== Tree roles & delegate ====================
@@ -226,6 +230,33 @@ QString formatRect(const QRect& r)
 {
     return QStringLiteral("x=%1 y=%2 w=%3 h=%4")
         .arg(r.x()).arg(r.y()).arg(r.width()).arg(r.height());
+}
+
+/// 右键 OCR 校准菜单：按进程 exe / 窗口标题判断，不用用户填写的「平台名」
+bool managedWindowShowsWechatOcrCalibration(quintptr hwnd)
+{
+    if (!Win32WindowHelper::isWindowValid(hwnd))
+        return false;
+    const QString exe = Win32WindowHelper::executableBaseNameForWindow(hwnd).toLower();
+    if (exe == QLatin1String("weixin.exe") || exe == QLatin1String("wechat.exe")
+        || exe == QLatin1String("wechatappex.exe")) {
+        return true;
+    }
+    const QString t = Win32WindowHelper::windowTitle(hwnd);
+    return t.contains(QStringLiteral("微信"))
+        || t.contains(QLatin1String("WeChat"), Qt::CaseInsensitive);
+}
+
+bool managedWindowShowsQianniuOcrCalibration(quintptr hwnd)
+{
+    if (!Win32WindowHelper::isWindowValid(hwnd))
+        return false;
+    const QString exe = Win32WindowHelper::executableBaseNameForWindow(hwnd).toLower();
+    if (exe == QLatin1String("aliworkbench.exe"))
+        return true;
+    const QString t = Win32WindowHelper::windowTitle(hwnd);
+    return t.contains(QStringLiteral("接待中心")) || t.contains(QStringLiteral("千牛工作台"))
+        || t.contains(QLatin1String("-千牛"));
 }
 
 QStringList loadCustomEncouragementMessages()
@@ -2076,27 +2107,31 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
     if (!m_managedWindows.contains(id)) return;
 
     QMenu menu(this);
-    if (isCS) {
-        QAction* actDisconnect = menu.addAction(QStringLiteral("断开关联"));
-        QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
-        if (chosen == actDisconnect) {
-            removeOnlinePlatformItem(id);
+    QAction* actPrimary = nullptr;
+    if (isCS)
+        actPrimary = menu.addAction(QStringLiteral("断开关联"));
+    else
+        actPrimary = menu.addAction(QStringLiteral("删除"));
+
+    QAction* actCalibrateWechat = nullptr;
+    QAction* actCalibrateQianniu = nullptr;
+    {
+        const quintptr hwnd = m_managedWindows[id].handle;
+        if (managedWindowShowsWechatOcrCalibration(hwnd)) {
+            actCalibrateWechat = menu.addAction(QStringLiteral("微信OCR校准（备用方案）"));
         }
-    } else {
-        QAction* actRemove = menu.addAction(QStringLiteral("删除"));
-        QAction* actCalibrateWechat = nullptr;
-        {
-            const QString name = m_managedWindows[id].platformName;
-            if (name.contains(QStringLiteral("微信"))) {
-                actCalibrateWechat = menu.addAction(QStringLiteral("微信OCR校准（备用方案）"));
-            }
+        if (managedWindowShowsQianniuOcrCalibration(hwnd)) {
+            actCalibrateQianniu = menu.addAction(QStringLiteral("千牛OCR区域校准"));
         }
-        QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
-        if (chosen == actRemove) {
-            removeOnlinePlatformItem(id);
-        } else if (actCalibrateWechat && chosen == actCalibrateWechat) {
-            startWechatRpaCalibration(id);
-        }
+    }
+
+    QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
+    if (chosen == actPrimary) {
+        removeOnlinePlatformItem(id);
+    } else if (actCalibrateWechat && chosen == actCalibrateWechat) {
+        startWechatRpaCalibration(id);
+    } else if (actCalibrateQianniu && chosen == actCalibrateQianniu) {
+        startQianniuRpaCalibration(id);
     }
 }
 
@@ -2129,7 +2164,7 @@ void MainWindow::startWechatRpaCalibration(const QString& platformId)
     const QRect targetRectLogical(logicalTopLeft, logicalSize);
 
     // Top-level overlay window stays above external float window.
-    auto* overlay = new WechatCalibrationOverlay(nullptr);
+    auto* overlay = new RpaRegionCalibrationOverlay(nullptr);
     overlay->setGeometry(targetRectLogical);
     overlay->show();
     overlay->raise();
@@ -2240,6 +2275,172 @@ bool MainWindow::writeWechatRpaConfigRelativeToWindow(quintptr hwnd,
     }
     f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
     f.close();
+    return true;
+}
+
+void MainWindow::startQianniuRpaCalibration(const QString& platformId)
+{
+    if (!m_managedWindows.contains(platformId))
+        return;
+
+    const ManagedWindowEntry entry = m_managedWindows.value(platformId);
+    const quintptr hwnd = entry.handle;
+    if (!Win32WindowHelper::isWindowValid(hwnd)) {
+        qWarning() << "[MainWindow] 千牛RPA校准失败：窗口无效";
+        return;
+    }
+
+    QMessageBox::information(
+        this,
+        QStringLiteral("千牛 OCR 区域校准"),
+        QStringLiteral(
+            "将分两步在全屏半透明层上框选（可隐约看到下层千牛）。\n"
+            "第 1 步：中间消息气泡滚动区；第 2 步：顶栏店名/会话标题（尽量避开纯 KPI 数据条）。\n"
+            "每步：拖拽框选后按回车确认，Esc 取消。\n\n"
+            "【窗口大小】校准保存的是相对千牛窗口像素坐标。嵌入模式下千牛会随主窗口缩放，"
+            "若之后明显改变主窗口大小或布局，需重新校准。\n"
+            "建议：在与日常使用时相同的主窗口大小下校准（例如您习惯最大化，就先最大化再校准）。\n\n"
+            "请先把「接待中心」放在包含该窗口中心的显示器上并保持可见。"));
+
+    const QRect wr = Win32WindowHelper::windowRect(hwnd);
+    QScreen* baseScreen = QGuiApplication::screenAt(wr.center());
+    if (!baseScreen)
+        baseScreen = QGuiApplication::primaryScreen();
+    const QRect screenGeom = baseScreen->geometry();
+
+    auto* o1 = new RpaRegionCalibrationOverlay(nullptr);
+    o1->setAttribute(Qt::WA_NativeWindow, true);
+    o1->setHelpTip(QStringLiteral(
+        "千牛 1/2：框选中间聊天气泡区（与 Reader 截图一致），Esc 取消，回车确认"));
+    o1->setDimColor(QColor(24, 26, 32, 72));
+    o1->setGeometry(screenGeom);
+    o1->show();
+    o1->raise();
+    o1->activateWindow();
+    o1->setFocus();
+
+    qInfo() << "[MainWindow] 千牛 OCR 校准开始 handle=0x"
+            << QString::number(static_cast<qulonglong>(hwnd), 16)
+            << "screenGeom(" << formatRect(screenGeom) << ")";
+
+    o1->setOnFinished([this, hwnd, screenGeom, o1](bool ok, QRect sel) {
+        if (!ok) {
+            qInfo() << "[MainWindow] 千牛校准第 1 步已取消";
+            return;
+        }
+        if (!Win32WindowHelper::isWindowValid(hwnd)) {
+            qWarning() << "[MainWindow] 千牛校准失败：窗口已无效";
+            return;
+        }
+        QScreen* sc = o1->screen();
+        const qreal dpr = sc ? sc->devicePixelRatio() : 1.0;
+        const QRect chatPx = Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(
+            o1->winId(), hwnd, sel, dpr, o1->size());
+        if (chatPx.width() < 16 || chatPx.height() < 16) {
+            qWarning() << "[MainWindow] 千牛校准第1步映射失败 sel=" << formatRect(sel)
+                       << "overlaySize=" << o1->width() << "x" << o1->height()
+                       << "dpr=" << dpr << "mapped=" << formatRect(chatPx);
+            QMessageBox::warning(
+                this,
+                QStringLiteral("千牛校准"),
+                QStringLiteral("第 1 步选区未能正确映射到千牛窗口（常见于 DPI/全屏遮罩坐标不一致）。\n"
+                               "请重试；若仍失败，请暂时将千牛从主程序「断开关联」后以独立窗口校准。"));
+            return;
+        }
+        qInfo() << "[MainWindow] 千牛校准消息区(窗相对px):" << formatRect(chatPx) << "dpr=" << dpr;
+
+        auto* o2 = new RpaRegionCalibrationOverlay(nullptr);
+        o2->setAttribute(Qt::WA_NativeWindow, true);
+        o2->setHelpTip(QStringLiteral(
+            "千牛 2/2：框选顶栏店名/会话标题（避开「昨日响应率」等单行 KPI），Esc 取消，回车确认"));
+        o2->setDimColor(QColor(24, 26, 32, 72));
+        o2->setGeometry(screenGeom);
+        o2->show();
+        o2->raise();
+        o2->activateWindow();
+        o2->setFocus();
+
+        o2->setOnFinished([this, hwnd, chatPx, o2](bool ok2, QRect sel2) {
+            if (!ok2) {
+                qInfo() << "[MainWindow] 千牛校准第 2 步已取消（配置未写入）";
+                return;
+            }
+            if (!Win32WindowHelper::isWindowValid(hwnd)) {
+                qWarning() << "[MainWindow] 千牛校准写入失败：窗口已无效";
+                return;
+            }
+            QScreen* sc2 = o2->screen();
+            const qreal dpr2 = sc2 ? sc2->devicePixelRatio() : 1.0;
+            const QRect headerPx = Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(
+                o2->winId(), hwnd, sel2, dpr2, o2->size());
+            if (headerPx.width() < 8 || headerPx.height() < 8) {
+                qWarning() << "[MainWindow] 千牛校准第2步映射失败 sel=" << formatRect(sel2)
+                           << "mapped=" << formatRect(headerPx);
+                QMessageBox::warning(this,
+                                     QStringLiteral("千牛校准"),
+                                     QStringLiteral("标题区域映射失败或过小，请重试。"));
+                return;
+            }
+            const bool saved = mergeWriteQianniuRpaConfig(hwnd, chatPx, headerPx);
+            statusBar()->showMessage(saved ? QStringLiteral("已写入 python/rpa/config/qianniu_config.json（含 x,y,w,h）")
+                                           : QStringLiteral("千牛配置写入失败，请查看日志"),
+                                     5000);
+            qInfo() << "[MainWindow] 千牛校准标题区:" << formatRect(headerPx) << "saved=" << saved;
+        });
+    });
+}
+
+bool MainWindow::mergeWriteQianniuRpaConfig(quintptr hwnd,
+                                          const QRect& chatRectWindowPx,
+                                          const QRect& headerRectWindowPx) const
+{
+    const QString path = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python/rpa/config/qianniu_config.json");
+
+    QJsonObject root;
+    {
+        QFile fin(path);
+        if (fin.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QByteArray raw = fin.readAll();
+            fin.close();
+            QJsonParseError err{};
+            const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
+            if (doc.isObject()) {
+                root = doc.object();
+            } else if (err.error != QJsonParseError::NoError) {
+                qWarning() << "[MainWindow] qianniu_config.json 解析失败，将仅保留合并字段:" << err.errorString();
+            }
+        }
+    }
+
+    root.insert(QStringLiteral("hwnd_hex"),
+                QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(hwnd), 16)));
+
+    QJsonObject chatRegion = root.value(QStringLiteral("chat_region")).toObject();
+    chatRegion.insert(QStringLiteral("mode"), QStringLiteral("relative_to_window"));
+    chatRegion.insert(QStringLiteral("xywh_comment"),
+                      QStringLiteral("x,y,w,h 相对整窗 PrintWindow 左上角；存在时 Python 优先于比例字段"));
+    chatRegion.insert(QStringLiteral("x"), chatRectWindowPx.x());
+    chatRegion.insert(QStringLiteral("y"), chatRectWindowPx.y());
+    chatRegion.insert(QStringLiteral("w"), chatRectWindowPx.width());
+    chatRegion.insert(QStringLiteral("h"), chatRectWindowPx.height());
+    root.insert(QStringLiteral("chat_region"), chatRegion);
+
+    QJsonObject hdr = root.value(QStringLiteral("contact_header_region")).toObject();
+    hdr.insert(QStringLiteral("xywh_comment"),
+               QStringLiteral("x,y,w,h 相对整窗 PrintWindow；存在时 Python 优先于比例"));
+    hdr.insert(QStringLiteral("x"), headerRectWindowPx.x());
+    hdr.insert(QStringLiteral("y"), headerRectWindowPx.y());
+    hdr.insert(QStringLiteral("w"), headerRectWindowPx.width());
+    hdr.insert(QStringLiteral("h"), headerRectWindowPx.height());
+    root.insert(QStringLiteral("contact_header_region"), hdr);
+
+    QFile fout(path);
+    if (!fout.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        qWarning() << "[MainWindow] 写入 qianniu_config.json 失败:" << path << fout.errorString();
+        return false;
+    }
+    fout.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    fout.close();
     return true;
 }
 

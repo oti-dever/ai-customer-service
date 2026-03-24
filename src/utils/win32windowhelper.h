@@ -6,6 +6,8 @@
 #include <QVector>
 #include <QWidget>
 #include <QRect>
+#include <QSize>
+#include <QtGlobal>
 
 struct WindowInfo {
     QString platformName;
@@ -47,9 +49,21 @@ public:
 
     // Query helpers
     static QRect windowRect(quintptr handle);
+    /// 将 overlay 内选框映射为 target 窗口相对物理坐标（与 PrintWindow 位图一致）。
+    /// selection 为 Qt 逻辑坐标；overlayLogicalClientSize 传 overlay->size()，用于与 GetClientRect 对齐 DPI。
+    /// devicePixelRatio 仅在无法计算比例时作兜底。
+    static QRect mapOverlaySelectionToTargetWindowRelative(quintptr overlayHwnd,
+                                                           quintptr targetHwnd,
+                                                           const QRect& selectionInOverlayClientLogical,
+                                                           qreal devicePixelRatio,
+                                                           const QSize& overlayLogicalClientSize);
     static QRect windowRectForClientRect(quintptr handle, const QRect& targetClientRect);
     static QIcon windowIcon(const WindowInfo& info);
     static unsigned int windowDpi(quintptr handle);
+
+    /// 窗口所属进程 exe 文件名，如 Weixin.exe；失败返回空串
+    static QString executableBaseNameForWindow(quintptr handle);
+    static QString windowTitle(quintptr handle);
 
     static bool isWindowValid(quintptr handle);
     static bool isWindowVisible(quintptr handle);

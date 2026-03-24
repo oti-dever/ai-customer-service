@@ -116,11 +116,15 @@ private:
     QStandardItem* findChildItem(QStandardItem* parent, const QString& platformId) const;
     void showPlatformContextMenu(const QPoint& pos);
     void startWechatRpaCalibration(const QString& platformId);
+    void startQianniuRpaCalibration(const QString& platformId);
     bool writeWechatRpaConfigRelativeToWindow(quintptr hwnd,
                                               const QRect& chatRectInWindowPx,
                                               const QSize& windowSizePx,
                                               const QString& platformConversationId,
                                               const QString& customerName) const;
+    bool mergeWriteQianniuRpaConfig(quintptr hwnd,
+                                    const QRect& chatRectWindowPx,
+                                    const QRect& headerRectWindowPx) const;
     void refreshStatusMessage();
     void openStatusMessageManager();
     void applyMainWindowTheme(ApplyStyle::MainWindowTheme theme);
