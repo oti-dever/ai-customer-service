@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from ..common.rpa_console_log import rpa_heartbeat, rpa_phase
 from ..common.db_helper import (
     DEFAULT_DB_PATH,
     fetch_pending_send,
@@ -360,6 +361,7 @@ def run_writer(
     ocr: Optional[PaddleOCREngine] = None
     if header_cfg:
         ocr_cfg = cfg.get("ocr") or {}
+        rpa_phase("qianniu.writer", "ocr_init_start", "会话标题校验需要 OCR，正在加载 PaddleOCR")
         ocr = PaddleOCREngine(
             lang="ch",
             min_confidence=float(ocr_cfg.get("min_confidence", 0.5)),
@@ -368,6 +370,7 @@ def run_writer(
             det_thresh=float(ocr_cfg.get("det_thresh", 0.2)),
             det_box_thresh=float(ocr_cfg.get("det_box_thresh", 0.4)),
         )
+        rpa_phase("qianniu.writer", "ocr_init_done", "Writer OCR 就绪")
 
     poll_interval_sec = float(
         cfg.get("writer_poll_sec", cfg.get("poll_interval_sec", poll_interval_sec))
@@ -384,6 +387,8 @@ def run_writer(
         f"prefer_bg={prefer_background} bg_fallback={allow_background_fallback} "
         f"(session_verify={'on' if ocr else 'off'})"
     )
+    rpa_phase("qianniu.writer", "poll_loop_enter", "已进入发送轮询；无任务时每 30s 输出 idle heartbeat")
+    _last_idle_hb = 0.0
 
     while True:
         rows = []
@@ -394,6 +399,10 @@ def run_writer(
             conn.close()
 
         if not rows:
+            now = time.time()
+            if now - _last_idle_hb >= 30.0:
+                rpa_heartbeat("qianniu.writer", "idle：无待发送消息，轮询 DB 中")
+                _last_idle_hb = now
             time.sleep(poll_interval_sec)
             continue
 

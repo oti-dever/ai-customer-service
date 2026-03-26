@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from ..common.rpa_console_log import rpa_heartbeat, rpa_phase
 from ..common.db_helper import DEFAULT_DB_PATH, open_db, write_inbox_batch
 from ..common.incremental import IncrementalDetector, content_hash, make_platform_msg_id
 from ..common.layout_parser import parse_chat_layout
@@ -309,6 +310,11 @@ def run_reader(
     state_path = STATE_DIR / "qianniu_last_messages.json"
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
+    rpa_phase(
+        "qianniu.reader",
+        "ocr_init_start",
+        "正在创建 PaddleOCR 引擎（首次会下载/加载模型，可能持续数分钟；此期间控制台可能只有第三方库日志）",
+    )
     ocr = PaddleOCREngine(
         lang="ch",
         min_confidence=min_confidence,
@@ -317,6 +323,7 @@ def run_reader(
         det_thresh=det_thresh,
         det_box_thresh=det_box_thresh,
     )
+    rpa_phase("qianniu.reader", "ocr_init_done", "OCR 引擎已就绪，即将进入截图轮询")
     detector = IncrementalDetector(
         max_window=100,
         state_path=state_path,
@@ -339,10 +346,19 @@ def run_reader(
     _scan_count = 0
     _last_hb = time.time()
     HB_SEC = 30.0
+    _last_wait_hwnd_log = 0.0
+    rpa_phase("qianniu.reader", "poll_loop_enter", "已进入 while True；若未找到窗口会周期性 heartbeat")
 
     while True:
         hwnd = find_qianniu_hwnd(cfg)
         if not hwnd:
+            now = time.time()
+            if now - _last_wait_hwnd_log >= HB_SEC:
+                rpa_heartbeat(
+                    "qianniu.reader",
+                    "等待千牛「接待中心」窗口（未找到句柄）；请打开并保持可见",
+                )
+                _last_wait_hwnd_log = now
             print("[千牛-Reader] 未找到千牛接待中心窗口，等待...")
             time.sleep(poll_interval)
             continue
