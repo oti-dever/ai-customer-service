@@ -10,6 +10,9 @@
         <file>rocket_icon.svg</file>
         <file>platform_management_icon.svg</file>
         <file>back_end_management.svg</file>
+        <file>home_icon.svg</file>
+        <file>one_click_aggregation_icon.svg</file>
+        <file>start_or_stop_rpa_icon.svg</file>
         <file>fold_arrow_to_expand_icon.svg</file>
         <file>fold_arrow_to_collapse_icon.svg</file>
         <file>qianniu_logo.svg</file>
@@ -23,5 +26,6 @@
         <file>aggregate_reception_icons/search_icon.svg</file>
         <file>question_mark_icon.svg</file>
         <file>bug_log_icon.svg</file>
+        <file>prohibit_icon.svg</file>
     </qresource>
 </RCC>
