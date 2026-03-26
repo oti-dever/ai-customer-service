@@ -12,14 +12,20 @@
 #include <QStandardItemModel>
 #include <QTreeView>
 #include <QRect>
+#include <QProcess>
+#include <QStringDecoder>
+#include <QSharedPointer>
 #include "../utils/applystyle.h"
 #include "../utils/win32windowhelper.h"
 
 class AggregateChatForm;
+class RpaConsoleWindow;
+class RpaManageDialog;
 
 struct QuickLaunchApp {
-    QString name;
-    QString path;
+    QString name;   ///< 列表显示名（可编辑）
+    QString path;   ///< .exe 或 .lnk 绝对路径
+    QString group;  ///< 分组名；空表示「默认」分组
 };
 
 enum class WindowDisplayMode {
@@ -59,12 +65,20 @@ private:
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
+    friend class RpaManageDialog;
 
 public:
     explicit MainWindow(const QString& username, QWidget* parent = nullptr);
     ~MainWindow();
 
     static bool isWechatWindowInfo(const WindowInfo& info);
+
+    /** 指定平台 RPA 子进程已缓存的控制台文本（按平台分桶，有长度上限）。 */
+    QString rpaProcessLog(const QString& platformId) const;
+
+signals:
+    /** 某平台新增一段控制台输出（UTF-8 解码；与 rpaProcessLog() 缓存同步）。 */
+    void rpaProcessOutputAppended(const QString& platformId, const QString& text);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -91,6 +105,9 @@ private:
     void runQuickLaunchApps();
     void openAppHelpDialog();
     void openBugLogDialog();
+    void openRpaManageDialog();
+    void openRpaConsoleWindow();
+    void appendRpaProcessLog(const QString& platformId, const QString& text);
 
 public:
     void addWindowToPlatform(const WindowInfo& info);
@@ -117,6 +134,7 @@ private:
     void showPlatformContextMenu(const QPoint& pos);
     void startWechatRpaCalibration(const QString& platformId);
     void startQianniuRpaCalibration(const QString& platformId);
+    void startPddRpaCalibration(const QString& platformId);
     bool writeWechatRpaConfigRelativeToWindow(quintptr hwnd,
                                               const QRect& chatRectInWindowPx,
                                               const QSize& windowSizePx,
@@ -125,12 +143,19 @@ private:
     bool mergeWriteQianniuRpaConfig(quintptr hwnd,
                                     const QRect& chatRectWindowPx,
                                     const QRect& headerRectWindowPx) const;
+    bool mergeWritePddRpaConfig(quintptr hwnd,
+                                 const QRect& chatRectWindowPx,
+                                 const QRect& inputRectWindowPx) const;
     void refreshStatusMessage();
     void openStatusMessageManager();
     void applyMainWindowTheme(ApplyStyle::MainWindowTheme theme);
     int oneClickMaxOnlineLimit() const;
     void setOneClickMaxOnlineLimit(int n);
     void updateOneClickAggregateTooltip();
+
+    QStringList runningRpaPlatformIds() const;
+    void startRpaPlatforms(const QStringList& platformIds);
+    void stopRpaPlatforms(const QStringList& platformIds);
 
 private slots:
     void onPlatformTreeSelectionChanged();
@@ -177,6 +202,13 @@ private:
 
     QVector<QuickLaunchApp> m_quickLaunchApps;
     bool m_quickLaunchOnlyIfNotRunning = true;
+
+    QMap<QString, QProcess*> m_rpaProcesses;
+    /** 与 m_rpaProcesses 同步：子进程控制台输出按 UTF-8 增量解码。 */
+    QMap<QString, QSharedPointer<QStringDecoder>> m_rpaConsoleDecoders;
+    QMap<QString, QString> m_rpaProcessLogs;
+    RpaConsoleWindow* m_rpaConsoleWindow = nullptr;
+    QToolButton* m_btnRpaManage = nullptr;
 };
 
 #endif // MAINWINDOW_H

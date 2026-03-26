@@ -4,6 +4,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <objbase.h>
+#include <shlobj.h>
+#include <QFileInfo>
 #include <QImage>
 #include <QPixmap>
 #include <algorithm>
@@ -66,10 +69,11 @@ QIcon iconFromHandle(HICON iconHandle)
 {
     if (!iconHandle) return {};
     QIcon icon;
-    const QPixmap small = pixmapFromHIcon(iconHandle, 16, 16);
-    const QPixmap large = pixmapFromHIcon(iconHandle, 32, 32);
-    if (!small.isNull()) icon.addPixmap(small);
-    if (!large.isNull()) icon.addPixmap(large);
+    // 勿用 small/large 作变量名：Windows 头文件常 #define small char，会破坏编译。
+    const QPixmap pm16 = pixmapFromHIcon(iconHandle, 16, 16);
+    const QPixmap pm32 = pixmapFromHIcon(iconHandle, 32, 32);
+    if (!pm16.isNull()) icon.addPixmap(pm16);
+    if (!pm32.isNull()) icon.addPixmap(pm32);
     return icon;
 }
 
@@ -574,3 +578,43 @@ QIcon Win32WindowHelper::windowIcon(const WindowInfo& info)
 
     return {};
 }
+
+#ifdef Q_OS_WIN
+QString Win32WindowHelper::resolveShortcutTarget(const QString& lnkAbsolutePath)
+{
+    if (!lnkAbsolutePath.endsWith(QStringLiteral(".lnk"), Qt::CaseInsensitive))
+        return {};
+    const QFileInfo fi(lnkAbsolutePath);
+    if (!fi.exists() || !fi.isFile())
+        return {};
+
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool needCoUninit = (hr == S_OK || hr == S_FALSE);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE)
+        return {};
+
+    QString out;
+    IShellLinkW* psl = nullptr;
+    IPersistFile* ppf = nullptr;
+    HRESULT hr2 = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW,
+                                   reinterpret_cast<void**>(&psl));
+    if (SUCCEEDED(hr2)) {
+        hr2 = psl->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&ppf));
+        if (SUCCEEDED(hr2)) {
+            hr2 = ppf->Load(reinterpret_cast<LPCWSTR>(fi.absoluteFilePath().utf16()), STGM_READ);
+            if (SUCCEEDED(hr2)) {
+                wchar_t buf[MAX_PATH] = {};
+                WIN32_FIND_DATAW fd{};
+                hr2 = psl->GetPath(buf, MAX_PATH, &fd, SLGP_RAWPATH);
+                if (SUCCEEDED(hr2))
+                    out = QString::fromWCharArray(buf);
+            }
+            ppf->Release();
+        }
+        psl->Release();
+    }
+    if (needCoUninit)
+        CoUninitialize();
+    return out;
+}
+#endif

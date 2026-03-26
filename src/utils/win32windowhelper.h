@@ -70,6 +70,11 @@ public:
     static bool isWindowHung(quintptr handle);
     static bool isLeftMouseButtonPressed();
     static bool isPointInsideWindow(quintptr handle, const QPoint& globalPos);
+
+#ifdef Q_OS_WIN
+    /// 解析 Windows 快捷方式（.lnk）的目标路径；失败或非 .lnk 返回空串。
+    static QString resolveShortcutTarget(const QString& lnkAbsolutePath);
+#endif
 };
 
 #endif // WIN32WINDOWHELPER_H

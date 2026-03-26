@@ -1,12 +1,16 @@
 #include "mainwindow.h"
 #include "addwindowdialog.h"
 #include "aggregatechatform.h"
+#include "rpamanagedialog.h"
+#include "rpa_console_window.h"
 #include "../utils/applystyle.h"
+#include "../utils/win32windowhelper.h"
 #include <QApplication>
 #include <QContextMenuEvent>
 #include <QCursor>
 #include <QDateTime>
 #include <QDialog>
+#include <QDesktopServices>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -34,6 +38,12 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeView>
+#include <QTreeWidget>
+#include <QHeaderView>
+#include <QDirIterator>
+#include <QProgressDialog>
+#include <QStandardPaths>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWindow>
 #include <functional>
@@ -42,6 +52,862 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
+#include <QProcessEnvironment>
+#include <QRegularExpression>
+#include <QStringDecoder>
+#include <QComboBox>
+#include <QGroupBox>
+#include <QLabel>
+
+/// 自动扫描强度（与 QSettings quickLaunch/scanMode 对应：0..2）
+enum class QuickLaunchScanMode : int {
+    Strict = 0, ///< 开始菜单：目录+exe+常用关键字；不含桌面放宽
+    Normal = 1, ///< 在严格基础上，桌面根目录 .lnk 只要过目录+exe 即收录
+    Loose = 2,  ///< 仅目录黑名单 + exe 黑名单，不做常用关键字过滤
+};
+
+namespace {
+
+QString stripAnsiEscapes(const QString& s)
+{
+    QString t = s;
+    // CSI：ESC [ … 最终字节在 @–~
+    static const QRegularExpression csi(QStringLiteral(R"(\x1B\[[0-?]*[ -/]*[@-~])"));
+    t.replace(csi, QString());
+    // OSC：ESC ] … BEL
+    static const QRegularExpression osc(QStringLiteral(R"(\x1B\][^\x07]*\x07)"));
+    t.replace(osc, QString());
+    // 部分终端用 ST：ESC \ 结束 OSC
+    static const QRegularExpression oscSt(QStringLiteral(R"(\x1B\][^\x1B]*\x1B\\)"));
+    t.replace(oscSt, QString());
+    // 规范化换行，避免输出里残留 '\r' 导致显示异常
+    t.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    t.replace(QChar('\r'), QStringLiteral(""));
+    return t;
+}
+
+} // namespace
+
+namespace {
+
+class QuickLaunchPathReadOnlyDelegate : public QStyledItemDelegate
+{
+public:
+    explicit QuickLaunchPathReadOnlyDelegate(QObject* parent = nullptr)
+        : QStyledItemDelegate(parent)
+    {
+    }
+    QWidget* createEditor(QWidget*, const QStyleOptionViewItem&, const QModelIndex&) const override
+    {
+        return nullptr;
+    }
+};
+
+static const int kQlKindRole = Qt::UserRole;
+static const int kQlPathRole = Qt::UserRole + 1;
+static const QString kQlKindGroup = QStringLiteral("group");
+static const QString kQlKindApp = QStringLiteral("app");
+
+static QString quickLaunchExeNameForRunningCheck(const QString& path)
+{
+    const QFileInfo fi(path);
+    const QString abs = fi.absoluteFilePath();
+#ifdef Q_OS_WIN
+    if (abs.endsWith(QStringLiteral(".lnk"), Qt::CaseInsensitive)) {
+        const QString target = Win32WindowHelper::resolveShortcutTarget(abs);
+        if (!target.isEmpty())
+            return QFileInfo(target).fileName();
+        return {};
+    }
+#endif
+    return fi.fileName();
+}
+
+static bool launchQuickLaunchPath(const QString& path, QString* errOut)
+{
+    const QFileInfo fi(path);
+    if (!fi.exists()) {
+        if (errOut)
+            *errOut = QStringLiteral("文件不存在");
+        return false;
+    }
+    const QString abs = fi.absoluteFilePath();
+    if (abs.endsWith(QStringLiteral(".lnk"), Qt::CaseInsensitive)) {
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(abs))) {
+            if (errOut)
+                *errOut = QStringLiteral("无法打开快捷方式");
+            return false;
+        }
+        return true;
+    }
+    if (!QProcess::startDetached(abs, QStringList(), fi.absolutePath())) {
+        if (errOut)
+            *errOut = QStringLiteral("启动失败");
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+namespace {
+
+static bool quickLaunchPathsEquivalentForDedup(const QString& a, const QString& b)
+{
+    if (a.isEmpty() || b.isEmpty())
+        return false;
+    const QString aa = QDir::cleanPath(QFileInfo(a).absoluteFilePath());
+    const QString bb = QDir::cleanPath(QFileInfo(b).absoluteFilePath());
+    return aa.compare(bb, Qt::CaseInsensitive) == 0;
+}
+
+static QString quickLaunchResolvedTargetForDedup(const QString& path)
+{
+    if (path.isEmpty())
+        return {};
+    const QString abs = QFileInfo(path).absoluteFilePath();
+#ifdef Q_OS_WIN
+    if (abs.endsWith(QStringLiteral(".lnk"), Qt::CaseInsensitive)) {
+        const QString target = Win32WindowHelper::resolveShortcutTarget(abs);
+        if (!target.isEmpty())
+            return QDir::cleanPath(QFileInfo(target).absoluteFilePath());
+        return {};
+    }
+#endif
+    if (!QFileInfo(abs).exists())
+        return {};
+    return QDir::cleanPath(abs);
+}
+
+static QString quickLaunchGroupFromShortcutLocation(const QString& rootDir, const QString& shortcutAbsPath)
+{
+    const QString root = QDir::cleanPath(QFileInfo(rootDir).absoluteFilePath());
+    const QString file = QDir::cleanPath(QFileInfo(shortcutAbsPath).absoluteFilePath());
+    if (!file.startsWith(root, Qt::CaseInsensitive))
+        return QStringLiteral("默认");
+
+    QString rel = file.mid(root.size());
+    if (rel.startsWith(QChar('/')) || rel.startsWith(QChar('\\')))
+        rel.remove(0, 1);
+    const int lastSlash = qMax(rel.lastIndexOf('/'), rel.lastIndexOf('\\'));
+    if (lastSlash <= 0)
+        return QStringLiteral("默认");
+    const QString folder = rel.left(lastSlash);
+    const QStringList parts = folder.split(QRegularExpression(QStringLiteral(R"([/\\]+)")),
+                                           Qt::SkipEmptyParts);
+    if (parts.isEmpty())
+        return QStringLiteral("默认");
+    const QString g = parts.first().trimmed();
+    return g.isEmpty() ? QStringLiteral("默认") : g;
+}
+
+static QStringList quickLaunchRelPathPartsUnderRoot(const QString& rootDir, const QString& absFile)
+{
+    const QString rootClean = QDir::cleanPath(QFileInfo(rootDir).absoluteFilePath());
+    const QString fileClean = QDir::cleanPath(QFileInfo(absFile).absoluteFilePath());
+    if (fileClean.length() < rootClean.length())
+        return {};
+    if (!fileClean.startsWith(rootClean, Qt::CaseInsensitive))
+        return {};
+    QString rel = fileClean.mid(rootClean.size());
+    if (rel.startsWith(QChar('/')) || rel.startsWith(QChar('\\')))
+        rel.remove(0, 1);
+    if (rel.isEmpty())
+        return {};
+    return rel.split(QRegularExpression(QStringLiteral(R"([/\\]+)")), Qt::SkipEmptyParts);
+}
+
+static bool quickLaunchScanFolderBlacklisted(const QString& folderName)
+{
+    static const QSet<QString> blocked = [] {
+        const QStringList names = {
+            QStringLiteral("administrative tools"),
+            QStringLiteral("accessories"),
+            QStringLiteral("system tools"),
+            QStringLiteral("windows powershell"),
+            QStringLiteral("windows kits"),
+            QStringLiteral("accessibility"),
+            QStringLiteral("speech"),
+            QStringLiteral("tablet pc"),
+            QStringLiteral("maintenance"),
+            QStringLiteral("hyper-v"),
+            QStringLiteral("windows system"),
+            QStringLiteral("imaging devices"),
+            QStringLiteral("windows administrative tools"),
+            QStringLiteral("管理工具"),
+            QStringLiteral("附件"),
+            QStringLiteral("系统工具"),
+            QStringLiteral("辅助功能"),
+            QStringLiteral("语音识别"),
+            QStringLiteral("平板电脑"),
+            QStringLiteral("维护"),
+        };
+        QSet<QString> s;
+        for (const QString& n : names)
+            s.insert(n.trimmed().toLower());
+        return s;
+    }();
+    return blocked.contains(folderName.trimmed().toLower());
+}
+
+static bool quickLaunchScanExeBlacklisted(const QString& exeBaseLower)
+{
+    static const QSet<QString> blocked = {
+        QStringLiteral("regedit"),
+        QStringLiteral("cmd"),
+        QStringLiteral("powershell"),
+        QStringLiteral("pwsh"),
+        QStringLiteral("mmc"),
+        QStringLiteral("msinfo32"),
+        QStringLiteral("cleanmgr"),
+        QStringLiteral("eventvwr"),
+        QStringLiteral("compmgmt"),
+        QStringLiteral("comexp"),
+        QStringLiteral("services"),
+        QStringLiteral("mstsc"),
+        QStringLiteral("msdt"),
+        QStringLiteral("odbcad32"),
+        QStringLiteral("odbcconf"),
+        QStringLiteral("gpedit"),
+        QStringLiteral("diskmgmt"),
+        QStringLiteral("perfmon"),
+        QStringLiteral("resmon"),
+        QStringLiteral("taskkill"),
+        QStringLiteral("schtasks"),
+        QStringLiteral("wscript"),
+        QStringLiteral("cscript"),
+        QStringLiteral("mshta"),
+        QStringLiteral("fsquirt"),
+        QStringLiteral("dfrgui"),
+        QStringLiteral("certmgr"),
+        QStringLiteral("certlm"),
+        QStringLiteral("msconfig"),
+        QStringLiteral("sigverif"),
+        QStringLiteral("verifier"),
+        QStringLiteral("winver"),
+        QStringLiteral("cmdkey"),
+        QStringLiteral("dxdiag"),
+        QStringLiteral("msedgewebview2"),
+        QStringLiteral("ie4uinit"),
+        QStringLiteral("lpksetup"),
+    };
+    return blocked.contains(exeBaseLower);
+}
+
+static bool quickLaunchMatchesUserAppAllowlist(const QString& exeLower, const QString& lnkLower)
+{
+    static const QSet<QString> exact = {
+        QStringLiteral("msedge"),
+        QStringLiteral("chrome"),
+        QStringLiteral("firefox"),
+        QStringLiteral("vivaldi"),
+        QStringLiteral("brave"),
+        QStringLiteral("opera"),
+        QStringLiteral("iexplore"),
+        QStringLiteral("code"),
+        QStringLiteral("cursor"),
+        QStringLiteral("devenv"),
+        QStringLiteral("windowsterminal"),
+        QStringLiteral("wt"),
+        QStringLiteral("wechat"),
+        QStringLiteral("weixin"),
+        QStringLiteral("wxwork"),
+        QStringLiteral("winword"),
+        QStringLiteral("excel"),
+        QStringLiteral("powerpnt"),
+        QStringLiteral("outlook"),
+        QStringLiteral("onenote"),
+        QStringLiteral("teams"),
+        QStringLiteral("onedrive"),
+        QStringLiteral("notepad"),
+        QStringLiteral("7zfm"),
+        QStringLiteral("7zg"),
+        QStringLiteral("steam"),
+        QStringLiteral("vlc"),
+        QStringLiteral("spotify"),
+        QStringLiteral("wps"),
+        QStringLiteral("wpp"),
+        QStringLiteral("et"),
+        QStringLiteral("qq"),
+        QStringLiteral("tim"),
+        QStringLiteral("dingtalk"),
+        QStringLiteral("feishu"),
+        QStringLiteral("lark"),
+        QStringLiteral("slack"),
+        QStringLiteral("discord"),
+        QStringLiteral("postman"),
+        QStringLiteral("insomnia"),
+        QStringLiteral("eclipse"),
+        QStringLiteral("idea64"),
+        QStringLiteral("pycharm64"),
+        QStringLiteral("webstorm64"),
+        QStringLiteral("goland64"),
+        QStringLiteral("clion64"),
+        QStringLiteral("datagrip64"),
+        QStringLiteral("rider64"),
+        QStringLiteral("studio64"),
+    };
+    if (exact.contains(exeLower) || exact.contains(lnkLower))
+        return true;
+
+    static const QStringList needles = {
+        QStringLiteral("chrome"),
+        QStringLiteral("chromium"),
+        QStringLiteral("msedge"),
+        QStringLiteral("firefox"),
+        QStringLiteral("vivaldi"),
+        QStringLiteral("brave"),
+        QStringLiteral("opera"),
+        QStringLiteral("qqbrowser"),
+        QStringLiteral("360se"),
+        QStringLiteral("360chrome"),
+        QStringLiteral("sogou"),
+        QStringLiteral("vscode"),
+        QStringLiteral("cursor"),
+        QStringLiteral("devenv"),
+        QStringLiteral("rider"),
+        QStringLiteral("webstorm"),
+        QStringLiteral("pycharm"),
+        QStringLiteral("intellij"),
+        QStringLiteral("goland"),
+        QStringLiteral("clion"),
+        QStringLiteral("datagrip"),
+        QStringLiteral("android studio"),
+        QStringLiteral("wechat"),
+        QStringLiteral("weixin"),
+        QStringLiteral("wxwork"),
+        QStringLiteral("dingtalk"),
+        QStringLiteral("feishu"),
+        QStringLiteral("lark"),
+        QStringLiteral("slack"),
+        QStringLiteral("discord"),
+        QStringLiteral("teams"),
+        QStringLiteral("onedrive"),
+        QStringLiteral("notepad++"),
+        QStringLiteral("wps office"),
+        QStringLiteral("kingsoft"),
+        QStringLiteral("typora"),
+        QStringLiteral("sublime"),
+        QStringLiteral("postman"),
+        QStringLiteral("insomnia"),
+        QStringLiteral("eclipse"),
+        QStringLiteral("steam"),
+        QStringLiteral("epicgames"),
+        QStringLiteral("battle.net"),
+        QStringLiteral("riot"),
+        QStringLiteral("spotify"),
+        QStringLiteral("vlc"),
+        QStringLiteral("wps"),
+        QStringLiteral("qqmusic"),
+        QStringLiteral("netease"),
+        QStringLiteral("cloudmusic"),
+    };
+
+    auto hit = [&](const QString& hay) {
+        if (hay.isEmpty())
+            return false;
+        for (const QString& n : needles) {
+            if (hay.contains(n))
+                return true;
+        }
+        return false;
+    };
+    return hit(exeLower) || hit(lnkLower);
+}
+
+static QString quickLaunchPathKey(const QString& path)
+{
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath()).toLower();
+}
+
+static QStringList quickLaunchScanRootDirs()
+{
+    QStringList roots;
+#ifdef Q_OS_WIN
+    const QString programData = qEnvironmentVariable("ProgramData");
+    const QString appData = qEnvironmentVariable("APPDATA");
+    const QString publicUser = qEnvironmentVariable("PUBLIC");
+    if (!programData.isEmpty())
+        roots << (programData + QStringLiteral("\\Microsoft\\Windows\\Start Menu\\Programs"));
+    if (!appData.isEmpty())
+        roots << (appData + QStringLiteral("\\Microsoft\\Windows\\Start Menu\\Programs"));
+    if (!publicUser.isEmpty())
+        roots << (publicUser + QStringLiteral("\\Desktop"));
+#endif
+    const QString desktop = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    if (!desktop.isEmpty())
+        roots << desktop;
+    roots.removeDuplicates();
+    return roots;
+}
+
+static QSet<QString> quickLaunchDesktopPathKeys()
+{
+    QSet<QString> s;
+#ifdef Q_OS_WIN
+    const QString publicUser = qEnvironmentVariable("PUBLIC");
+    if (!publicUser.isEmpty())
+        s.insert(quickLaunchPathKey(publicUser + QStringLiteral("\\Desktop")));
+#endif
+    const QString desktop = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    if (!desktop.isEmpty())
+        s.insert(quickLaunchPathKey(desktop));
+    return s;
+}
+
+static bool quickLaunchIsDesktopScanRoot(const QString& rootDir)
+{
+    return quickLaunchDesktopPathKeys().contains(quickLaunchPathKey(rootDir));
+}
+
+static bool quickLaunchScanPassesPathAndExe(const QString& rootDir,
+                                            const QString& absLnk,
+                                            const QString& resolvedTarget,
+                                            bool* folderFiltered,
+                                            bool* exeFiltered)
+{
+    *folderFiltered = false;
+    *exeFiltered = false;
+    const QStringList parts = quickLaunchRelPathPartsUnderRoot(rootDir, absLnk);
+    if (parts.isEmpty())
+        return false;
+    for (int i = 0; i < parts.size() - 1; ++i) {
+        if (quickLaunchScanFolderBlacklisted(parts.at(i))) {
+            *folderFiltered = true;
+            return false;
+        }
+    }
+    const QString exeBase = resolvedTarget.isEmpty()
+                                 ? QString()
+                                 : QFileInfo(resolvedTarget).completeBaseName();
+    const QString exeLower = exeBase.toLower();
+    if (!exeLower.isEmpty() && quickLaunchScanExeBlacklisted(exeLower)) {
+        *exeFiltered = true;
+        return false;
+    }
+    return true;
+}
+
+static bool quickLaunchScanIncludedByRules(const QString& rootDir,
+                                           const QString& absLnk,
+                                           const QString& resolvedTarget,
+                                           QuickLaunchScanMode mode)
+{
+    bool ff = false;
+    bool ef = false;
+    if (!quickLaunchScanPassesPathAndExe(rootDir, absLnk, resolvedTarget, &ff, &ef))
+        return false;
+    if (mode == QuickLaunchScanMode::Loose)
+        return true;
+
+    const QString exeBase = resolvedTarget.isEmpty()
+                                 ? QString()
+                                 : QFileInfo(resolvedTarget).completeBaseName();
+    const QString exeLower = exeBase.toLower();
+    const QString lnkLower = QFileInfo(absLnk).completeBaseName().toLower();
+    if (quickLaunchMatchesUserAppAllowlist(exeLower, lnkLower))
+        return true;
+    if (mode == QuickLaunchScanMode::Normal && quickLaunchIsDesktopScanRoot(rootDir)) {
+        const QStringList parts = quickLaunchRelPathPartsUnderRoot(rootDir, absLnk);
+        if (parts.size() == 1)
+            return true;
+    }
+    return false;
+}
+
+static bool quickLaunchScanShouldIncludeWithOverrides(const QString& rootDir,
+                                                      const QString& absLnk,
+                                                      const QString& resolvedTarget,
+                                                      QuickLaunchScanMode mode,
+                                                      const QSet<QString>& forceIncKeys,
+                                                      const QSet<QString>& forceExcKeys)
+{
+    const QString key = quickLaunchPathKey(absLnk);
+    if (forceExcKeys.contains(key))
+        return false;
+    if (forceIncKeys.contains(key))
+        return true;
+    return quickLaunchScanIncludedByRules(rootDir, absLnk, resolvedTarget, mode);
+}
+
+static void quickLaunchLoadScanRules(QSet<QString>& forceIncKeys,
+                                     QSet<QString>& forceExcKeys,
+                                     QuickLaunchScanMode& mode)
+{
+    QSettings settings;
+    const int m = settings.value(QStringLiteral("quickLaunch/scanMode"), 0).toInt();
+    mode = static_cast<QuickLaunchScanMode>(qBound(0, m, 2));
+
+    forceIncKeys.clear();
+    {
+        const int n = settings.beginReadArray(QStringLiteral("quickLaunch/scanForceInclude"));
+        for (int i = 0; i < n; ++i) {
+            settings.setArrayIndex(i);
+            const QString p = settings.value(QStringLiteral("path")).toString();
+            if (!p.isEmpty())
+                forceIncKeys.insert(quickLaunchPathKey(p));
+        }
+        settings.endArray();
+    }
+    forceExcKeys.clear();
+    {
+        const int n = settings.beginReadArray(QStringLiteral("quickLaunch/scanForceExclude"));
+        for (int i = 0; i < n; ++i) {
+            settings.setArrayIndex(i);
+            const QString p = settings.value(QStringLiteral("path")).toString();
+            if (!p.isEmpty())
+                forceExcKeys.insert(quickLaunchPathKey(p));
+        }
+        settings.endArray();
+    }
+}
+
+static void quickLaunchSaveScanRules(const QSet<QString>& forceIncKeys,
+                                     const QSet<QString>& forceExcKeys,
+                                     QuickLaunchScanMode mode)
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("quickLaunch/scanMode"), static_cast<int>(mode));
+
+    settings.beginWriteArray(QStringLiteral("quickLaunch/scanForceInclude"));
+    {
+        int i = 0;
+        for (const QString& k : forceIncKeys) {
+            settings.setArrayIndex(i++);
+            settings.setValue(QStringLiteral("path"), k);
+        }
+    }
+    settings.endArray();
+
+    settings.beginWriteArray(QStringLiteral("quickLaunch/scanForceExclude"));
+    {
+        int i = 0;
+        for (const QString& k : forceExcKeys) {
+            settings.setArrayIndex(i++);
+            settings.setValue(QStringLiteral("path"), k);
+        }
+    }
+    settings.endArray();
+}
+
+class QuickLaunchScanRulesDialog : public QDialog
+{
+public:
+    explicit QuickLaunchScanRulesDialog(QWidget* parent, ApplyStyle::MainWindowTheme theme)
+        : QDialog(parent)
+        , m_theme(theme)
+    {
+        setWindowTitle(QStringLiteral("扫描黑白名单与强度"));
+        setObjectName(QStringLiteral("quickLaunchRulesDialog"));
+        resize(920, 520);
+
+        quickLaunchLoadScanRules(m_forceInc, m_forceExc, m_mode);
+
+        auto* rootLay = new QVBoxLayout(this);
+        rootLay->setContentsMargins(16, 16, 16, 16);
+        rootLay->setSpacing(10);
+
+        auto* topRow = new QHBoxLayout;
+        topRow->addWidget(new QLabel(QStringLiteral("扫描强度："), this));
+        m_modeCombo = new QComboBox(this);
+        m_modeCombo->addItem(QStringLiteral("严格（开始菜单按常用关键字；不含桌面放宽）"));
+        m_modeCombo->addItem(QStringLiteral("标准（严格 + 桌面根目录 .lnk 放行）"));
+        m_modeCombo->addItem(QStringLiteral("宽松（仅排除系统目录与系统工具 exe）"));
+        m_modeCombo->setCurrentIndex(static_cast<int>(m_mode));
+        topRow->addWidget(m_modeCombo, 1);
+        rootLay->addLayout(topRow);
+
+        auto* hint = new QLabel(
+            QStringLiteral("说明：左侧为「自动扫描不会加入」的快捷方式（按原因分组）；右侧为「会自动加入」的项。"
+                           "勾选后可用下方按钮在黑白名单间移动或取消强制规则。"),
+            this);
+        hint->setWordWrap(true);
+        rootLay->addWidget(hint);
+
+        auto* searchRow = new QHBoxLayout;
+        searchRow->addWidget(new QLabel(QStringLiteral("搜索："), this));
+        m_searchEdit = new QLineEdit(this);
+        m_searchEdit->setObjectName(QStringLiteral("quickLaunchRulesSearchEdit"));
+        m_searchEdit->setPlaceholderText(QStringLiteral("按名称或路径过滤（两侧列表同步）；清空即显示全部"));
+        m_searchEdit->setClearButtonEnabled(true);
+        searchRow->addWidget(m_searchEdit, 1);
+        rootLay->addLayout(searchRow);
+
+        auto* split = new QSplitter(Qt::Horizontal, this);
+        m_treeExc = new QTreeWidget(this);
+        m_treeExc->setObjectName(QStringLiteral("quickLaunchRulesTree"));
+        m_treeExc->setColumnCount(2);
+        m_treeExc->setHeaderLabels({QStringLiteral("名称"), QStringLiteral("路径")});
+        m_treeExc->header()->setStretchLastSection(true);
+        m_treeInc = new QTreeWidget(this);
+        m_treeInc->setObjectName(QStringLiteral("quickLaunchRulesTree"));
+        m_treeInc->setColumnCount(2);
+        m_treeInc->setHeaderLabels({QStringLiteral("名称"), QStringLiteral("路径")});
+        m_treeInc->header()->setStretchLastSection(true);
+
+        auto wrap = [this](const QString& title, QTreeWidget* tw) {
+            auto* gb = new QGroupBox(title, this);
+            auto* l = new QVBoxLayout(gb);
+            l->addWidget(tw);
+            return gb;
+        };
+        split->addWidget(wrap(QStringLiteral("未收录（扫描不会自动加入）"), m_treeExc));
+        split->addWidget(wrap(QStringLiteral("可收录（扫描会自动加入）"), m_treeInc));
+        split->setStretchFactor(0, 1);
+        split->setStretchFactor(1, 1);
+        rootLay->addWidget(split, 1);
+
+        auto* row1 = new QHBoxLayout;
+        auto* bToWhite = new QPushButton(QStringLiteral("左侧勾选 → 加入白名单"), this);
+        bToWhite->setObjectName(QStringLiteral("quickLaunchRulesActionButton"));
+        auto* bRmBlack = new QPushButton(QStringLiteral("左侧勾选 → 移出用户黑名单"), this);
+        bRmBlack->setObjectName(QStringLiteral("quickLaunchRulesActionButton"));
+        row1->addWidget(bToWhite);
+        row1->addWidget(bRmBlack);
+        row1->addStretch(1);
+        rootLay->addLayout(row1);
+
+        auto* row2 = new QHBoxLayout;
+        auto* bToBlack = new QPushButton(QStringLiteral("右侧勾选 → 加入黑名单"), this);
+        bToBlack->setObjectName(QStringLiteral("quickLaunchRulesActionButton"));
+        auto* bRmWhite = new QPushButton(QStringLiteral("右侧勾选 → 移出强白名单"), this);
+        bRmWhite->setObjectName(QStringLiteral("quickLaunchRulesActionButton"));
+        row2->addWidget(bToBlack);
+        row2->addWidget(bRmWhite);
+        row2->addStretch(1);
+        rootLay->addLayout(row2);
+
+        auto* row3 = new QHBoxLayout;
+        row3->addStretch(1);
+        auto* ok = new QPushButton(QStringLiteral("确定"), this);
+        ok->setObjectName(QStringLiteral("quickLaunchOkButton"));
+        auto* cancel = new QPushButton(QStringLiteral("取消"), this);
+        cancel->setObjectName(QStringLiteral("quickLaunchCancelButton"));
+        row3->addWidget(ok);
+        row3->addWidget(cancel);
+        rootLay->addLayout(row3);
+
+        connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
+            m_mode = static_cast<QuickLaunchScanMode>(qBound(0, idx, 2));
+            rebuildTrees();
+        });
+        connect(bToWhite, &QPushButton::clicked, this, [this] { moveCheckedToWhitelist(); });
+        connect(bRmBlack, &QPushButton::clicked, this, [this] { removeUserBlacklistForChecked(); });
+        connect(bToBlack, &QPushButton::clicked, this, [this] { moveCheckedToBlacklist(); });
+        connect(bRmWhite, &QPushButton::clicked, this, [this] { removeUserWhitelistForChecked(); });
+        connect(ok, &QPushButton::clicked, this, [this] {
+            m_mode = static_cast<QuickLaunchScanMode>(qBound(0, m_modeCombo->currentIndex(), 2));
+            quickLaunchSaveScanRules(m_forceInc, m_forceExc, m_mode);
+            accept();
+        });
+        connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+        connect(m_searchEdit, &QLineEdit::textChanged, this, [this] { applyRulesTreeSearchFilter(); });
+
+        setStyleSheet(ApplyStyle::quickLaunchManagerStyle(theme));
+        rebuildTrees();
+    }
+
+private:
+    static constexpr int kAbsPathRole = Qt::UserRole + 48;
+
+    void applyRulesTreeSearchFilter()
+    {
+        const QString needle = m_searchEdit ? m_searchEdit->text().trimmed() : QString();
+
+        auto filterTree = [&](QTreeWidget* tree) {
+            for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+                QTreeWidgetItem* g = tree->topLevelItem(i);
+                int visibleChildren = 0;
+                for (int j = 0; j < g->childCount(); ++j) {
+                    QTreeWidgetItem* leaf = g->child(j);
+                    if (needle.isEmpty()) {
+                        leaf->setHidden(false);
+                        ++visibleChildren;
+                    } else {
+                        const bool match = leaf->text(0).contains(needle, Qt::CaseInsensitive)
+                            || leaf->text(1).contains(needle, Qt::CaseInsensitive);
+                        leaf->setHidden(!match);
+                        if (match)
+                            ++visibleChildren;
+                    }
+                }
+                g->setHidden(visibleChildren == 0);
+                if (!needle.isEmpty() && visibleChildren > 0)
+                    g->setExpanded(true);
+            }
+        };
+
+        filterTree(m_treeExc);
+        filterTree(m_treeInc);
+
+        if (needle.isEmpty()) {
+            m_treeExc->collapseAll();
+            m_treeInc->collapseAll();
+        }
+    }
+
+    void rebuildTrees()
+    {
+        m_mode = static_cast<QuickLaunchScanMode>(qBound(0, m_modeCombo->currentIndex(), 2));
+        m_treeExc->clear();
+        m_treeInc->clear();
+
+        auto makeGroup = [](QTreeWidget* tree, const QString& title) {
+            auto* g = new QTreeWidgetItem(tree);
+            g->setText(0, title);
+            g->setFlags(g->flags() & ~Qt::ItemIsUserCheckable);
+            return g;
+        };
+
+        auto* exUser = makeGroup(m_treeExc, QStringLiteral("用户黑名单"));
+        auto* exFolder = makeGroup(m_treeExc, QStringLiteral("目录过滤"));
+        auto* exExe = makeGroup(m_treeExc, QStringLiteral("系统程序（exe 黑名单）"));
+        auto* exRule = makeGroup(m_treeExc, QStringLiteral("规则过滤（未匹配常用关键字等）"));
+
+        auto* inUser = makeGroup(m_treeInc, QStringLiteral("用户白名单"));
+        auto* inRule = makeGroup(m_treeInc, QStringLiteral("规则匹配"));
+
+        auto addLeaf = [](QTreeWidgetItem* grp, const QString& disp, const QString& absPath) {
+            auto* leaf = new QTreeWidgetItem(grp);
+            leaf->setText(0, disp);
+            leaf->setText(1, absPath);
+            leaf->setData(0, kAbsPathRole, absPath);
+            leaf->setFlags((leaf->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsSelectable | Qt::ItemIsEnabled)
+                           & ~Qt::ItemIsAutoTristate);
+            leaf->setCheckState(0, Qt::Unchecked);
+        };
+
+        const QStringList roots = quickLaunchScanRootDirs();
+        QSet<QString> seenLnkKeys;
+        for (const QString& root : roots) {
+            if (!QDir(root).exists())
+                continue;
+            QDirIterator it(root, {QStringLiteral("*.lnk")}, QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                const QString absLnk = QDir::cleanPath(QFileInfo(it.next()).absoluteFilePath());
+                if (absLnk.isEmpty())
+                    continue;
+                const QString key = quickLaunchPathKey(absLnk);
+                if (seenLnkKeys.contains(key))
+                    continue;
+                seenLnkKeys.insert(key);
+                const QString target = quickLaunchResolvedTargetForDedup(absLnk);
+                const bool fInc = m_forceInc.contains(key);
+                const bool fExc = m_forceExc.contains(key);
+                const bool ruleInc = quickLaunchScanIncludedByRules(root, absLnk, target, m_mode);
+                const bool effective = !fExc && (fInc || ruleInc);
+                const QString disp = QFileInfo(absLnk).completeBaseName();
+
+                if (effective) {
+                    addLeaf(fInc ? inUser : inRule, disp, absLnk);
+                } else {
+                    QTreeWidgetItem* grp = nullptr;
+                    if (fExc)
+                        grp = exUser;
+                    else {
+                        bool ff = false;
+                        bool ef = false;
+                        if (!quickLaunchScanPassesPathAndExe(root, absLnk, target, &ff, &ef))
+                            grp = ff ? exFolder : exExe;
+                        else
+                            grp = exRule;
+                    }
+                    addLeaf(grp, disp, absLnk);
+                }
+            }
+        }
+
+        auto pruneEmpty = [](QTreeWidget* tree) {
+            for (int i = tree->topLevelItemCount() - 1; i >= 0; --i) {
+                if (tree->topLevelItem(i)->childCount() == 0)
+                    delete tree->takeTopLevelItem(i);
+            }
+        };
+        pruneEmpty(m_treeExc);
+        pruneEmpty(m_treeInc);
+
+        m_treeExc->collapseAll();
+        m_treeInc->collapseAll();
+        applyRulesTreeSearchFilter();
+    }
+
+    QList<QTreeWidgetItem*> checkedLeaves(QTreeWidget* tree) const
+    {
+        QList<QTreeWidgetItem*> out;
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem* g = tree->topLevelItem(i);
+            if (g->isHidden())
+                continue;
+            for (int j = 0; j < g->childCount(); ++j) {
+                QTreeWidgetItem* c = g->child(j);
+                if (c->isHidden())
+                    continue;
+                if (c->checkState(0) == Qt::Checked)
+                    out.append(c);
+            }
+        }
+        return out;
+    }
+
+    void moveCheckedToWhitelist()
+    {
+        for (auto* it : checkedLeaves(m_treeExc)) {
+            const QString p = it->data(0, kAbsPathRole).toString();
+            if (p.isEmpty())
+                continue;
+            const QString k = quickLaunchPathKey(p);
+            m_forceExc.remove(k);
+            m_forceInc.insert(k);
+        }
+        rebuildTrees();
+    }
+
+    void removeUserBlacklistForChecked()
+    {
+        for (auto* it : checkedLeaves(m_treeExc)) {
+            const QString p = it->data(0, kAbsPathRole).toString();
+            if (p.isEmpty())
+                continue;
+            m_forceExc.remove(quickLaunchPathKey(p));
+        }
+        rebuildTrees();
+    }
+
+    void moveCheckedToBlacklist()
+    {
+        for (auto* it : checkedLeaves(m_treeInc)) {
+            const QString p = it->data(0, kAbsPathRole).toString();
+            if (p.isEmpty())
+                continue;
+            const QString k = quickLaunchPathKey(p);
+            m_forceInc.remove(k);
+            m_forceExc.insert(k);
+        }
+        rebuildTrees();
+    }
+
+    void removeUserWhitelistForChecked()
+    {
+        for (auto* it : checkedLeaves(m_treeInc)) {
+            const QString p = it->data(0, kAbsPathRole).toString();
+            if (p.isEmpty())
+                continue;
+            m_forceInc.remove(quickLaunchPathKey(p));
+        }
+        rebuildTrees();
+    }
+
+    QComboBox* m_modeCombo = nullptr;
+    QLineEdit* m_searchEdit = nullptr;
+    QTreeWidget* m_treeExc = nullptr;
+    QTreeWidget* m_treeInc = nullptr;
+    QSet<QString> m_forceInc;
+    QSet<QString> m_forceExc;
+    QuickLaunchScanMode m_mode = QuickLaunchScanMode::Strict;
+    ApplyStyle::MainWindowTheme m_theme;
+};
+
+} // namespace
 
 // ==================== Batch add overlay ====================
 
@@ -257,6 +1123,23 @@ bool managedWindowShowsQianniuOcrCalibration(quintptr hwnd)
     const QString t = Win32WindowHelper::windowTitle(hwnd);
     return t.contains(QStringLiteral("接待中心")) || t.contains(QStringLiteral("千牛工作台"))
         || t.contains(QLatin1String("-千牛"));
+}
+
+bool managedWindowShowsPddOcrCalibration(quintptr hwnd)
+{
+    if (!Win32WindowHelper::isWindowValid(hwnd))
+        return false;
+    const QString exe = Win32WindowHelper::executableBaseNameForWindow(hwnd).toLower();
+    const bool isBrowser = exe.contains(QStringLiteral("chrome"))
+        || exe.contains(QStringLiteral("msedge"))
+        || exe.contains(QStringLiteral("edge"));
+    if (!isBrowser)
+        return false;
+    const QString t = Win32WindowHelper::windowTitle(hwnd);
+    return t.contains(QStringLiteral("拼多多"))
+        || t.contains(QStringLiteral("Pinduoduo"), Qt::CaseInsensitive)
+        || t.contains(QStringLiteral("商家后台"))
+        || t.contains(QStringLiteral("多多商家"));
 }
 
 QStringList loadCustomEncouragementMessages()
@@ -653,8 +1536,8 @@ QWidget* MainWindow::buildTopBar()
 
     m_btnAdd = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/add_new_window_icon.svg"),
                                                    qApp->style()->standardIcon(QStyle::SP_FileDialogNewFolder)), QStringLiteral("添加新窗口"));
-    m_btnRefresh = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/refresh_platform_list_icon.svg"),
-                                                       qApp->style()->standardIcon(QStyle::SP_BrowserReload)), QStringLiteral("刷新平台列表"));
+    m_btnRefresh = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/home_icon.svg"),
+                                                       qApp->style()->standardIcon(QStyle::SP_DirHomeIcon)), QStringLiteral("返回就绪页"));
     auto* bugBtn = makeTopIconButton(bar, QIcon(QStringLiteral(":/bug_log_icon.svg")),
                                      QStringLiteral("查看 Bug 修复日志"));
     auto* helpBtn = makeTopIconButton(bar, QIcon(QStringLiteral(":/question_mark_icon.svg")),
@@ -890,7 +1773,7 @@ QWidget* MainWindow::buildReadyPage()
         btn->setFixedSize(150, 120);
         return btn;
     };
-    auto* btnPick = makeQuick(resourceIcon(QStringLiteral(":/click_to_select_platform_icon.svg"),
+    auto* btnPick = makeQuick(resourceIcon(QStringLiteral(":/one_click_aggregation_icon.svg"),
                                            qApp->style()->standardIcon(QStyle::SP_ArrowRight)),
                               QStringLiteral("一键聚合"));
     m_btnOneClickAggregate = btnPick;
@@ -912,22 +1795,57 @@ QWidget* MainWindow::buildReadyPage()
         }
     });
     connect(btnPick, &QToolButton::clicked, this, &MainWindow::startOneClickAggregate);
-    auto* btnEmbed = makeQuick(resourceIcon(QStringLiteral(":/auto_embed_window_icon.svg"),
+    auto* btnEmbed = makeQuick(resourceIcon(QStringLiteral(":/start_or_stop_rpa_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_FileDialogListView)),
-                               QStringLiteral("添加新窗口"));
+                               QStringLiteral("管理启动/停止RPA"));
+    m_btnRpaManage = btnEmbed;
+    m_btnRpaManage->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_btnRpaManage, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QMenu menu(m_btnRpaManage);
+        QAction* viewConsole = menu.addAction(QStringLiteral("查看控制台输出"));
+        QAction* triggered = menu.exec(m_btnRpaManage->mapToGlobal(pos));
+        if (triggered == viewConsole)
+            openRpaConsoleWindow();
+    });
+    m_btnRpaManage->setToolTip(QStringLiteral("左键：管理启动/停止 RPA\n右键：查看控制台输出"));
     auto* btnStart = makeQuick(resourceIcon(QStringLiteral(":/quick_launch_application_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_DialogOkButton)),
                                QStringLiteral("快速启动应用"));
     m_btnQuickStart = btnStart;
-    connect(btnEmbed, &QToolButton::clicked, this, &MainWindow::openAddWindowDialog);
+    m_btnQuickStart->setToolTip(
+        QStringLiteral("左键：按列表快速启动（受「数量上限」约束，默认前 10 项）\n右键：管理应用列表 / 设置数量上限"));
+    connect(btnEmbed, &QToolButton::clicked, this, &MainWindow::openRpaManageDialog);
     connect(btnStart, &QToolButton::clicked, this, &MainWindow::runQuickLaunchApps);
     btnStart->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(btnStart, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
         QMenu menu(m_btnQuickStart);
         QAction* manage = menu.addAction(QStringLiteral("管理应用列表"));
+        QAction* setCap = menu.addAction(QStringLiteral("设置数量上限…"));
         QAction* triggered = menu.exec(m_btnQuickStart->mapToGlobal(pos));
         if (triggered == manage) {
             openQuickLaunchManager();
+        } else if (triggered == setCap) {
+            QSettings settings;
+            const int cur = qBound(1, settings.value(QStringLiteral("quickLaunch/maxLaunchCount"), 10).toInt(), 30);
+            bool ok = false;
+            const int v = QInputDialog::getInt(
+                this,
+                QStringLiteral("快速启动 — 数量上限"),
+                QStringLiteral(
+                    "单次「快速启动」只会按列表顺序处理「前 N 个条目」（序号从第 1 项起算；"
+                    "路径为空的行也会占用序号）。\n\n"
+                    "请勿一次启动过多应用，否则可能导致系统卡顿、内存或 CPU 占用过高、"
+                    "部分软件并发异常等风险，后果自负。\n\n"
+                    "请输入 N（1～30，默认建议 10）："),
+                cur,
+                1,
+                30,
+                1,
+                &ok);
+            if (ok) {
+                settings.setValue(QStringLiteral("quickLaunch/maxLaunchCount"), v);
+                statusBar()->showMessage(QStringLiteral("快速启动数量上限已设为 %1").arg(v), 5000);
+            }
         }
     });
     quickLayout->addWidget(btnPick);
@@ -946,6 +1864,204 @@ void MainWindow::openAddWindowDialog()
 {
     AddWindowDialog dlg(this);
     dlg.exec();
+}
+
+void MainWindow::openRpaManageDialog()
+{
+    RpaManageDialog dlg(this, this);
+    dlg.exec();
+}
+
+void MainWindow::openRpaConsoleWindow()
+{
+    if (!m_rpaConsoleWindow) {
+        m_rpaConsoleWindow = new RpaConsoleWindow(this, this);
+        connect(m_rpaConsoleWindow, &QObject::destroyed, this, [this]() {
+            m_rpaConsoleWindow = nullptr;
+        });
+    }
+    m_rpaConsoleWindow->show();
+    m_rpaConsoleWindow->raise();
+    m_rpaConsoleWindow->activateWindow();
+}
+
+QString MainWindow::rpaProcessLog(const QString& platformId) const
+{
+    return m_rpaProcessLogs.value(platformId);
+}
+
+void MainWindow::appendRpaProcessLog(const QString& platformId, const QString& text)
+{
+    if (text.isEmpty())
+        return;
+    constexpr int kMaxRpaLogChars = 400000;
+    QString& buf = m_rpaProcessLogs[platformId];
+    buf.append(text);
+    if (buf.size() > kMaxRpaLogChars)
+        buf.remove(0, buf.size() - kMaxRpaLogChars);
+    emit rpaProcessOutputAppended(platformId, text);
+}
+
+QStringList MainWindow::runningRpaPlatformIds() const
+{
+    QStringList out;
+    for (auto it = m_rpaProcesses.constBegin(); it != m_rpaProcesses.constEnd(); ++it) {
+        QProcess* p = it.value();
+        if (p && p->state() == QProcess::Running)
+            out.append(it.key());
+    }
+    return out;
+}
+
+void MainWindow::startRpaPlatforms(const QStringList& platformIds)
+{
+    const QString pythonRoot = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python");
+    for (const QString& id : platformIds) {
+        if (id != QStringLiteral("wechat") && id != QStringLiteral("qianniu") && id != QStringLiteral("pdd"))
+            continue;
+
+        if (m_rpaProcesses.contains(id)) {
+            QProcess* existing = m_rpaProcesses.value(id);
+            if (existing && existing->state() == QProcess::Running)
+                continue;
+            if (existing) {
+                m_rpaProcesses.remove(id);
+                existing->disconnect();
+                existing->deleteLater();
+            }
+        }
+
+        auto* proc = new QProcess(this);
+        proc->setProgram(QStringLiteral("python"));
+        proc->setArguments(QStringList() << QStringLiteral("-m") << QStringLiteral("rpa.main")
+                                         << QStringLiteral("--platform") << id);
+        proc->setWorkingDirectory(pythonRoot);
+        {
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            // Windows 下保证 stdout/stderr 以 UTF-8 模式输出（避免乱码）
+            env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
+            env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
+            proc->setProcessEnvironment(env);
+        }
+        m_rpaConsoleDecoders.insert(id, QSharedPointer<QStringDecoder>::create(QStringDecoder::Utf8));
+        proc->setProcessChannelMode(QProcess::MergedChannels);
+        connect(proc, &QProcess::readyReadStandardOutput, this, [this, id, proc]() {
+            if (m_rpaProcesses.value(id) != proc)
+                return;
+            const QByteArray chunk = proc->readAllStandardOutput();
+            if (chunk.isEmpty())
+                return;
+            auto it = m_rpaConsoleDecoders.find(id);
+            if (it == m_rpaConsoleDecoders.end())
+                return;
+            QString decoded = it.value()->decode(chunk);
+            // 如果 UTF-8 解码出现大量替换字符，说明实际输出可能是本地编码（常见 GBK/CP936）
+            if (decoded.contains(QChar::ReplacementCharacter)) {
+                const QString localDecoded = stripAnsiEscapes(QString::fromLocal8Bit(chunk));
+                if (!localDecoded.isEmpty()) {
+                    // reset 解码状态，避免后续分片继续受错误状态影响
+                    it.value() = QSharedPointer<QStringDecoder>::create(QStringDecoder::Utf8);
+                    appendRpaProcessLog(id, localDecoded);
+                    return;
+                }
+            }
+            const QString cleaned = stripAnsiEscapes(decoded);
+            if (!cleaned.isEmpty())
+                appendRpaProcessLog(id, cleaned);
+        });
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, id, proc](int exitCode, QProcess::ExitStatus status) {
+                    Q_UNUSED(status)
+                    if (m_rpaProcesses.value(id) != proc)
+                        return;
+                    const QByteArray tail = proc->readAllStandardOutput();
+                    auto it = m_rpaConsoleDecoders.find(id);
+                    if (it != m_rpaConsoleDecoders.end()) {
+                        if (!tail.isEmpty()) {
+                            QString decoded = it.value()->decode(tail);
+                            if (decoded.contains(QChar::ReplacementCharacter)) {
+                                const QString localDecoded = stripAnsiEscapes(QString::fromLocal8Bit(tail));
+                                if (!localDecoded.isEmpty()) {
+                                    it.value() = QSharedPointer<QStringDecoder>::create(QStringDecoder::Utf8);
+                                    appendRpaProcessLog(id, localDecoded);
+                                } else {
+                                    const QString cleaned = stripAnsiEscapes(decoded);
+                                    if (!cleaned.isEmpty())
+                                        appendRpaProcessLog(id, cleaned);
+                                }
+                            } else {
+                                const QString cleaned = stripAnsiEscapes(decoded);
+                                if (!cleaned.isEmpty())
+                                    appendRpaProcessLog(id, cleaned);
+                            }
+                        }
+                        // flush any partial UTF-8 sequence
+                        const QString flushed = stripAnsiEscapes(it.value()->decode(QByteArray()));
+                        if (!flushed.isEmpty())
+                            appendRpaProcessLog(id, flushed);
+                    }
+                    appendRpaProcessLog(id, QStringLiteral("\n[进程已退出，退出码 %1]\n").arg(exitCode));
+                    m_rpaProcesses.remove(id);
+                    m_rpaConsoleDecoders.remove(id);
+                    proc->deleteLater();
+                });
+        connect(proc, &QProcess::errorOccurred, this, [this, id](QProcess::ProcessError e) {
+            qWarning() << "[RPA] process error" << id << static_cast<int>(e);
+            appendRpaProcessLog(id, QStringLiteral("\n[进程错误] code=%1\n").arg(static_cast<int>(e)));
+        });
+
+        proc->start();
+        if (!proc->waitForStarted(3000)) {
+            qWarning() << "[RPA] failed to start" << id;
+            appendRpaProcessLog(id, QStringLiteral("[启动失败] 无法在 PATH 中找到可用的 python，或 3 秒内未能启动。\n"));
+            statusBar()->showMessage(
+                QStringLiteral("启动失败：请确保已安装 Python 并在 PATH 中可用（python）。"), 5000);
+            proc->deleteLater();
+            continue;
+        }
+        appendRpaProcessLog(id, QStringLiteral("[RPA] 已启动: python -m rpa.main --platform %1\n").arg(id));
+        m_rpaProcesses.insert(id, proc);
+        statusBar()->showMessage(QStringLiteral("已启动 RPA：%1").arg(id), 3000);
+    }
+}
+
+void MainWindow::stopRpaPlatforms(const QStringList& platformIds)
+{
+    for (const QString& id : platformIds) {
+        QProcess* proc = m_rpaProcesses.take(id);
+        if (!proc)
+            continue;
+        proc->disconnect();
+        appendRpaProcessLog(id, QStringLiteral("\n[用户请求停止]\n"));
+        proc->kill();
+        proc->waitForFinished(3000);
+        const QByteArray tail = proc->readAllStandardOutput();
+        auto it = m_rpaConsoleDecoders.find(id);
+        if (it != m_rpaConsoleDecoders.end() && !tail.isEmpty()) {
+            QString decoded = it.value()->decode(tail);
+            if (decoded.contains(QChar::ReplacementCharacter)) {
+                const QString localDecoded = stripAnsiEscapes(QString::fromLocal8Bit(tail));
+                if (!localDecoded.isEmpty()) {
+                    it.value() = QSharedPointer<QStringDecoder>::create(QStringDecoder::Utf8);
+                    appendRpaProcessLog(id, localDecoded);
+                } else {
+                    const QString cleaned = stripAnsiEscapes(decoded);
+                    if (!cleaned.isEmpty())
+                        appendRpaProcessLog(id, cleaned);
+                }
+            } else {
+                const QString cleaned = stripAnsiEscapes(decoded);
+                if (!cleaned.isEmpty())
+                    appendRpaProcessLog(id, cleaned);
+            }
+            const QString flushed = stripAnsiEscapes(it.value()->decode(QByteArray()));
+            if (!flushed.isEmpty())
+                appendRpaProcessLog(id, flushed);
+        }
+        m_rpaConsoleDecoders.remove(id);
+        proc->deleteLater();
+        statusBar()->showMessage(QStringLiteral("已停止 RPA：%1").arg(id), 3000);
+    }
 }
 
 int MainWindow::oneClickMaxOnlineLimit() const
@@ -1031,6 +2147,7 @@ static void loadQuickLaunchConfig(QVector<QuickLaunchApp>& apps,
         QuickLaunchApp app;
         app.name = settings.value(QStringLiteral("name")).toString();
         app.path = settings.value(QStringLiteral("path")).toString();
+        app.group = settings.value(QStringLiteral("group")).toString();
         if (!app.path.isEmpty())
             apps.append(app);
     }
@@ -1047,6 +2164,7 @@ static void saveQuickLaunchConfig(const QVector<QuickLaunchApp>& apps,
         settings.setArrayIndex(i);
         settings.setValue(QStringLiteral("name"), apps[i].name);
         settings.setValue(QStringLiteral("path"), apps[i].path);
+        settings.setValue(QStringLiteral("group"), apps[i].group);
     }
     settings.endArray();
     settings.setValue(QStringLiteral("quickLaunch/onlyIfNotRunning"), onlyIfNotRunning);
@@ -1060,22 +2178,121 @@ void MainWindow::openQuickLaunchManager()
     QDialog dlg(this);
     dlg.setObjectName(QStringLiteral("quickLaunchManagerDialog"));
     dlg.setWindowTitle(QStringLiteral("管理应用列表"));
-    dlg.resize(520, 360);
+    dlg.resize(640, 440);
 
     auto* mainLayout = new QVBoxLayout(&dlg);
     mainLayout->setContentsMargins(16, 16, 16, 16);
     mainLayout->setSpacing(10);
 
-    auto* list = new QListWidget(&dlg);
-    list->setObjectName(QStringLiteral("quickLaunchAppList"));
-    list->setSelectionMode(QAbstractItemView::SingleSelection);
+    auto* tree = new QTreeWidget(&dlg);
+    tree->setObjectName(QStringLiteral("quickLaunchAppTree"));
+    tree->setColumnCount(2);
+    tree->setHeaderLabels({QStringLiteral("名称 / 分组"), QStringLiteral("目标路径")});
+    tree->header()->setStretchLastSection(true);
+    tree->setColumnWidth(0, 220);
+    tree->setSelectionMode(QAbstractItemView::SingleSelection);
+    tree->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::SelectedClicked
+                          | QAbstractItemView::EditKeyPressed);
+    tree->setDragDropMode(QAbstractItemView::InternalMove);
+    tree->setDefaultDropAction(Qt::MoveAction);
+    tree->setDropIndicatorShown(true);
+    tree->setAnimated(true);
+    tree->setRootIsDecorated(true);
+    tree->setItemDelegateForColumn(1, new QuickLaunchPathReadOnlyDelegate(tree));
+
+    auto setupAppItemCheckable = [](QTreeWidgetItem* aItem) {
+        aItem->setFlags((aItem->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsEditable) & ~Qt::ItemIsAutoTristate);
+        aItem->setCheckState(0, Qt::Unchecked);
+    };
+
+    QStringList groupOrder;
+    QMap<QString, QVector<QuickLaunchApp>> grouped;
     for (const auto& app : m_quickLaunchApps) {
-        auto* item = new QListWidgetItem(list);
-        item->setText(app.name.isEmpty() ? QFileInfo(app.path).completeBaseName() : app.name);
-        item->setData(Qt::UserRole, app.name);
-        item->setData(Qt::UserRole + 1, app.path);
+        const QString g = app.group.isEmpty() ? QStringLiteral("默认") : app.group;
+        if (!grouped.contains(g))
+            groupOrder.append(g);
+        grouped[g].append(app);
     }
-    mainLayout->addWidget(list, 1);
+    for (const QString& gname : groupOrder) {
+        auto* gItem = new QTreeWidgetItem(tree);
+        gItem->setText(0, gname);
+        gItem->setText(1, QString());
+        gItem->setData(0, kQlKindRole, kQlKindGroup);
+        for (const auto& app : grouped[gname]) {
+            const QString disp = app.name.isEmpty() ? QFileInfo(app.path).completeBaseName() : app.name;
+            auto* aItem = new QTreeWidgetItem(gItem);
+            aItem->setText(0, disp);
+            aItem->setText(1, app.path);
+            aItem->setData(0, kQlKindRole, kQlKindApp);
+            aItem->setData(0, kQlPathRole, app.path);
+            setupAppItemCheckable(aItem);
+        }
+    }
+    tree->expandAll();
+    mainLayout->addWidget(tree, 1);
+
+    auto ensureDefaultGroup = [tree]() -> QTreeWidgetItem* {
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            auto* it = tree->topLevelItem(i);
+            if (it->data(0, kQlKindRole).toString() == kQlKindGroup
+                && it->text(0) == QStringLiteral("默认"))
+                return it;
+        }
+        auto* g = new QTreeWidgetItem(tree);
+        g->setText(0, QStringLiteral("默认"));
+        g->setText(1, QString());
+        g->setData(0, kQlKindRole, kQlKindGroup);
+        return g;
+    };
+
+    auto resolveTargetGroup = [tree, ensureDefaultGroup]() -> QTreeWidgetItem* {
+        auto* cur = tree->currentItem();
+        if (cur) {
+            if (cur->data(0, kQlKindRole).toString() == kQlKindGroup)
+                return cur;
+            if (cur->parent())
+                return cur->parent();
+        }
+        if (tree->topLevelItemCount() > 0) {
+            auto* first = tree->topLevelItem(0);
+            if (first->data(0, kQlKindRole).toString() == kQlKindGroup)
+                return first;
+        }
+        return ensureDefaultGroup();
+    };
+
+    auto collectTreeToApps = [tree](QVector<QuickLaunchApp>& out) {
+        out.clear();
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            auto* top = tree->topLevelItem(i);
+            if (top->data(0, kQlKindRole).toString() == kQlKindApp) {
+                QuickLaunchApp app;
+                app.name = top->text(0);
+                app.path = top->data(0, kQlPathRole).toString();
+                if (app.path.isEmpty())
+                    app.path = top->text(1);
+                app.group = QString();
+                if (!app.path.isEmpty())
+                    out.append(app);
+                continue;
+            }
+            const QString groupName = top->text(0);
+            const QString groupStored = (groupName == QStringLiteral("默认")) ? QString() : groupName;
+            for (int j = 0; j < top->childCount(); ++j) {
+                auto* ch = top->child(j);
+                if (ch->data(0, kQlKindRole).toString() != kQlKindApp)
+                    continue;
+                QuickLaunchApp app;
+                app.name = ch->text(0);
+                app.path = ch->data(0, kQlPathRole).toString();
+                if (app.path.isEmpty())
+                    app.path = ch->text(1);
+                app.group = groupStored;
+                if (!app.path.isEmpty())
+                    out.append(app);
+            }
+        }
+    };
 
     auto* onlyRow = new QWidget(&dlg);
     auto* onlyLayout = new QHBoxLayout(onlyRow);
@@ -1084,6 +2301,13 @@ void MainWindow::openQuickLaunchManager()
     auto* onlyBox = new QCheckBox(QStringLiteral("只启动未运行的应用"), onlyRow);
     onlyBox->setObjectName(QStringLiteral("quickLaunchOnlyBox"));
     onlyBox->setChecked(m_quickLaunchOnlyIfNotRunning);
+    onlyBox->setToolTip(
+        QStringLiteral(
+            "【如何判定】Windows 下两种方式（满足其一即跳过本次启动）：\n"
+            "① tasklist 按 exe 名查进程；② 与「添加新窗口」相同的顶层窗口枚举——若已有带标题的可见主窗口且进程名匹配（含微信别名）。\n"
+            ".lnk 会解析目标取文件名。\n\n"
+            "【局限】仅托盘无可见主窗口、或窗口无标题被枚举过滤时，可能仍判定为未运行；"
+            "若仍执行了启动，部分软件会主动新开窗口，无法单靠本项禁止。"));
     auto* helpBtn = new QToolButton(onlyRow);
     helpBtn->setObjectName(QStringLiteral("quickLaunchHelpButton"));
     helpBtn->setAutoRaise(true);
@@ -1096,54 +2320,285 @@ void MainWindow::openQuickLaunchManager()
     mainLayout->addWidget(onlyRow);
 
     auto* btnRow = new QHBoxLayout();
-    btnRow->addStretch(1);
+    btnRow->setSpacing(8);
     auto* btnAdd = new QPushButton(QStringLiteral("添加应用..."), &dlg);
     btnAdd->setObjectName(QStringLiteral("quickLaunchAddButton"));
-    auto* btnRemove = new QPushButton(QStringLiteral("删除选中"), &dlg);
-    btnRemove->setObjectName(QStringLiteral("quickLaunchRemoveButton"));
+    auto* btnAddGroup = new QPushButton(QStringLiteral("添加分组..."), &dlg);
+    btnAddGroup->setObjectName(QStringLiteral("quickLaunchAddGroupButton"));
+    auto* btnChangeTarget = new QPushButton(QStringLiteral("更改目标..."), &dlg);
+    btnChangeTarget->setObjectName(QStringLiteral("quickLaunchChangeTargetButton"));
+    auto* btnScanRules = new QPushButton(QStringLiteral("黑白名单…"), &dlg);
+    btnScanRules->setObjectName(QStringLiteral("quickLaunchScanRulesButton"));
+    auto* btnDeleteChecked = new QPushButton(QStringLiteral("删除勾选"), &dlg);
+    btnDeleteChecked->setObjectName(QStringLiteral("quickLaunchDeleteCheckedButton"));
+    auto* btnDeleteAll = new QPushButton(QStringLiteral("删除全部"), &dlg);
+    btnDeleteAll->setObjectName(QStringLiteral("quickLaunchDeleteAllButton"));
+    auto* btnAutoScan = new QPushButton(QStringLiteral("自动扫描"), &dlg);
+    btnAutoScan->setObjectName(QStringLiteral("quickLaunchAutoScanButton"));
+    btnRow->addWidget(btnAdd);
+    btnRow->addWidget(btnAddGroup);
+    btnRow->addWidget(btnChangeTarget);
+    btnRow->addWidget(btnScanRules);
+    btnRow->addStretch(1);
+    btnRow->addWidget(btnDeleteChecked);
+    btnRow->addWidget(btnDeleteAll);
+    btnRow->addWidget(btnAutoScan);
+    mainLayout->addLayout(btnRow);
+
+    auto* btnRow2 = new QHBoxLayout();
+    btnRow2->addStretch(1);
     auto* btnOk = new QPushButton(QStringLiteral("确定"), &dlg);
     btnOk->setObjectName(QStringLiteral("quickLaunchOkButton"));
     auto* btnCancel = new QPushButton(QStringLiteral("取消"), &dlg);
     btnCancel->setObjectName(QStringLiteral("quickLaunchCancelButton"));
-    btnRow->addWidget(btnAdd);
-    btnRow->addWidget(btnRemove);
-    btnRow->addSpacing(10);
-    btnRow->addWidget(btnOk);
-    btnRow->addWidget(btnCancel);
-    mainLayout->addLayout(btnRow);
+    btnRow2->addWidget(btnOk);
+    btnRow2->addWidget(btnCancel);
+    mainLayout->addLayout(btnRow2);
 
     connect(btnAdd, &QPushButton::clicked, &dlg, [&]() {
         const QString path = QFileDialog::getOpenFileName(
             &dlg,
-            QStringLiteral("选择应用程序"),
+            QStringLiteral("选择应用程序或快捷方式"),
             QString(),
-            QStringLiteral("应用程序 (*.exe);;所有文件 (*.*)"));
+            QStringLiteral("程序与快捷方式 (*.exe *.lnk);;所有文件 (*.*)"));
         if (path.isEmpty())
             return;
         QFileInfo info(path);
-        auto* item = new QListWidgetItem(list);
-        item->setText(info.completeBaseName());
-        item->setData(Qt::UserRole, info.completeBaseName());
-        item->setData(Qt::UserRole + 1, path);
+        QTreeWidgetItem* g = resolveTargetGroup();
+        auto* aItem = new QTreeWidgetItem(g);
+        aItem->setText(0, info.completeBaseName());
+        aItem->setText(1, path);
+        aItem->setData(0, kQlKindRole, kQlKindApp);
+        aItem->setData(0, kQlPathRole, path);
+        setupAppItemCheckable(aItem);
+        tree->setCurrentItem(aItem);
     });
 
-    connect(btnRemove, &QPushButton::clicked, &dlg, [&]() {
-        auto* item = list->currentItem();
-        if (!item)
+    connect(btnScanRules, &QPushButton::clicked, &dlg, [&dlg, theme]() {
+        QuickLaunchScanRulesDialog rulesDlg(&dlg, theme);
+        rulesDlg.exec();
+    });
+
+    connect(btnAddGroup, &QPushButton::clicked, &dlg, [&]() {
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            &dlg,
+            QStringLiteral("新建分组"),
+            QStringLiteral("分组名称："),
+            QLineEdit::Normal,
+            QString(),
+            &ok);
+        if (!ok)
             return;
-        delete item;
+        const QString trimmed = name.trimmed();
+        if (trimmed.isEmpty())
+            return;
+        auto* g = new QTreeWidgetItem(tree);
+        g->setText(0, trimmed);
+        g->setText(1, QString());
+        g->setData(0, kQlKindRole, kQlKindGroup);
+        tree->setCurrentItem(g);
+    });
+
+    connect(btnChangeTarget, &QPushButton::clicked, &dlg, [&]() {
+        auto* cur = tree->currentItem();
+        if (!cur || cur->data(0, kQlKindRole).toString() != kQlKindApp) {
+            QMessageBox::warning(&dlg, QStringLiteral("更改目标"),
+                                 QStringLiteral("请先选中列表中的一条应用项（非分组行）。"));
+            return;
+        }
+        const QString path = QFileDialog::getOpenFileName(
+            &dlg,
+            QStringLiteral("选择新的目标路径"),
+            QFileInfo(cur->data(0, kQlPathRole).toString()).absolutePath(),
+            QStringLiteral("程序与快捷方式 (*.exe *.lnk);;所有文件 (*.*)"));
+        if (path.isEmpty())
+            return;
+        QFileInfo info(path);
+        cur->setData(0, kQlPathRole, path);
+        cur->setText(1, path);
+        if (cur->text(0).trimmed().isEmpty())
+            cur->setText(0, info.completeBaseName());
+    });
+
+    connect(btnDeleteChecked, &QPushButton::clicked, &dlg, [&]() {
+        QList<QTreeWidgetItem*> toDelete;
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            auto* top = tree->topLevelItem(i);
+            if (!top)
+                continue;
+            if (top->data(0, kQlKindRole).toString() == kQlKindApp) {
+                if (top->checkState(0) == Qt::Checked)
+                    toDelete.append(top);
+                continue;
+            }
+            for (int j = 0; j < top->childCount(); ++j) {
+                auto* ch = top->child(j);
+                if (ch && ch->data(0, kQlKindRole).toString() == kQlKindApp
+                    && ch->checkState(0) == Qt::Checked)
+                    toDelete.append(ch);
+            }
+        }
+        if (toDelete.isEmpty()) {
+            QMessageBox::information(&dlg, QStringLiteral("删除勾选"),
+                                     QStringLiteral("请先勾选要删除的应用项。"));
+            return;
+        }
+        for (auto* it : toDelete)
+            delete it;
+        QList<QTreeWidgetItem*> emptyGroups;
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            auto* g = tree->topLevelItem(i);
+            if (g && g->data(0, kQlKindRole).toString() == kQlKindGroup && g->childCount() == 0)
+                emptyGroups.append(g);
+        }
+        for (auto* g : emptyGroups)
+            delete g;
+    });
+
+    connect(btnDeleteAll, &QPushButton::clicked, &dlg, [&]() {
+        const auto r = QMessageBox::question(
+            &dlg,
+            QStringLiteral("删除全部"),
+            QStringLiteral("确定清空列表中的所有分组与应用吗？此操作不可撤销（需点「确定」才会保存到配置）。"),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (r != QMessageBox::Yes)
+            return;
+        tree->clear();
+        ensureDefaultGroup();
+    });
+
+    connect(btnAutoScan, &QPushButton::clicked, &dlg, [&]() {
+        // 1) Collect existing paths + resolved targets for dedup.
+        QSet<QString> existingAbsPathsLower;
+        QSet<QString> existingResolvedTargetsLower;
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            auto* top = tree->topLevelItem(i);
+            if (!top) continue;
+            auto scanItem = [&](QTreeWidgetItem* it) {
+                if (!it) return;
+                if (it->data(0, kQlKindRole).toString() != kQlKindApp)
+                    return;
+                const QString p = it->data(0, kQlPathRole).toString().isEmpty()
+                                      ? it->text(1)
+                                      : it->data(0, kQlPathRole).toString();
+                const QString abs = QDir::cleanPath(QFileInfo(p).absoluteFilePath());
+                if (!abs.isEmpty())
+                    existingAbsPathsLower.insert(abs.toLower());
+                const QString target = quickLaunchResolvedTargetForDedup(p);
+                if (!target.isEmpty())
+                    existingResolvedTargetsLower.insert(target.toLower());
+            };
+            if (top->data(0, kQlKindRole).toString() == kQlKindGroup) {
+                for (int j = 0; j < top->childCount(); ++j)
+                    scanItem(top->child(j));
+            } else {
+                scanItem(top);
+            }
+        }
+
+        QSet<QString> scanForceInc;
+        QSet<QString> scanForceExc;
+        QuickLaunchScanMode scanMode = QuickLaunchScanMode::Strict;
+        quickLaunchLoadScanRules(scanForceInc, scanForceExc, scanMode);
+
+        const QStringList roots = quickLaunchScanRootDirs();
+
+        QProgressDialog progress(QStringLiteral("正在自动扫描可添加的应用，可能需要一些时间..."),
+                                 QStringLiteral("取消"),
+                                 0, 0, &dlg);
+        progress.setWindowTitle(QStringLiteral("自动扫描"));
+        progress.setWindowModality(Qt::WindowModal);
+        progress.setMinimumDuration(0);
+        progress.setValue(0);
+        progress.show();
+        qApp->processEvents();
+
+        auto findOrCreateGroupItem = [tree](const QString& groupName) -> QTreeWidgetItem* {
+            const QString g = groupName.trimmed().isEmpty() ? QStringLiteral("默认") : groupName.trimmed();
+            for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+                auto* it = tree->topLevelItem(i);
+                if (!it) continue;
+                if (it->data(0, kQlKindRole).toString() == kQlKindGroup && it->text(0) == g)
+                    return it;
+            }
+            auto* it = new QTreeWidgetItem(tree);
+            it->setText(0, g);
+            it->setText(1, QString());
+            it->setData(0, kQlKindRole, kQlKindGroup);
+            return it;
+        };
+
+        int addedCount = 0;
+        int scannedCount = 0;
+        int skippedByFilter = 0;
+
+        for (const QString& root : roots) {
+            if (progress.wasCanceled())
+                break;
+            const QDir rootDir(root);
+            if (!rootDir.exists())
+                continue;
+
+            QDirIterator it(root, {QStringLiteral("*.lnk")}, QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                if (progress.wasCanceled())
+                    break;
+                const QString lnkPath = it.next();
+                ++scannedCount;
+                if ((scannedCount % 50) == 0)
+                    qApp->processEvents();
+
+                const QString absLnk = QDir::cleanPath(QFileInfo(lnkPath).absoluteFilePath());
+                if (absLnk.isEmpty())
+                    continue;
+                if (existingAbsPathsLower.contains(absLnk.toLower()))
+                    continue;
+
+                const QString target = quickLaunchResolvedTargetForDedup(absLnk);
+                if (!target.isEmpty() && existingResolvedTargetsLower.contains(target.toLower()))
+                    continue;
+
+                if (!quickLaunchScanShouldIncludeWithOverrides(root, absLnk, target, scanMode, scanForceInc,
+                                                             scanForceExc)) {
+                    ++skippedByFilter;
+                    continue;
+                }
+
+                const QString groupName = quickLaunchGroupFromShortcutLocation(root, absLnk);
+                QTreeWidgetItem* gItem = findOrCreateGroupItem(groupName);
+                const QString displayName = QFileInfo(absLnk).completeBaseName();
+                auto* aItem = new QTreeWidgetItem(gItem);
+                aItem->setText(0, displayName);
+                aItem->setText(1, absLnk);
+                aItem->setData(0, kQlKindRole, kQlKindApp);
+                aItem->setData(0, kQlPathRole, absLnk);
+                setupAppItemCheckable(aItem);
+
+                existingAbsPathsLower.insert(absLnk.toLower());
+                if (!target.isEmpty())
+                    existingResolvedTargetsLower.insert(target.toLower());
+                ++addedCount;
+            }
+        }
+
+        progress.hide();
+
+        QMessageBox info(&dlg);
+        info.setWindowTitle(QStringLiteral("自动扫描完成"));
+        info.setIcon(QMessageBox::Information);
+        info.setText(
+            QStringLiteral("扫描完成：新增 %1 项；共遍历 %2 个快捷方式（其中 %3 个未加入：含规则/黑白名单过滤或已存在去重）。")
+                .arg(addedCount)
+                .arg(scannedCount)
+                .arg(skippedByFilter));
+        info.setStandardButtons(QMessageBox::Ok);
+        info.exec();
     });
 
     connect(btnOk, &QPushButton::clicked, &dlg, [&]() {
-        m_quickLaunchApps.clear();
-        for (int i = 0; i < list->count(); ++i) {
-            auto* item = list->item(i);
-            QuickLaunchApp app;
-            app.name = item->data(Qt::UserRole).toString();
-            app.path = item->data(Qt::UserRole + 1).toString();
-            if (!app.path.isEmpty())
-                m_quickLaunchApps.append(app);
-        }
+        collectTreeToApps(m_quickLaunchApps);
         m_quickLaunchOnlyIfNotRunning = onlyBox->isChecked();
         saveQuickLaunchConfig(m_quickLaunchApps, m_quickLaunchOnlyIfNotRunning);
         dlg.accept();
@@ -1154,12 +2609,18 @@ void MainWindow::openQuickLaunchManager()
     connect(helpBtn, &QToolButton::clicked, &dlg, [&dlg, theme]() {
         const QString text = QStringLiteral(
             "【快速启动应用使用说明】\n\n"
-            "1. 通过「添加应用...」选择常用程序的可执行文件（*.exe）。\n"
-            "2. 「只启动未运行的应用」勾选后，每次快速启动只会启动当前未在运行的应用，避免重复打开多个实例。\n"
-            "3. 快速启动入口位于主界面「快速启动应用」卡片：\n"
-            "   - 左键：按列表依次启动应用；\n"
-            "   - 右键：「管理应用列表」，可增删应用并修改该选项。\n"
-            "4. 微信为特例，将按系统默认方式启动，其它应用则按各自默认窗口状态启动。\n");
+            "1. 支持添加「.exe」或 Windows「.lnk」快捷方式；快捷方式将按系统方式打开。\n"
+            "2. 使用分组整理应用；「默认」分组在配置中对应空分组名。可拖拽分组或应用调整顺序。\n"
+            "3. 应用行左侧可勾选；「删除勾选」批量删除；「删除全部」清空列表（仍会保留空「默认」分组）。分组默认展开，可点击折叠。\n"
+            "4. 「黑白名单…」可设置扫描强度（严格/标准/宽松），并查看未收录与可收录的快捷方式；勾选后可在黑白名单间移动或取消强制规则。\n"
+            "5. 「自动扫描」按上述强度与黑白名单从开始菜单/桌面收集 .lnk；目录/系统 exe 仍会硬过滤。\n"
+            "6. 双击「名称」列可编辑显示名；「目标路径」列只读，请用「更改目标...」修改。\n"
+            "7. 「只启动未运行的应用」：tasklist 检测进程名，并复用「添加新窗口」的窗口枚举——若已有匹配进程名的可见顶层窗口也会跳过。"
+            "详见该项悬停说明。\n"
+            "8. 主界面「快速启动应用」右键可「设置数量上限」：左键启动时只处理列表前 N 项（默认 10），"
+            "路径为空的行也占序号；请勿一次启动过多以免风险，后果自负。\n"
+            "9. 左键快速启动后将弹出本次启动结果（含因上限未尝试的条目）。\n"
+            "10. 微信等应用仍按各自默认方式启动。\n");
         QMessageBox msgBox(&dlg);
         msgBox.setWindowTitle(QStringLiteral("快速启动应用 - 使用说明"));
         msgBox.setText(text);
@@ -1187,6 +2648,66 @@ static bool isProcessRunningByName(const QString& exeName)
     return out.contains(exeName.toLower().toLatin1());
 }
 
+/// 与「只启动未运行」配合：同一款软件在任务管理器里可能对应多个 exe 名（如微信）
+static QStringList quickLaunchExeAliasesForRunningCheck(const QString& exeFileName)
+{
+    QStringList all;
+    if (exeFileName.isEmpty())
+        return all;
+    all.append(exeFileName);
+    const QString low = exeFileName.toLower();
+#ifdef Q_OS_WIN
+    if (low.contains(QLatin1String("wechat")) || low.contains(QLatin1String("weixin"))) {
+        const QStringList wx = { QStringLiteral("WeChat.exe"), QStringLiteral("Weixin.exe"),
+                                 QStringLiteral("WeChatApp.exe") };
+        for (const QString& w : wx) {
+            bool dup = false;
+            for (const QString& n : all) {
+                if (n.compare(w, Qt::CaseInsensitive) == 0)
+                    dup = true;
+            }
+            if (!dup)
+                all.append(w);
+        }
+    }
+#endif
+    return all;
+}
+
+static bool quickLaunchIsAnyMatchingProcessRunning(const QString& exeFileName)
+{
+    for (const QString& n : quickLaunchExeAliasesForRunningCheck(exeFileName)) {
+        if (isProcessRunningByName(n))
+            return true;
+    }
+    return false;
+}
+
+#ifdef Q_OS_WIN
+/// 与「添加新窗口」相同的 EnumWindows 规则：可见、无 Owner、非空标题等的顶层窗口，取其进程 exe 名
+static QSet<QString> quickLaunchVisibleMainProcessNamesLower()
+{
+    QSet<QString> s;
+    for (const WindowInfo& w : Win32WindowHelper::enumTopLevelWindows()) {
+        if (!w.processName.isEmpty())
+            s.insert(w.processName.toLower());
+    }
+    return s;
+}
+
+static bool quickLaunchHasEnumeratedVisibleWindowForExe(const QSet<QString>& visibleProcLower,
+                                                        const QString& exeFileName)
+{
+    if (exeFileName.isEmpty() || visibleProcLower.isEmpty())
+        return false;
+    for (const QString& n : quickLaunchExeAliasesForRunningCheck(exeFileName)) {
+        if (visibleProcLower.contains(n.toLower()))
+            return true;
+    }
+    return false;
+}
+#endif
+
 void MainWindow::runQuickLaunchApps()
 {
     loadQuickLaunchConfig(m_quickLaunchApps, m_quickLaunchOnlyIfNotRunning);
@@ -1195,20 +2716,116 @@ void MainWindow::runQuickLaunchApps()
         return;
     }
 
-    for (const auto& app : m_quickLaunchApps) {
+    QSettings settings;
+    const int maxLaunch = qBound(1, settings.value(QStringLiteral("quickLaunch/maxLaunchCount"), 10).toInt(), 30);
+    const int totalItems = m_quickLaunchApps.size();
+    const int sliceEnd = qMin(maxLaunch, totalItems);
+    const bool hitCap = totalItems > maxLaunch;
+
+    QStringList started;
+    QStringList skipped;
+    QStringList failed;
+
+#ifdef Q_OS_WIN
+    const QSet<QString> visibleProcLower = m_quickLaunchOnlyIfNotRunning
+                                              ? quickLaunchVisibleMainProcessNamesLower()
+                                              : QSet<QString>{};
+#else
+    const QSet<QString> visibleProcLower;
+#endif
+
+    for (int i = 0; i < sliceEnd; ++i) {
+        const auto& app = m_quickLaunchApps[i];
         if (app.path.isEmpty())
             continue;
-        QFileInfo info(app.path);
-        const QString exeName = info.fileName();
-        if (m_quickLaunchOnlyIfNotRunning && isProcessRunningByName(exeName))
+        const QString label = app.name.isEmpty() ? QFileInfo(app.path).fileName() : app.name;
+        const QString exeName = quickLaunchExeNameForRunningCheck(app.path);
+        bool alreadyRunning = false;
+        if (m_quickLaunchOnlyIfNotRunning && !exeName.isEmpty()) {
+            alreadyRunning = quickLaunchIsAnyMatchingProcessRunning(exeName);
+#ifdef Q_OS_WIN
+            if (!alreadyRunning)
+                alreadyRunning = quickLaunchHasEnumeratedVisibleWindowForExe(visibleProcLower, exeName);
+#endif
+        }
+        if (alreadyRunning) {
+            skipped.append(QStringLiteral("%1 — %2").arg(label, app.path));
             continue;
-        // 直接启动可执行文件，避免通过 cmd/start 时因路径中空格或括号导致解析错误
-        const QString program = info.absoluteFilePath();
-        const QString workDir = info.absolutePath();
-        QProcess::startDetached(program, QStringList(), workDir);
+        }
+        QString err;
+        if (!launchQuickLaunchPath(app.path, &err))
+            failed.append(QStringLiteral("%1 — %2").arg(label, err.isEmpty() ? QStringLiteral("启动失败") : err));
+        else
+            started.append(QStringLiteral("%1 — %2").arg(label, app.path));
     }
 
-    statusBar()->showMessage(QStringLiteral("已尝试启动配置的应用。"), 5000);
+    QStringList capSkippedLines;
+    if (hitCap) {
+        for (int i = maxLaunch; i < totalItems; ++i) {
+            const auto& app = m_quickLaunchApps[i];
+            const QString label = app.name.isEmpty() ? QFileInfo(app.path).fileName() : app.name;
+            const QString pathPart = app.path.isEmpty() ? QStringLiteral("(无路径)") : app.path;
+            capSkippedLines.append(QStringLiteral("%1 — %2").arg(label, pathPart));
+        }
+    }
+
+    QString summary;
+    if (!started.isEmpty())
+        summary += QStringLiteral("已启动 %1 项").arg(started.size());
+    if (!skipped.isEmpty()) {
+        if (!summary.isEmpty())
+            summary += QStringLiteral("；");
+        summary += QStringLiteral("跳过 %1 项（已在运行）").arg(skipped.size());
+    }
+    if (!failed.isEmpty()) {
+        if (!summary.isEmpty())
+            summary += QStringLiteral("；");
+        summary += QStringLiteral("失败 %1 项").arg(failed.size());
+    }
+    if (hitCap) {
+        if (!summary.isEmpty())
+            summary += QStringLiteral("；");
+        summary += QStringLiteral("另有 %1 项因数量上限未尝试（当前上限 %2）")
+                       .arg(totalItems - maxLaunch)
+                       .arg(maxLaunch);
+    }
+    if (summary.isEmpty())
+        summary = QStringLiteral("没有可启动的项。");
+
+    statusBar()->showMessage(summary, 8000);
+
+    QStringList detailLines;
+    if (!started.isEmpty()) {
+        detailLines << QStringLiteral("【已启动】");
+        detailLines << started;
+    }
+    if (!skipped.isEmpty()) {
+        if (!detailLines.isEmpty())
+            detailLines << QString();
+        detailLines << QStringLiteral("【已跳过】");
+        detailLines << skipped;
+    }
+    if (!failed.isEmpty()) {
+        if (!detailLines.isEmpty())
+            detailLines << QString();
+        detailLines << QStringLiteral("【失败】");
+        detailLines << failed;
+    }
+    if (!capSkippedLines.isEmpty()) {
+        if (!detailLines.isEmpty())
+            detailLines << QString();
+        detailLines << QStringLiteral("【因数量上限未尝试】（仅处理列表前 %1 项）").arg(maxLaunch);
+        detailLines << capSkippedLines;
+    }
+
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("快速启动结果"));
+    box.setIcon(QMessageBox::Information);
+    box.setText(summary);
+    if (!detailLines.isEmpty())
+        box.setDetailedText(detailLines.join(QStringLiteral("\n")));
+    box.setStandardButtons(QMessageBox::Ok);
+    box.exec();
 }
 
 // ==================== Help Dialog ====================
@@ -1317,10 +2934,14 @@ private:
             "help_quicklaunch", QStringLiteral("\u2022 快速启动应用"),
             QStringLiteral(
                 "<h3>快速启动应用</h3>"
-                "<p>主界面中部的「快速启动应用」卡片，可一键启动常用外部应用。</p>"
-                "<p><b>左键</b>：按列表依次启动应用。</p>"
-                "<p><b>右键</b>：「管理应用列表」，可增删应用并修改启动选项。</p>"
-                "<p>微信为特例，将按系统默认方式启动，其它应用则按各自默认窗口状态启动。</p>")
+                "<p>主界面中部的「快速启动应用」卡片，可一键启动常用外部应用（支持 .exe 与 Windows .lnk）。</p>"
+                "<p><b>左键</b>：按配置顺序依次启动，且受「数量上限」约束（默认只处理前 10 项，可在右键菜单修改）；"
+                "完成后会显示本次启动结果（已启动 / 已跳过 / 失败 / 因上限未尝试）。</p>"
+                "<p><b>右键</b>：「管理应用列表」「设置数量上限」等；列表支持分组（默认展开）、拖拽排序、自动扫描、黑白名单与扫描强度。</p>"
+                "<p>「黑白名单」中可查看未收录/可收录的快捷方式并勾选调整；自动扫描会尊重用户强白/强黑与「严格/标准/宽松」档位。</p>"
+                "<p>「只启动未运行的应用」在 Windows 上会同时使用任务列表（exe 名）与「添加新窗口」同款顶层窗口枚举；"
+                "任一路径判定已运行即跳过本次启动。仅托盘、无标题窗口等场景仍可能漏判。</p>"
+                "<p>微信等应用仍按各自默认方式启动。</p>")
         });
         sections.append({
             "help_troubleshoot", QStringLiteral("\u2022 故障排查"),
@@ -1374,7 +2995,7 @@ private:
                 "<h3>快速启动应用功能</h3>"
                 "<p><b>问题：</b>最初使用 cmd/start 启动时，在包含空格或括号的路径下会出现\"找不到\"之类错误提示。</p>"
                 "<p><b>原因：</b>命令行参数拼接方式不当，导致 Windows 对带空格路径解析失败。</p>"
-                "<p><b>修复：</b>改为直接使用 QProcess::startDetached 启动 exe，并增加「只启动未运行的应用」选项。</p>")
+                "<p><b>修复：</b>改为对 .exe 使用 QProcess::startDetached；支持 .lnk；可选「只启动未运行的应用」；管理界面支持分组、拖拽排序与编辑显示名；启动后汇总结果。</p>")
         });
 
         QString html = QStringLiteral(
@@ -2115,6 +3736,7 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
 
     QAction* actCalibrateWechat = nullptr;
     QAction* actCalibrateQianniu = nullptr;
+    QAction* actCalibratePdd = nullptr;
     {
         const quintptr hwnd = m_managedWindows[id].handle;
         if (managedWindowShowsWechatOcrCalibration(hwnd)) {
@@ -2122,6 +3744,9 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
         }
         if (managedWindowShowsQianniuOcrCalibration(hwnd)) {
             actCalibrateQianniu = menu.addAction(QStringLiteral("千牛OCR区域校准"));
+        }
+        if (managedWindowShowsPddOcrCalibration(hwnd)) {
+            actCalibratePdd = menu.addAction(QStringLiteral("拼多多OCR区域校准"));
         }
     }
 
@@ -2132,6 +3757,8 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
         startWechatRpaCalibration(id);
     } else if (actCalibrateQianniu && chosen == actCalibrateQianniu) {
         startQianniuRpaCalibration(id);
+    } else if (actCalibratePdd && chosen == actCalibratePdd) {
+        startPddRpaCalibration(id);
     }
 }
 
@@ -2444,6 +4071,174 @@ bool MainWindow::mergeWriteQianniuRpaConfig(quintptr hwnd,
     return true;
 }
 
+void MainWindow::startPddRpaCalibration(const QString& platformId)
+{
+    if (!m_managedWindows.contains(platformId))
+        return;
+
+    const ManagedWindowEntry entry = m_managedWindows.value(platformId);
+    const quintptr hwnd = entry.handle;
+    if (!Win32WindowHelper::isWindowValid(hwnd)) {
+        qWarning() << "[MainWindow] 拼多多RPA校准失败：窗口无效";
+        return;
+    }
+
+    // Ensure we are showing the correct page so user can see selection area
+    switchToWindow(platformId);
+
+    QMessageBox::information(
+        this,
+        QStringLiteral("拼多多 OCR 区域校准"),
+        QStringLiteral(
+            "将分两步在全屏半透明层上框选（可隐约看到下层拼多多后台）。\n"
+            "第 1 步：聊天消息气泡滚动区；第 2 步：输入框区域（用于点击聚焦+粘贴）。\n"
+            "每步：拖拽框选后按回车确认，Esc 取消。\n\n"
+            "提示：校准保存的是相对拼多多窗口 PrintWindow 像素坐标；请尽量保持浏览器缩放为 100%。"));
+
+    const QRect wr = Win32WindowHelper::windowRect(hwnd);
+    QScreen* baseScreen = QGuiApplication::screenAt(wr.center());
+    if (!baseScreen)
+        baseScreen = QGuiApplication::primaryScreen();
+    const QRect screenGeom = baseScreen->geometry();
+
+    auto* o1 = new RpaRegionCalibrationOverlay(nullptr);
+    o1->setAttribute(Qt::WA_NativeWindow, true);
+    o1->setHelpTip(QStringLiteral("拼多多 1/2：框选聊天消息区域，Esc 取消，回车确认"));
+    o1->setDimColor(QColor(24, 26, 32, 72));
+    o1->setGeometry(screenGeom);
+    o1->show();
+    o1->raise();
+    o1->activateWindow();
+    o1->setFocus();
+
+    qInfo() << "[MainWindow] 拼多多 OCR 校准开始 handle=0x"
+            << QString::number(static_cast<qulonglong>(hwnd), 16)
+            << "screenGeom(" << formatRect(screenGeom) << ")";
+
+    o1->setOnFinished([this, hwnd, screenGeom, o1](bool ok, QRect sel) {
+        if (!ok) {
+            qInfo() << "[MainWindow] 拼多多校准第 1 步已取消";
+            return;
+        }
+        if (!Win32WindowHelper::isWindowValid(hwnd)) {
+            qWarning() << "[MainWindow] 拼多多校准第 1 步失败：窗口已无效";
+            return;
+        }
+
+        QScreen* sc = o1->screen();
+        const qreal dpr = sc ? sc->devicePixelRatio() : 1.0;
+        const QRect chatPx = Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(
+            o1->winId(), hwnd, sel, dpr, o1->size());
+
+        if (chatPx.width() < 16 || chatPx.height() < 16) {
+            qWarning() << "[MainWindow] 拼多多校准第1步映射失败 sel=" << formatRect(sel)
+                       << "mapped=" << formatRect(chatPx);
+            QMessageBox::warning(this,
+                                 QStringLiteral("拼多多校准"),
+                                 QStringLiteral("第 1 步选区映射失败或过小，请重试。"));
+            return;
+        }
+
+        auto* o2 = new RpaRegionCalibrationOverlay(nullptr);
+        o2->setAttribute(Qt::WA_NativeWindow, true);
+        o2->setHelpTip(QStringLiteral("拼多多 2/2：框选输入框区域，Esc 取消，回车确认"));
+        o2->setDimColor(QColor(24, 26, 32, 72));
+        o2->setGeometry(screenGeom);
+        o2->show();
+        o2->raise();
+        o2->activateWindow();
+        o2->setFocus();
+
+        o2->setOnFinished([this, hwnd, chatPx, o2](bool ok2, QRect sel2) {
+            if (!ok2) {
+                qInfo() << "[MainWindow] 拼多多校准第 2 步已取消（配置未写入）";
+                return;
+            }
+            if (!Win32WindowHelper::isWindowValid(hwnd)) {
+                qWarning() << "[MainWindow] 拼多多校准写入失败：窗口已无效";
+                return;
+            }
+
+            QScreen* sc2 = o2->screen();
+            const qreal dpr2 = sc2 ? sc2->devicePixelRatio() : 1.0;
+            const QRect inputPx = Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(
+                o2->winId(), hwnd, sel2, dpr2, o2->size());
+
+            if (inputPx.width() < 8 || inputPx.height() < 8) {
+                qWarning() << "[MainWindow] 拼多多校准第2步映射失败 sel=" << formatRect(sel2)
+                           << "mapped=" << formatRect(inputPx);
+                QMessageBox::warning(this,
+                                     QStringLiteral("拼多多校准"),
+                                     QStringLiteral("第 2 步选区映射失败或过小，请重试。"));
+                return;
+            }
+
+            const bool saved = mergeWritePddRpaConfig(hwnd, chatPx, inputPx);
+            statusBar()->showMessage(saved ? QStringLiteral("已写入 python/rpa/config/pdd_config.json（含 chat/input x,y,w,h）")
+                                           : QStringLiteral("拼多多配置写入失败，请查看日志"),
+                                     5000);
+            qInfo() << "[MainWindow] 拼多多校准结果 chat=" << formatRect(chatPx)
+                    << "input=" << formatRect(inputPx)
+                    << "saved=" << saved;
+        });
+    });
+}
+
+bool MainWindow::mergeWritePddRpaConfig(quintptr hwnd,
+                                        const QRect& chatRectWindowPx,
+                                        const QRect& inputRectWindowPx) const
+{
+    const QString path = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python/rpa/config/pdd_config.json");
+
+    QJsonObject root;
+    {
+        QFile fin(path);
+        if (fin.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QByteArray raw = fin.readAll();
+            fin.close();
+            QJsonParseError err{};
+            const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
+            if (doc.isObject()) {
+                root = doc.object();
+            } else if (err.error != QJsonParseError::NoError) {
+                qWarning() << "[MainWindow] pdd_config.json 解析失败，将仅保留合并字段:" << err.errorString();
+            }
+        }
+    }
+
+    root.insert(QStringLiteral("hwnd_hex"),
+                QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(hwnd), 16)));
+
+    QJsonObject chatRegion = root.value(QStringLiteral("chat_region")).toObject();
+    chatRegion.insert(QStringLiteral("coordinates"), QStringLiteral("window"));
+    chatRegion.insert(QStringLiteral("xywh_comment"),
+                       QStringLiteral("x,y,w,h 相对整窗 PrintWindow 左上角；存在时 Python 优先于比例字段"));
+    chatRegion.insert(QStringLiteral("x"), chatRectWindowPx.x());
+    chatRegion.insert(QStringLiteral("y"), chatRectWindowPx.y());
+    chatRegion.insert(QStringLiteral("w"), chatRectWindowPx.width());
+    chatRegion.insert(QStringLiteral("h"), chatRectWindowPx.height());
+    root.insert(QStringLiteral("chat_region"), chatRegion);
+
+    QJsonObject inputRegion = root.value(QStringLiteral("input_region")).toObject();
+    inputRegion.insert(QStringLiteral("coordinates"), QStringLiteral("window"));
+    inputRegion.insert(QStringLiteral("xywh_comment"),
+                        QStringLiteral("x,y,w,h 相对整窗 PrintWindow 左上角；用于点击输入框聚焦"));
+    inputRegion.insert(QStringLiteral("x"), inputRectWindowPx.x());
+    inputRegion.insert(QStringLiteral("y"), inputRectWindowPx.y());
+    inputRegion.insert(QStringLiteral("w"), inputRectWindowPx.width());
+    inputRegion.insert(QStringLiteral("h"), inputRectWindowPx.height());
+    root.insert(QStringLiteral("input_region"), inputRegion);
+
+    QFile fout(path);
+    if (!fout.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        qWarning() << "[MainWindow] 写入 pdd_config.json 失败:" << path << fout.errorString();
+        return false;
+    }
+    fout.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    fout.close();
+    return true;
+}
+
 // ==================== Aggregate Chat ====================
 
 void MainWindow::openAggregateChatForm()
@@ -2490,6 +4285,16 @@ void EmbeddedWindowContainer::resizeEvent(QResizeEvent* event)
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     detachAllWindows();
+    const QStringList keys = m_rpaProcesses.keys();
+    for (const QString& id : keys) {
+        QProcess* proc = m_rpaProcesses.take(id);
+        if (!proc)
+            continue;
+        proc->disconnect();
+        proc->kill();
+        proc->waitForFinished(1500);
+        proc->deleteLater();
+    }
     QMainWindow::closeEvent(event);
 }
 
