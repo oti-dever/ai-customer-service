@@ -39,8 +39,11 @@ set(SOURCES
     src/services/platforms/simplatformadapter.cpp
     src/services/platforms/qianniurp_adapter.cpp
     src/services/platforms/wechatrp_adapter.cpp
+    src/services/platforms/pddrp_adapter.cpp
     src/ui/loginwindow.cpp
     src/ui/mainwindow.cpp
+    src/ui/rpamanagedialog.cpp
+    src/ui/rpa_console_window.cpp
     src/ui/addwindowdialog.cpp
     src/ui/aggregatechatform.cpp
 )
@@ -62,8 +65,11 @@ set(HEADERS
     src/services/platforms/simplatformadapter.h
     src/services/platforms/qianniurp_adapter.h
     src/services/platforms/wechatrp_adapter.h
+    src/services/platforms/pddrp_adapter.h
     src/ui/loginwindow.h
     src/ui/mainwindow.h
+    src/ui/rpamanagedialog.h
+    src/ui/rpa_console_window.h
     src/ui/addwindowdialog.h
     src/ui/aggregatechatform.h
 )
@@ -89,6 +95,10 @@ target_link_libraries(demo1 PRIVATE
     Qt6::Widgets
     Qt6::Sql
 )
+
+if(WIN32)
+    target_link_libraries(demo1 PRIVATE ole32 shell32)
+endif()
 
 set_target_properties(demo1 PROPERTIES
     WIN32_EXECUTABLE TRUE
