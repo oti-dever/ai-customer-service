@@ -1370,14 +1370,30 @@ QString buildQuickLaunchManagerQss(const SimpleManagerDialogTokens& t)
 {
     return QStringLiteral(
         R"QSS(
-        QDialog#quickLaunchManagerDialog {
+        QDialog#quickLaunchManagerDialog,
+        QDialog#quickLaunchRulesDialog {
             background: %1;
         }
         QDialog#quickLaunchManagerDialog QLabel,
+        QDialog#quickLaunchRulesDialog QLabel,
         QDialog#quickLaunchManagerDialog QListWidget,
+        QDialog#quickLaunchManagerDialog QTreeWidget,
+        QDialog#quickLaunchRulesDialog QTreeWidget,
         QDialog#quickLaunchManagerDialog QCheckBox,
-        QDialog#quickLaunchManagerDialog QToolButton {
+        QDialog#quickLaunchRulesDialog QCheckBox,
+        QDialog#quickLaunchManagerDialog QToolButton,
+        QDialog#quickLaunchRulesDialog QToolButton,
+        QDialog#quickLaunchRulesDialog QComboBox,
+        QDialog#quickLaunchRulesDialog QGroupBox,
+        QDialog#quickLaunchRulesDialog QLineEdit {
             color: %2;
+        }
+        QLineEdit#quickLaunchRulesSearchEdit {
+            background: %3;
+            border: 1px solid %4;
+            border-radius: 8px;
+            padding: 6px 10px;
+            font-size: 13px;
         }
 
         QListWidget#quickLaunchAppList {
@@ -1398,13 +1414,54 @@ QString buildQuickLaunchManagerQss(const SimpleManagerDialogTokens& t)
             color: %7;
         }
 
+        QTreeWidget#quickLaunchAppTree,
+        QTreeWidget#quickLaunchRulesTree {
+            background: %3;
+            border: 1px solid %4;
+            border-radius: 10px;
+            color: %2;
+        }
+        QTreeWidget#quickLaunchAppTree::item,
+        QTreeWidget#quickLaunchRulesTree::item {
+            padding: 4px 8px;
+            color: %2;
+        }
+        QTreeWidget#quickLaunchAppTree::item:hover,
+        QTreeWidget#quickLaunchRulesTree::item:hover {
+            background: %5;
+        }
+        QTreeWidget#quickLaunchAppTree::item:selected,
+        QTreeWidget#quickLaunchRulesTree::item:selected {
+            background: %6;
+            color: %7;
+        }
+        QTreeWidget#quickLaunchAppTree::branch,
+        QTreeWidget#quickLaunchRulesTree::branch {
+            background: transparent;
+        }
+        QTreeWidget#quickLaunchAppTree QHeaderView::section,
+        QTreeWidget#quickLaunchRulesTree QHeaderView::section {
+            background: %3;
+            color: %2;
+            border: none;
+            border-bottom: 1px solid %4;
+            padding: 6px 8px;
+            font-weight: 600;
+        }
+
         QCheckBox#quickLaunchOnlyBox {
             spacing: 8px;
             font-size: 13px;
         }
 
         QPushButton#quickLaunchAddButton,
-        QPushButton#quickLaunchRemoveButton,
+        QPushButton#quickLaunchAddGroupButton,
+        QPushButton#quickLaunchChangeTargetButton,
+        QPushButton#quickLaunchScanRulesButton,
+        QPushButton#quickLaunchDeleteCheckedButton,
+        QPushButton#quickLaunchDeleteAllButton,
+        QPushButton#quickLaunchAutoScanButton,
+        QPushButton#quickLaunchRulesActionButton,
         QPushButton#quickLaunchOkButton,
         QPushButton#quickLaunchCancelButton {
             background: %8;
@@ -1416,13 +1473,25 @@ QString buildQuickLaunchManagerQss(const SimpleManagerDialogTokens& t)
             font-weight: 600;
         }
         QPushButton#quickLaunchAddButton:hover,
-        QPushButton#quickLaunchRemoveButton:hover,
+        QPushButton#quickLaunchAddGroupButton:hover,
+        QPushButton#quickLaunchChangeTargetButton:hover,
+        QPushButton#quickLaunchScanRulesButton:hover,
+        QPushButton#quickLaunchDeleteCheckedButton:hover,
+        QPushButton#quickLaunchDeleteAllButton:hover,
+        QPushButton#quickLaunchAutoScanButton:hover,
+        QPushButton#quickLaunchRulesActionButton:hover,
         QPushButton#quickLaunchOkButton:hover,
         QPushButton#quickLaunchCancelButton:hover {
             background: %9;
         }
         QPushButton#quickLaunchAddButton:pressed,
-        QPushButton#quickLaunchRemoveButton:pressed,
+        QPushButton#quickLaunchAddGroupButton:pressed,
+        QPushButton#quickLaunchChangeTargetButton:pressed,
+        QPushButton#quickLaunchScanRulesButton:pressed,
+        QPushButton#quickLaunchDeleteCheckedButton:pressed,
+        QPushButton#quickLaunchDeleteAllButton:pressed,
+        QPushButton#quickLaunchAutoScanButton:pressed,
+        QPushButton#quickLaunchRulesActionButton:pressed,
         QPushButton#quickLaunchOkButton:pressed,
         QPushButton#quickLaunchCancelButton:pressed {
             background: %10;
