@@ -1,4 +1,5 @@
 #include "aggregatechatform.h"
+#include "foldarrowcombobox.h"
 #include "../core/conversationmanager.h"
 #include "../data/conversationdao.h"
 #include "../services/platforms/simplatformadapter.h"
@@ -96,8 +97,8 @@ QWidget* AggregateChatForm::buildLeftPanel()
     modeLayout->setContentsMargins(0, 0, 0, 0);
     modeLayout->setSpacing(8);
     auto* modeLabel = new QLabel(QStringLiteral("模式："), modeRow);
-    modeLabel->setStyleSheet("color: #aaa; font-size: 12px;");
-    m_modeCombo = new QComboBox(modeRow);
+    modeLabel->setObjectName(QStringLiteral("aggregateModeLabel"));
+    m_modeCombo = new FoldArrowComboBox(modeRow);
     m_modeCombo->addItem(QStringLiteral("人工接待"));
     m_modeCombo->addItem(QStringLiteral("人工休息"));
     m_modeCombo->setMinimumWidth(90);
