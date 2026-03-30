@@ -15,7 +15,10 @@
 AddWindowDialog::AddWindowDialog(QWidget *parent) : QDialog(parent)
 {
     setWindowTitle(QStringLiteral("添加新窗口"));
-    setStyleSheet(ApplyStyle::addWindowDialogStyle());
+    if (auto* mw = qobject_cast<MainWindow*>(parent))
+        setStyleSheet(ApplyStyle::addWindowDialogStyle(mw->mainWindowTheme()));
+    else
+        setStyleSheet(ApplyStyle::addWindowDialogStyle(ApplyStyle::loadSavedMainWindowTheme()));
     resize(760, 520);
     setupUI();
     onRefreshClicked();
@@ -59,6 +62,9 @@ void AddWindowDialog::setupUI()
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
+    m_table->setAttribute(Qt::WA_StyledBackground, true);
+    if (QWidget* vp = m_table->viewport())
+        vp->setAttribute(Qt::WA_StyledBackground, true);
     mainLayout->addWidget(m_table, 1);
 
     auto* formGroup = new QWidget(this);
@@ -137,10 +143,9 @@ void AddWindowDialog::applyFilter()
         const int row = m_table->rowCount();
         m_table->insertRow(row);
         auto* check = new QCheckBox(this);
-        check->setStyleSheet("margin-left: 8px;");
         auto* checkWrap = new QWidget(this);
         auto* checkLayout = new QHBoxLayout(checkWrap);
-        checkLayout->setContentsMargins(0, 0, 0, 0);
+        checkLayout->setContentsMargins(8, 0, 0, 0);
         checkLayout->addWidget(check);
         m_table->setCellWidget(row, 0, checkWrap);
         m_table->setItem(row, 1, new QTableWidgetItem(info.windowTitle));
