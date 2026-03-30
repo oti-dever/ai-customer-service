@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(demo1 VERSION 0.1.0 LANGUAGES CXX)
+# 可执行文件名使用 yy-ai-customer-service（OUTPUT_NAME）；CMake 标识符不宜含连字符
+project(yy_ai_customer_service VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,6 +47,7 @@ set(SOURCES
     src/ui/rpa_console_window.cpp
     src/ui/addwindowdialog.cpp
     src/ui/aggregatechatform.cpp
+    src/ui/helpcenterdialog.cpp
 )
 
 set(HEADERS
@@ -72,23 +74,29 @@ set(HEADERS
     src/ui/rpa_console_window.h
     src/ui/addwindowdialog.h
     src/ui/aggregatechatform.h
+    src/ui/foldarrowcombobox.h
+    src/ui/helpcenterdialog.h
 )
 
-qt_add_executable(demo1
+qt_add_executable(yy_ai_customer_service
     MANUAL_FINALIZATION
     ${SOURCES}
     ${HEADERS}
 )
 
-target_include_directories(demo1 PRIVATE
+set_target_properties(yy_ai_customer_service PROPERTIES
+    OUTPUT_NAME "yy-ai-customer-service"
+)
+
+target_include_directories(yy_ai_customer_service PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_compile_definitions(demo1 PRIVATE
+target_compile_definitions(yy_ai_customer_service PRIVATE
     PROJECT_ROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
-target_link_libraries(demo1 PRIVATE
+target_link_libraries(yy_ai_customer_service PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Svg
@@ -97,14 +105,17 @@ target_link_libraries(demo1 PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(demo1 PRIVATE ole32 shell32)
+    target_link_libraries(yy_ai_customer_service PRIVATE ole32 shell32)
 endif()
 
-set_target_properties(demo1 PROPERTIES
+set_target_properties(yy_ai_customer_service PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE
 )
 
 if(QT_VERSION_MAJOR EQUAL 6)
-    qt_finalize_executable(demo1)
+    qt_finalize_executable(yy_ai_customer_service)
 endif()
+
+enable_testing()
+add_subdirectory(tests)
