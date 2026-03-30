@@ -1,8 +1,8 @@
 #include "rpa_console_window.h"
+#include "foldarrowcombobox.h"
 #include "mainwindow.h"
 #include "../utils/applystyle.h"
 
-#include <QComboBox>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -18,7 +18,8 @@ RpaConsoleWindow::RpaConsoleWindow(MainWindow* mainWindow, QWidget* parent)
     setWindowTitle(QStringLiteral("控制台输出"));
     setAttribute(Qt::WA_DeleteOnClose);
     setModal(false);
-    setStyleSheet(ApplyStyle::addWindowDialogStyle());
+    setStyleSheet(ApplyStyle::addWindowDialogStyle(
+        m_main ? m_main->mainWindowTheme() : ApplyStyle::loadSavedMainWindowTheme()));
     resize(780, 520);
     setupUi();
 
@@ -38,7 +39,7 @@ void RpaConsoleWindow::setupUi()
     auto* row = new QHBoxLayout();
     row->setSpacing(8);
     row->addWidget(new QLabel(QStringLiteral("平台："), this));
-    m_combo = new QComboBox(this);
+    m_combo = new FoldArrowComboBox(this);
     m_combo->addItem(QStringLiteral("微信 PC"), QStringLiteral("wechat"));
     m_combo->addItem(QStringLiteral("千牛 PC"), QStringLiteral("qianniu"));
     m_combo->addItem(QStringLiteral("拼多多网页"), QStringLiteral("pdd"));
@@ -54,11 +55,6 @@ void RpaConsoleWindow::setupUi()
 
     connect(m_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &RpaConsoleWindow::onPlatformChanged);
-
-    // 千牛 PC 等平台项字体颜色（以及下拉列表）保证可读
-    m_combo->setStyleSheet(QStringLiteral(
-        "QComboBox{color:#000000;background-color:#ffffff;}"
-        "QComboBox QAbstractItemView{color:#000000;background-color:#ffffff;}"));
 }
 
 QString RpaConsoleWindow::currentPlatformId() const
