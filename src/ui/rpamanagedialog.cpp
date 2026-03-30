@@ -28,18 +28,26 @@ RpaManageDialog::RpaManageDialog(MainWindow* mainWindow, QWidget* parent)
     , m_main(mainWindow)
 {
     setWindowTitle(QStringLiteral("管理启动/停止 RPA"));
-    setStyleSheet(ApplyStyle::addWindowDialogStyle()
-                   + QStringLiteral(
-                       R"QSS(
+    {
+        const ApplyStyle::MainWindowTheme th = m_main ? m_main->mainWindowTheme()
+                                                      : ApplyStyle::MainWindowTheme::Default;
+        const QString disabledBorder = (th == ApplyStyle::MainWindowTheme::Default)
+            ? QStringLiteral("#D4D4D8")
+            : QStringLiteral("#c0d9f7");
+        setStyleSheet(ApplyStyle::addWindowDialogStyle(th)
+                      + QStringLiteral(
+                            R"QSS(
         QDialog QPushButton:disabled {
             color: #1e293b;
             background-color: #ffffff;
-            border: 1px solid #c0d9f7;
+            border: 1px solid %1;
             border-radius: 8px;
             padding: 6px 16px;
             min-height: 22px;
         }
-    )QSS"));
+    )QSS")
+                            .arg(disabledBorder));
+    }
     resize(520, 360);
     setupUI();
 }
