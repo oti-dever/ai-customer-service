@@ -33,7 +33,7 @@ public:
     };
 
     static QString loginWindowStyle();
-    /** 主窗口 QSS；默认与历史版本一致。 */
+    /** 主窗口 QSS；Default 为经典黑灰白（深侧栏 + 浅工作区 + 白卡片）。 */
     static QString mainWindowStyle();
     static QString mainWindowStyle(MainWindowTheme theme);
     static MainWindowTheme loadSavedMainWindowTheme();
@@ -48,7 +48,8 @@ public:
     static QString helpDialogHtmlWarningColor(MainWindowTheme theme);
     static QString statusMessageManagerStyle(MainWindowTheme theme);
     static QString quickLaunchManagerStyle(MainWindowTheme theme);
-    static QString quickLaunchHelpMessageBoxStyle(MainWindowTheme theme);
+    /** 与主窗口主题一致；Default 为天蓝色阶（见实现内注释）。 */
+    static QString addWindowDialogStyle(MainWindowTheme theme);
     static QString addWindowDialogStyle();
 
     static PlatformTreeColors platformTreeColors(MainWindowTheme theme);
