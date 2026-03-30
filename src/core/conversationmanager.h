@@ -9,6 +9,7 @@ class MessageRouter;
 class SimPlatformAdapter;
 class QianniuRPAAdapter;
 class WechatRPAAdapter;
+class PddRPAAdapter;
 
 class ConversationManager : public QObject
 {
@@ -22,6 +23,7 @@ public:
     SimPlatformAdapter* simulator() const { return m_simulator; }
     QianniuRPAAdapter* qianniu() const { return m_qianniu; }
     WechatRPAAdapter* wechat() const { return m_wechat; }
+    PddRPAAdapter* pdd() const { return m_pdd; }
 
     QVector<ConversationInfo> conversations(bool pendingOnly) const;
     QVector<MessageRecord> messages(int conversationId) const;
@@ -48,6 +50,7 @@ private:
     SimPlatformAdapter* m_simulator = nullptr;
     QianniuRPAAdapter* m_qianniu = nullptr;
     WechatRPAAdapter* m_wechat = nullptr;
+    PddRPAAdapter* m_pdd = nullptr;
     int m_currentConvId = -1;
 };
 

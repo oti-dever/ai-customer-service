@@ -5,6 +5,7 @@
 #include "../services/platforms/simplatformadapter.h"
 #include "../services/platforms/qianniurp_adapter.h"
 #include "../services/platforms/wechatrp_adapter.h"
+#include "../services/platforms/pddrp_adapter.h"
 
 ConversationManager& ConversationManager::instance()
 {
@@ -36,6 +37,11 @@ void ConversationManager::initialize()
     m_wechat->connectPlatform();
     m_wechat->startListening();
 
+    m_pdd = new PddRPAAdapter(this);
+    m_router->registerAdapter(m_pdd);
+    m_pdd->connectPlatform();
+    m_pdd->startListening();
+
     connect(m_router, &MessageRouter::conversationCreated, this, [this](const ConversationInfo& conv) {
         qDebug() << "[ConversationManager] 新会话:" << conv.customerName;
         emit conversationListChanged();
@@ -59,7 +65,7 @@ void ConversationManager::initialize()
         emit messageSendFailed(convId, reason);
     });
 
-    qInfo() << "[ConversationManager] 初始化完成，模拟平台/千牛RPA/微信RPA适配器已就绪";
+    qInfo() << "[ConversationManager] 初始化完成，模拟平台/千牛RPA/微信RPA/PDD RPA 适配器已就绪";
 }
 
 QVector<ConversationInfo> ConversationManager::conversations(bool pendingOnly) const
