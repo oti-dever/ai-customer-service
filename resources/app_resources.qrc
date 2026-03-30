@@ -2,6 +2,12 @@
     <qresource prefix="/">
         <file>app_icon.svg</file>
         <file>add_new_window_icon.svg</file>
+        <file>add_window_checkbox_checked.svg</file>
+        <file>add_window_checkbox_checked_hover.svg</file>
+        <file>add_window_checkbox_checked_cool.svg</file>
+        <file>add_window_checkbox_checked_cool_hover.svg</file>
+        <file>add_window_checkbox_checked_warm.svg</file>
+        <file>add_window_checkbox_checked_warm_hover.svg</file>
         <file>refresh_platform_list_icon.svg</file>
         <file>quick_launch_application_icon.svg</file>
         <file>click_to_select_platform_icon.svg</file>
