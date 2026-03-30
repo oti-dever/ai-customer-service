@@ -1,10 +1,14 @@
 #include "mainwindow.h"
 #include "addwindowdialog.h"
 #include "aggregatechatform.h"
+#include "foldarrowcombobox.h"
 #include "rpamanagedialog.h"
+#include "helpcenterdialog.h"
 #include "rpa_console_window.h"
 #include "../utils/applystyle.h"
 #include "../utils/win32windowhelper.h"
+#include <QAbstractItemModel>
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QContextMenuEvent>
 #include <QCursor>
@@ -29,6 +33,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QRandomGenerator>
+#include <QScrollBar>
 #include <QScreen>
 #include <QSettings>
 #include <QStatusBar>
@@ -37,8 +42,11 @@
 #include <QTextBrowser>
 #include <QTimer>
 #include <QToolButton>
+#include <QStyle>
+#include <QStyleFactory>
 #include <QTreeView>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QHeaderView>
 #include <QDirIterator>
 #include <QProgressDialog>
@@ -415,6 +423,121 @@ static bool quickLaunchMatchesUserAppAllowlist(const QString& exeLower, const QS
     return hit(exeLower) || hit(lnkLower);
 }
 
+/** 竖向滚动条默认隐藏；鼠标靠近视口右缘、滚轮滚动或拖条时显示，离开后延时隐藏 */
+class QuickLaunchVScrollRevealHelper final : public QObject
+{
+public:
+    explicit QuickLaunchVScrollRevealHelper(QTreeWidget* tree)
+        : QObject(tree)
+        , m_tree(tree)
+    {
+        m_hideTimer.setSingleShot(true);
+        m_hideTimer.setInterval(420);
+        QObject::connect(&m_hideTimer, &QTimer::timeout, this, [this] {
+            if (!m_overScrollBar && !m_inRevealZone)
+                m_tree->verticalScrollBar()->hide();
+        });
+
+        m_tree->viewport()->setMouseTracking(true);
+        m_tree->viewport()->installEventFilter(this);
+        m_tree->verticalScrollBar()->installEventFilter(this);
+
+        auto scheduleSync = [this] {
+            QTimer::singleShot(0, this, [this] { syncBarVisibility(); });
+        };
+        QObject::connect(m_tree->model(), &QAbstractItemModel::rowsInserted, this, scheduleSync);
+        QObject::connect(m_tree->model(), &QAbstractItemModel::rowsRemoved, this, scheduleSync);
+        QObject::connect(m_tree->model(), &QAbstractItemModel::modelReset, this, scheduleSync);
+        QObject::connect(m_tree->model(), &QAbstractItemModel::layoutChanged, this, scheduleSync);
+
+        m_tree->verticalScrollBar()->hide();
+        scheduleSync();
+    }
+
+private:
+    void syncBarVisibility()
+    {
+        QScrollBar* sb = m_tree->verticalScrollBar();
+        if (sb->maximum() <= 0) {
+            sb->hide();
+            m_hideTimer.stop();
+            return;
+        }
+        if (!m_inRevealZone && !m_overScrollBar)
+            sb->hide();
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        QScrollBar* sb = m_tree->verticalScrollBar();
+
+        if (watched == m_tree->viewport()) {
+            switch (event->type()) {
+            case QEvent::MouseMove: {
+                auto* me = static_cast<QMouseEvent*>(event);
+                const int vw = m_tree->viewport()->width();
+                const bool nearRight = me->x() >= vw - kRevealPx;
+                if (nearRight != m_inRevealZone) {
+                    m_inRevealZone = nearRight;
+                    if (nearRight && sb->maximum() > 0) {
+                        m_hideTimer.stop();
+                        sb->show();
+                    } else if (!m_overScrollBar) {
+                        m_hideTimer.start();
+                    }
+                }
+                break;
+            }
+            case QEvent::Leave:
+                m_inRevealZone = false;
+                if (!m_overScrollBar)
+                    m_hideTimer.start();
+                break;
+            case QEvent::Wheel:
+                if (sb->maximum() > 0) {
+                    sb->show();
+                    m_hideTimer.start();
+                }
+                break;
+            case QEvent::Resize:
+                QTimer::singleShot(0, this, [this] { syncBarVisibility(); });
+                break;
+            default:
+                break;
+            }
+        } else if (watched == sb) {
+            if (event->type() == QEvent::Enter) {
+                m_overScrollBar = true;
+                m_hideTimer.stop();
+            } else if (event->type() == QEvent::Leave) {
+                m_overScrollBar = false;
+                if (!m_inRevealZone)
+                    m_hideTimer.start();
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+    QTreeWidget* m_tree;
+    QTimer m_hideTimer;
+    bool m_inRevealZone = false;
+    bool m_overScrollBar = false;
+    static constexpr int kRevealPx = 16;
+};
+
+/** Windows 原生 QTreeView 在焦点/拖放指示器上易画系统蓝；Fusion + QSS 与锌灰主题一致 */
+static void polishQuickLaunchTreeWidget(QTreeWidget* tree)
+{
+    if (!tree)
+        return;
+    tree->setAlternatingRowColors(true);
+    tree->setAttribute(Qt::WA_StyledBackground, true);
+    if (QWidget* vp = tree->viewport())
+        vp->setAttribute(Qt::WA_StyledBackground, true);
+    if (QStyle* fusion = QStyleFactory::create(QStringLiteral("Fusion")))
+        tree->setStyle(fusion);
+}
+
 static QString quickLaunchPathKey(const QString& path)
 {
     return QDir::cleanPath(QFileInfo(path).absoluteFilePath()).toLower();
@@ -609,7 +732,7 @@ public:
 
         auto* topRow = new QHBoxLayout;
         topRow->addWidget(new QLabel(QStringLiteral("扫描强度："), this));
-        m_modeCombo = new QComboBox(this);
+        m_modeCombo = new FoldArrowComboBox(this);
         m_modeCombo->addItem(QStringLiteral("严格（开始菜单按常用关键字；不含桌面放宽）"));
         m_modeCombo->addItem(QStringLiteral("标准（严格 + 桌面根目录 .lnk 放行）"));
         m_modeCombo->addItem(QStringLiteral("宽松（仅排除系统目录与系统工具 exe）"));
@@ -644,6 +767,8 @@ public:
         m_treeInc->setColumnCount(2);
         m_treeInc->setHeaderLabels({QStringLiteral("名称"), QStringLiteral("路径")});
         m_treeInc->header()->setStretchLastSection(true);
+        polishQuickLaunchTreeWidget(m_treeExc);
+        polishQuickLaunchTreeWidget(m_treeInc);
 
         auto wrap = [this](const QString& title, QTreeWidget* tw) {
             auto* gb = new QGroupBox(title, this);
@@ -705,6 +830,8 @@ public:
 
         setStyleSheet(ApplyStyle::quickLaunchManagerStyle(theme));
         rebuildTrees();
+        new QuickLaunchVScrollRevealHelper(m_treeExc);
+        new QuickLaunchVScrollRevealHelper(m_treeInc);
     }
 
 private:
@@ -2229,6 +2356,8 @@ void MainWindow::openQuickLaunchManager()
         }
     }
     tree->expandAll();
+    polishQuickLaunchTreeWidget(tree);
+    new QuickLaunchVScrollRevealHelper(tree);
     mainLayout->addWidget(tree, 1);
 
     auto ensureDefaultGroup = [tree]() -> QTreeWidgetItem* {
@@ -2300,6 +2429,7 @@ void MainWindow::openQuickLaunchManager()
     onlyLayout->setSpacing(6);
     auto* onlyBox = new QCheckBox(QStringLiteral("只启动未运行的应用"), onlyRow);
     onlyBox->setObjectName(QStringLiteral("quickLaunchOnlyBox"));
+    onlyBox->setAttribute(Qt::WA_StyledBackground, true);
     onlyBox->setChecked(m_quickLaunchOnlyIfNotRunning);
     onlyBox->setToolTip(
         QStringLiteral(
@@ -2308,15 +2438,8 @@ void MainWindow::openQuickLaunchManager()
             ".lnk 会解析目标取文件名。\n\n"
             "【局限】仅托盘无可见主窗口、或窗口无标题被枚举过滤时，可能仍判定为未运行；"
             "若仍执行了启动，部分软件会主动新开窗口，无法单靠本项禁止。"));
-    auto* helpBtn = new QToolButton(onlyRow);
-    helpBtn->setObjectName(QStringLiteral("quickLaunchHelpButton"));
-    helpBtn->setAutoRaise(true);
-    helpBtn->setIcon(QIcon(QStringLiteral(":/question_mark_icon.svg")));
-    helpBtn->setToolTip(QStringLiteral("查看使用说明"));
-    helpBtn->setCursor(Qt::PointingHandCursor);
     onlyLayout->addWidget(onlyBox);
     onlyLayout->addStretch(1);
-    onlyLayout->addWidget(helpBtn);
     mainLayout->addWidget(onlyRow);
 
     auto* btnRow = new QHBoxLayout();
@@ -2606,30 +2729,6 @@ void MainWindow::openQuickLaunchManager()
 
     connect(btnCancel, &QPushButton::clicked, &dlg, &QDialog::reject);
 
-    connect(helpBtn, &QToolButton::clicked, &dlg, [&dlg, theme]() {
-        const QString text = QStringLiteral(
-            "【快速启动应用使用说明】\n\n"
-            "1. 支持添加「.exe」或 Windows「.lnk」快捷方式；快捷方式将按系统方式打开。\n"
-            "2. 使用分组整理应用；「默认」分组在配置中对应空分组名。可拖拽分组或应用调整顺序。\n"
-            "3. 应用行左侧可勾选；「删除勾选」批量删除；「删除全部」清空列表（仍会保留空「默认」分组）。分组默认展开，可点击折叠。\n"
-            "4. 「黑白名单…」可设置扫描强度（严格/标准/宽松），并查看未收录与可收录的快捷方式；勾选后可在黑白名单间移动或取消强制规则。\n"
-            "5. 「自动扫描」按上述强度与黑白名单从开始菜单/桌面收集 .lnk；目录/系统 exe 仍会硬过滤。\n"
-            "6. 双击「名称」列可编辑显示名；「目标路径」列只读，请用「更改目标...」修改。\n"
-            "7. 「只启动未运行的应用」：tasklist 检测进程名，并复用「添加新窗口」的窗口枚举——若已有匹配进程名的可见顶层窗口也会跳过。"
-            "详见该项悬停说明。\n"
-            "8. 主界面「快速启动应用」右键可「设置数量上限」：左键启动时只处理列表前 N 项（默认 10），"
-            "路径为空的行也占序号；请勿一次启动过多以免风险，后果自负。\n"
-            "9. 左键快速启动后将弹出本次启动结果（含因上限未尝试的条目）。\n"
-            "10. 微信等应用仍按各自默认方式启动。\n");
-        QMessageBox msgBox(&dlg);
-        msgBox.setWindowTitle(QStringLiteral("快速启动应用 - 使用说明"));
-        msgBox.setText(text);
-        msgBox.setIconPixmap(QIcon(QStringLiteral(":/question_mark_icon.svg")).pixmap(32, 32));
-        msgBox.setStandardButtons(QMessageBox::Close);
-        msgBox.setStyleSheet(ApplyStyle::quickLaunchHelpMessageBoxStyle(theme));
-        msgBox.exec();
-    });
-
     dlg.setStyleSheet(ApplyStyle::quickLaunchManagerStyle(theme));
     dlg.exec();
 }
@@ -2828,225 +2927,14 @@ void MainWindow::runQuickLaunchApps()
     box.exec();
 }
 
-// ==================== Help Dialog ====================
-
-class HelpDialog : public QDialog
-{
-public:
-    explicit HelpDialog(const QString& initialSection, QWidget* parent = nullptr)
-        : QDialog(parent)
-    {
-        setWindowTitle(QStringLiteral("帮助中心"));
-        setMinimumSize(600, 400);
-        resize(780, 540);
-
-        auto* root = new QHBoxLayout(this);
-        root->setContentsMargins(0, 0, 0, 0);
-        root->setSpacing(0);
-
-        auto* splitter = new QSplitter(Qt::Horizontal, this);
-        splitter->setChildrenCollapsible(false);
-        root->addWidget(splitter);
-
-        m_toc = new QListWidget;
-        m_toc->setObjectName("helpToc");
-        m_toc->setFixedWidth(170);
-        splitter->addWidget(m_toc);
-
-        m_browser = new QTextBrowser;
-        m_browser->setObjectName("helpBrowser");
-        m_browser->setOpenExternalLinks(false);
-        m_browser->setOpenLinks(false);
-        splitter->addWidget(m_browser);
-        splitter->setStretchFactor(0, 0);
-        splitter->setStretchFactor(1, 1);
-        splitter->setSizes({170, 610});
-
-        populateContent();
-
-        connect(m_toc, &QListWidget::currentItemChanged, this,
-                [this](QListWidgetItem* current, QListWidgetItem*) {
-                    if (!current) return;
-                    const QString anchor = current->data(Qt::UserRole).toString();
-                    if (!anchor.isEmpty())
-                        m_browser->scrollToAnchor(anchor);
-                });
-
-        setStyleSheet(
-            ApplyStyle::helpDialogStyle(ApplyStyle::loadSavedMainWindowTheme()));
-
-        QListWidgetItem* startItem = nullptr;
-        for (int i = 0; i < m_toc->count(); ++i) {
-            auto* item = m_toc->item(i);
-            const QString anchor = item->data(Qt::UserRole).toString();
-            if (anchor.isEmpty()) continue;
-            if (!startItem) startItem = item;
-            if (initialSection == QLatin1String("buglog")
-                && anchor.startsWith(QLatin1String("bug"))) {
-                startItem = item;
-                break;
-            }
-        }
-        if (startItem)
-            m_toc->setCurrentItem(startItem);
-    }
-
-private:
-    QListWidget* m_toc = nullptr;
-    QTextBrowser* m_browser = nullptr;
-
-    struct Section {
-        QString anchor;
-        QString tocLabel;
-        QString html;
-    };
-
-    void populateContent()
-    {
-        QVector<Section> sections;
-        const ApplyStyle::MainWindowTheme theme = ApplyStyle::loadSavedMainWindowTheme();
-
-        // ---- 使用说明 ----
-        sections.append({
-            "help_overview", QStringLiteral("\u2022 基本操作"),
-            QStringLiteral(
-                "<h3>基本操作</h3>"
-                "<p>1. 左侧「在线平台」「客服平台」列表用于选择和管理各个平台窗口。</p>"
-                "<p>2. 点击顶部「添加新窗口」可从当前已打开的窗口中选择并关联到平台项。</p>"
-                "<p>3. 支持多选窗口批量添加，添加过程中会显示进度提示。</p>")
-        });
-        sections.append({
-            "help_aggregate", QStringLiteral("\u2022 聚合接待"),
-            QStringLiteral(
-                "<h3>聚合接待</h3>"
-                "<p>管理后台中的「聚合接待」用于统一查看各平台会话并手动回复客户。</p>"
-                "<p>点击左侧「聚合接待」即可进入，浮窗窗口会自动隐藏，切回平台项后自动恢复。</p>")
-        });
-        sections.append({
-            "help_disconnect", QStringLiteral("\u2022 断开窗口关联"),
-            QStringLiteral(
-                "<h3>断开窗口关联</h3>"
-                "<p>在左侧「在线平台」或「客服平台」列表中，<b>右键</b>点击对应平台项，选择「断开关联」或「删除」即可断开与主窗口的关联（不会关闭该应用窗口本身）。</p>"
-                "<p style='color:%1;'>&#9888; 请勿使用嵌入窗口标题栏上的「最小化」「最大化」「关闭」按钮，可能引发异常或白屏。需断开关联时请通过上述右键菜单操作。</p>")
-                .arg(ApplyStyle::helpDialogHtmlWarningColor(theme))
-        });
-        sections.append({
-            "help_quicklaunch", QStringLiteral("\u2022 快速启动应用"),
-            QStringLiteral(
-                "<h3>快速启动应用</h3>"
-                "<p>主界面中部的「快速启动应用」卡片，可一键启动常用外部应用（支持 .exe 与 Windows .lnk）。</p>"
-                "<p><b>左键</b>：按配置顺序依次启动，且受「数量上限」约束（默认只处理前 10 项，可在右键菜单修改）；"
-                "完成后会显示本次启动结果（已启动 / 已跳过 / 失败 / 因上限未尝试）。</p>"
-                "<p><b>右键</b>：「管理应用列表」「设置数量上限」等；列表支持分组（默认展开）、拖拽排序、自动扫描、黑白名单与扫描强度。</p>"
-                "<p>「黑白名单」中可查看未收录/可收录的快捷方式并勾选调整；自动扫描会尊重用户强白/强黑与「严格/标准/宽松」档位。</p>"
-                "<p>「只启动未运行的应用」在 Windows 上会同时使用任务列表（exe 名）与「添加新窗口」同款顶层窗口枚举；"
-                "任一路径判定已运行即跳过本次启动。仅托盘、无标题窗口等场景仍可能漏判。</p>"
-                "<p>微信等应用仍按各自默认方式启动。</p>")
-        });
-        sections.append({
-            "help_troubleshoot", QStringLiteral("\u2022 故障排查"),
-            QStringLiteral(
-                "<h3>故障排查</h3>"
-                "<p>若遇到窗口嵌入、浮窗跟随或快速启动异常，可从状态栏日志或控制台查看详细信息。</p>")
-        });
-
-        // ---- Bug 修复日志 ----
-        sections.append({
-            "bug_float_style", QStringLiteral("\u2022 浮窗样式异常"),
-            QStringLiteral(
-                "<h3>浮窗跟随窗口样式异常</h3>"
-                "<p><b>问题：</b>部分外部窗口被修改了原始样式（标题栏、边框丢失或恢复异常）。</p>"
-                "<p><b>原因：</b>在 setupFloatFollow / detachFloatFollow 中直接改写了窗口的样式标志。</p>"
-                "<p><b>修复：</b>仅调整必要的扩展样式和 Owner，不再强制改写 WS_OVERLAPPEDWINDOW 等样式。</p>")
-        });
-        sections.append({
-            "bug_disconnect", QStringLiteral("\u2022 窗口断开关联"),
-            QStringLiteral(
-                "<h3>外部窗口断开关联</h3>"
-                "<p><b>问题：</b>直接点击外部窗口（如微信）自身的关闭按钮时，可能出现白屏、列表未移除等异常。</p>"
-                "<p><b>原因：</b>外部窗口关闭行为因应用和系统环境差异大（隐藏到托盘、白屏挂起等），无法统一可靠检测。</p>"
-                "<p><b>建议：</b>请通过左侧平台列表「右键 &rarr; 断开关联 / 删除」来安全释放窗口。</p>")
-        });
-        sections.append({
-            "bug_batch_add", QStringLiteral("\u2022 多选与进度提示"),
-            QStringLiteral(
-                "<h3>\"添加新窗口\"多选与进度提示</h3>"
-                "<p><b>问题：</b>一次只能添加一个窗口，重复操作繁琐；添加过程缺乏进度反馈。</p>"
-                "<p><b>修复：</b>支持列表多选加入队列逐个添加，并增加遮罩 + 进度文本提示。</p>")
-        });
-        sections.append({
-            "bug_enum_noise", QStringLiteral("\u2022 枚举噪声过滤"),
-            QStringLiteral(
-                "<h3>顶层窗口枚举噪声</h3>"
-                "<p><b>问题：</b>窗口列表中出现系统输入法等辅助窗口，容易误选。</p>"
-                "<p><b>原因：</b>枚举顶层窗口时仅按可见和 Owner 过滤，未按进程/标题进一步排除。</p>"
-                "<p><b>修复：</b>对 TextInputHost.exe 进程以及标题包含\"Windows 输入体验\"的窗口进行过滤。</p>")
-        });
-        sections.append({
-            "bug_aggregate_ui", QStringLiteral("\u2022 聚合接待界面优化"),
-            QStringLiteral(
-                "<h3>聚合接待界面视觉与体验</h3>"
-                "<p><b>问题：</b>早期版本风格偏暗，缺少渐变和明确分区，消息区域滚动条和气泡样式不统一。</p>"
-                "<p><b>修复：</b>采用柔和蓝色渐变背景，统一三栏布局；调整消息气泡配色、隐藏滚动条、统一文字为黑色，并对空态/搜索框做了细致优化。</p>")
-        });
-        sections.append({
-            "bug_quicklaunch", QStringLiteral("\u2022 快速启动路径修复"),
-            QStringLiteral(
-                "<h3>快速启动应用功能</h3>"
-                "<p><b>问题：</b>最初使用 cmd/start 启动时，在包含空格或括号的路径下会出现\"找不到\"之类错误提示。</p>"
-                "<p><b>原因：</b>命令行参数拼接方式不当，导致 Windows 对带空格路径解析失败。</p>"
-                "<p><b>修复：</b>改为对 .exe 使用 QProcess::startDetached；支持 .lnk；可选「只启动未运行的应用」；管理界面支持分组、拖拽排序与编辑显示名；启动后汇总结果。</p>")
-        });
-
-        QString html = QStringLiteral(
-            "<html><body style='font-family: \"Microsoft YaHei\", \"Segoe UI\", sans-serif; "
-            "font-size: 13px; color: %1; margin: 0; padding: 16px 16px 16px 0;'>")
-                            .arg(ApplyStyle::helpDialogHtmlBodyTextColor(theme));
-
-        bool helpGroupAdded = false;
-        bool bugGroupAdded = false;
-
-        for (const auto& s : sections) {
-            if (!helpGroupAdded && s.anchor.startsWith(QLatin1String("help"))) {
-                helpGroupAdded = true;
-                auto* header = new QListWidgetItem(QStringLiteral("  软件使用说明"));
-                header->setFlags(Qt::NoItemFlags);
-                m_toc->addItem(header);
-            }
-            if (!bugGroupAdded && s.anchor.startsWith(QLatin1String("bug"))) {
-                bugGroupAdded = true;
-                auto* header = new QListWidgetItem(QStringLiteral("  Bug 修复日志"));
-                header->setFlags(Qt::NoItemFlags);
-                m_toc->addItem(header);
-            }
-
-            auto* item = new QListWidgetItem(s.tocLabel);
-            item->setData(Qt::UserRole, s.anchor);
-            m_toc->addItem(item);
-
-            html += QStringLiteral("<a name=\"%1\"></a>%2<hr style='border: none; "
-                                   "border-top: 1px solid %3; margin: 18px 0;'>")
-                        .arg(s.anchor, s.html, ApplyStyle::helpDialogHtmlHrBorderColor(theme));
-        }
-
-        html += QStringLiteral("</body></html>");
-        m_browser->setHtml(html);
-        m_browser->document()->setDocumentMargin(0);
-    }
-};
-
-// ==================== Help / Bug dialogs ====================
-
 void MainWindow::openAppHelpDialog()
 {
-    HelpDialog dlg(QStringLiteral("help"), this);
-    dlg.exec();
+    HelpCenterDialog::openUsageGuide(this);
 }
 
 void MainWindow::openBugLogDialog()
 {
-    HelpDialog dlg(QStringLiteral("buglog"), this);
-    dlg.exec();
+    HelpCenterDialog::openBugLog(this);
 }
 
 void MainWindow::startBatchAddWindows(const QVector<WindowInfo>& list)

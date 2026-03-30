@@ -113,6 +113,7 @@ public:
     void addWindowToPlatform(const WindowInfo& info);
     void startBatchAddWindows(const QVector<WindowInfo>& list);
     QSet<quintptr> managedWindowHandles() const;
+    ApplyStyle::MainWindowTheme mainWindowTheme() const { return m_mainWindowTheme; }
 
 private:
     void switchToWindow(const QString& platformId);
