@@ -165,6 +165,24 @@ QString buildMainWindowStyleQss(const MainWindowStyleTokens& t)
         }
         QTreeView#platformList::item { background: transparent; }
 
+        QWidget#userProfileBar {
+            border-radius: 8px;
+            background: transparent;
+        }
+        QWidget#userProfileBar:hover {
+            background: %29;
+        }
+        QLabel#userProfileNick {
+            color: %27;
+            font-size: 13px;
+            font-weight: 600;
+            background: transparent;
+        }
+        QLabel#sidebarAvatar {
+            background: transparent;
+            border-radius: 8px;
+        }
+
         QWidget#topBar {
             background: %4;
             border-bottom: 1px solid %5;
@@ -660,8 +678,37 @@ QString ApplyStyle::loginWindowStyle()
 {
     return QStringLiteral(R"QSS(
         LoginWindow {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 #fddebd, stop:1 #abd8df);
+            background: transparent;
+        }
+        #loginTitleBar {
+            background-color: rgba(255, 255, 255, 0.82);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        }
+        #loginTitleBarLabel {
+            font-size: 13px;
+            font-weight: 600;
+            color: #1f1f1f;
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            padding-left: 12px;
+        }
+        #loginCloseBtn {
+            border: none;
+            border-top-right-radius: 14px;
+            border-bottom-left-radius: 4px;
+            min-width: 48px;
+            max-width: 48px;
+            min-height: 40px;
+            max-height: 40px;
+            padding: 0px;
+            margin: 0px;
+            background: transparent;
+        }
+        #loginCloseBtn:hover {
+            background-color: #e81123;
+        }
+        #loginAvatar {
+            border-radius: 16px;
+            background-color: transparent;
         }
         #loginCard {
             background-color: #FFFFFF;
@@ -1720,6 +1767,21 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             font-size: 10px;
             color: %35;
         }
+        QLabel#bubbleOutSenderTime {
+            font-size: 10px;
+            color: %41;
+            background: transparent;
+        }
+        QLabel#bubbleOutSenderNick {
+            font-size: 11px;
+            font-weight: 500;
+            color: %42;
+            background: transparent;
+        }
+        QLabel#bubbleOutAvatar {
+            background: transparent;
+            border-radius: 18px;
+        }
         QFrame#dateSeparatorLine {
             background: %36;
             border: none;
@@ -1779,6 +1841,42 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             font-size: 12px;
             color: %38;
         }
+        QLabel#sendTimelineTitle {
+            font-size: 12px;
+            font-weight: 600;
+            color: %38;
+        }
+        QPlainTextEdit#sendStatusTimeline {
+            background: %25;
+            border: 1px solid %26;
+            border-radius: 8px;
+            padding: 8px;
+            font-size: 12px;
+            color: %27;
+        }
+        QPlainTextEdit#sendStatusTimeline:focus {
+            border-color: %28;
+        }
+        QPushButton#sendTimelineClearBtn {
+            background: %6;
+            color: #ffffff;
+            border: 1px solid %6;
+            border-radius: 6px;
+            padding: 6px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            min-height: 28px;
+        }
+        QPushButton#sendTimelineClearBtn:hover {
+            background: %7;
+            border-color: %7;
+            color: #ffffff;
+        }
+        QPushButton#sendTimelineClearBtn:pressed {
+            background: %8;
+            border-color: %8;
+            color: #ffffff;
+        }
 
     )QSS")
         .arg(QLatin1String(t.pageBg))
@@ -1820,7 +1918,9 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
         .arg(QLatin1String(t.dateText))
         .arg(QLatin1String(t.rightText))
         .arg(QLatin1String(t.rightEmptyG1))
-        .arg(QLatin1String(t.rightEmptyG2));
+        .arg(QLatin1String(t.rightEmptyG2))
+        .arg(QLatin1String(t.bubbleMetaIn))
+        .arg(QLatin1String(t.chatHeaderText));
 }
 
 } // namespace
