@@ -7,6 +7,10 @@
 #include <QLineEdit>
 #include <QPushButton>
 
+class QEvent;
+class QPaintEvent;
+class QResizeEvent;
+
 class AuthManager;
 
 class LoginWindow : public QDialog
@@ -39,6 +43,15 @@ private:
     void showRegisterForm();
     void showError(const QString& msg);
     void updateWelcomeTitle();
+    void refreshLoginAvatarForUsernameField();
+    void updateRoundedWindowMask();
+    bool cycleLoginFieldFocusWithArrow(QLineEdit* current, int key);
+    bool cycleRegisterFieldFocusWithArrow(QLineEdit* current, int key);
+    void applyCtrlHToFocusedPasswordField(QLineEdit* field);
+
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
     AuthManager* m_auth = nullptr;
     QLineEdit* m_usernameEdit = nullptr;
@@ -57,6 +70,7 @@ private:
     QWidget* m_card = nullptr;
     QLabel* m_errorLabel = nullptr;
     QLabel* m_titleLabel = nullptr;
+    QLabel* m_avatarLabel = nullptr;
     QString m_loggedInUsername;
 };
 
