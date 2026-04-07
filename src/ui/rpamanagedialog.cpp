@@ -9,6 +9,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QShowEvent>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
@@ -105,6 +106,7 @@ void RpaManageDialog::setupUI()
 
     auto* bottom = new QHBoxLayout();
     bottom->setSpacing(10);
+    m_btnWechatCalibrate = new QPushButton(QStringLiteral("微信OCR校准"), this);
     m_btnStart = new QPushButton(QStringLiteral("启动"), this);
     m_btnStop = new QPushButton(QStringLiteral("停止"), this);
     m_btnClose = new QPushButton(QStringLiteral("关闭"), this);
@@ -112,6 +114,7 @@ void RpaManageDialog::setupUI()
     m_btnStart->setIconSize(iconSz);
     m_btnStop->setIconSize(iconSz);
     bottom->addStretch(1);
+    bottom->addWidget(m_btnWechatCalibrate);
     bottom->addWidget(m_btnStart);
     bottom->addWidget(m_btnStop);
     bottom->addWidget(m_btnClose);
@@ -119,6 +122,7 @@ void RpaManageDialog::setupUI()
 
     connect(btnAll, &QPushButton::clicked, this, &RpaManageDialog::onSelectAllClicked);
     connect(btnNone, &QPushButton::clicked, this, &RpaManageDialog::onDeselectAllClicked);
+    connect(m_btnWechatCalibrate, &QPushButton::clicked, this, &RpaManageDialog::onWechatCalibrateClicked);
     connect(m_btnStart, &QPushButton::clicked, this, &RpaManageDialog::onStartClicked);
     connect(m_btnStop, &QPushButton::clicked, this, &RpaManageDialog::onStopClicked);
     connect(m_btnClose, &QPushButton::clicked, this, &QDialog::reject);
@@ -205,6 +209,18 @@ void RpaManageDialog::onDeselectAllClicked()
 void RpaManageDialog::onCheckboxChanged()
 {
     updateButtonStates();
+}
+
+void RpaManageDialog::onWechatCalibrateClicked()
+{
+    MainWindow* main = m_main;
+    hide();
+    accept();
+    if (!main)
+        return;
+    QTimer::singleShot(0, main, [main]() {
+        main->startWechatRpaCalibrationStandalone();
+    });
 }
 
 void RpaManageDialog::onStartClicked()
