@@ -30,10 +30,12 @@ set(SOURCES
     src/data/userdao.cpp
     src/data/conversationdao.cpp
     src/data/messagedao.cpp
+    src/data/messagesendeventdao.cpp
     src/utils/logger.cpp
     src/utils/cryptoutil.cpp
     src/utils/applystyle.cpp
     src/utils/win32windowhelper.cpp
+    src/utils/swordcursor.cpp
     src/core/authmanager.cpp
     src/core/messagerouter.cpp
     src/core/conversationmanager.cpp
@@ -42,6 +44,7 @@ set(SOURCES
     src/services/platforms/wechatrp_adapter.cpp
     src/services/platforms/pddrp_adapter.cpp
     src/ui/loginwindow.cpp
+    src/ui/editprofiledialog.cpp
     src/ui/mainwindow.cpp
     src/ui/rpamanagedialog.cpp
     src/ui/rpa_console_window.cpp
@@ -55,10 +58,12 @@ set(HEADERS
     src/data/userdao.h
     src/data/conversationdao.h
     src/data/messagedao.h
+    src/data/messagesendeventdao.h
     src/utils/logger.h
     src/utils/cryptoutil.h
     src/utils/applystyle.h
     src/utils/win32windowhelper.h
+    src/utils/swordcursor.h
     src/core/types.h
     src/core/authmanager.h
     src/core/messagerouter.h
@@ -69,6 +74,7 @@ set(HEADERS
     src/services/platforms/wechatrp_adapter.h
     src/services/platforms/pddrp_adapter.h
     src/ui/loginwindow.h
+    src/ui/editprofiledialog.h
     src/ui/mainwindow.h
     src/ui/rpamanagedialog.h
     src/ui/rpa_console_window.h
