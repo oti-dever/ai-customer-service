@@ -4,6 +4,7 @@
 #include <QDialog>
 
 #include "../data/userdao.h"
+#include "../utils/applystyle.h"
 
 class QCheckBox;
 class QLabel;
@@ -15,7 +16,8 @@ class EditProfileDialog : public QDialog
 {
     Q_OBJECT
 public:
-    explicit EditProfileDialog(const UserRecord& user, QWidget* parent = nullptr);
+    explicit EditProfileDialog(const UserRecord& user, QWidget* parent = nullptr,
+                               ApplyStyle::MainWindowTheme theme = ApplyStyle::MainWindowTheme::Default);
 
 private slots:
     void onPickAvatar();

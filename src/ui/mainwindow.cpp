@@ -1874,7 +1874,7 @@ void MainWindow::onUserProfileBarClicked()
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("无法读取当前用户信息"));
         return;
     }
-    EditProfileDialog dlg(*u, this);
+    EditProfileDialog dlg(*u, this, mainWindowTheme());
     if (dlg.exec() == QDialog::Accepted) {
         refreshUserProfileBar();
         if (m_aggregateChatForm)

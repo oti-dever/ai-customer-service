@@ -1348,6 +1348,111 @@ QString ApplyStyle::addWindowDialogStyle()
     return addWindowDialogStyle(MainWindowTheme::Default);
 }
 
+static QString buildEditProfileDialogExtraQss(ApplyStyle::MainWindowTheme theme)
+{
+    QString avatarBorder;
+    QString avatarBg;
+    QString hintMuted;
+    QString hintFaint;
+    QString pteText;
+    QString pteBg;
+    QString pteBorder;
+    QString pteFocus;
+    QString pteSelBg;
+    QString pteSelFg;
+    switch (theme) {
+    case ApplyStyle::MainWindowTheme::Cool:
+        avatarBorder = QStringLiteral("#a8c9ef");
+        avatarBg = QStringLiteral("#eef6fc");
+        hintMuted = QStringLiteral("#475569");
+        hintFaint = QStringLiteral("#64748b");
+        pteText = QStringLiteral("#1e293b");
+        pteBg = QStringLiteral("#ffffff");
+        pteBorder = QStringLiteral("#c0d9f7");
+        pteFocus = QStringLiteral("#8eb4e0");
+        pteSelBg = QStringLiteral("#c0d9f7");
+        pteSelFg = QStringLiteral("#1e293b");
+        break;
+    case ApplyStyle::MainWindowTheme::Warm:
+        avatarBorder = QStringLiteral("#e5ddd4");
+        avatarBg = QStringLiteral("#faf5ed");
+        hintMuted = QStringLiteral("#6b6560");
+        hintFaint = QStringLiteral("#78716c");
+        pteText = QStringLiteral("#3d3429");
+        pteBg = QStringLiteral("#fffcf9");
+        pteBorder = QStringLiteral("#e5ddd4");
+        pteFocus = QStringLiteral("#b45309");
+        pteSelBg = QStringLiteral("#fef3c7");
+        pteSelFg = QStringLiteral("#3d3429");
+        break;
+    case ApplyStyle::MainWindowTheme::Default:
+    default:
+        avatarBorder = QStringLiteral("#d4d4d8");
+        avatarBg = QStringLiteral("#fafafa");
+        hintMuted = QStringLiteral("#52525b");
+        hintFaint = QStringLiteral("#71717a");
+        pteText = QStringLiteral("#18181b");
+        pteBg = QStringLiteral("#ffffff");
+        pteBorder = QStringLiteral("#d4d4d8");
+        pteFocus = QStringLiteral("#71717a");
+        pteSelBg = QStringLiteral("#d4d4d8");
+        pteSelFg = QStringLiteral("#18181b");
+        break;
+    }
+
+    return QStringLiteral(
+               R"QSS(
+        QLabel#editProfileAvatar {
+            border: 1px solid %1;
+            border-radius: 8px;
+            background-color: %2;
+        }
+        QLabel#editProfileHintMuted {
+            color: %3;
+            font-size: 12px;
+            background: transparent;
+        }
+        QLabel#editProfileHintFaint {
+            color: %4;
+            font-size: 11px;
+            background: transparent;
+        }
+        QDialog QPlainTextEdit#editProfileBio {
+            color: %5;
+            background-color: %6;
+            border: 1px solid %7;
+            border-radius: 8px;
+            padding: 8px 10px;
+            font-size: 13px;
+            selection-background-color: %8;
+            selection-color: %9;
+        }
+        QDialog QPlainTextEdit#editProfileBio:focus {
+            border-color: %10;
+        }
+    )QSS")
+        .arg(avatarBorder)
+        .arg(avatarBg)
+        .arg(hintMuted)
+        .arg(hintFaint)
+        .arg(pteText)
+        .arg(pteBg)
+        .arg(pteBorder)
+        .arg(pteSelBg)
+        .arg(pteSelFg)
+        .arg(pteFocus);
+}
+
+QString ApplyStyle::editProfileDialogStyle(MainWindowTheme theme)
+{
+    return addWindowDialogStyle(theme) + buildEditProfileDialogExtraQss(theme);
+}
+
+QString ApplyStyle::editProfileDialogStyle()
+{
+    return editProfileDialogStyle(MainWindowTheme::Default);
+}
+
 namespace {
 
 struct AggregateChatTokens {

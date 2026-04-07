@@ -1,6 +1,7 @@
 #include "editprofiledialog.h"
 
 #include "../data/userdao.h"
+#include "../utils/applystyle.h"
 #include "../utils/swordcursor.h"
 #include <QCheckBox>
 #include <QDir>
@@ -16,6 +17,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <QWidget>
 
 namespace {
 
@@ -39,30 +41,35 @@ bool loadImageFromData(const QByteArray& data, QImage* out, QString* err)
 
 } // namespace
 
-EditProfileDialog::EditProfileDialog(const UserRecord& user, QWidget* parent)
+EditProfileDialog::EditProfileDialog(const UserRecord& user, QWidget* parent,
+                                     ApplyStyle::MainWindowTheme theme)
     : QDialog(parent)
     , m_user(user)
 {
     setWindowTitle(QStringLiteral("编辑个人信息"));
+    setObjectName(QStringLiteral("editProfileDialog"));
     setModal(true);
     resize(420, 480);
+    setStyleSheet(ApplyStyle::editProfileDialogStyle(theme));
 
     auto* root = new QVBoxLayout(this);
     root->setSpacing(12);
     root->setContentsMargins(20, 20, 20, 20);
 
-    auto* avatarRow = new QHBoxLayout();
-    m_avatarPreview = new QLabel(this);
+    auto* avatarWrap = new QWidget(this);
+    auto* avatarCol = new QVBoxLayout(avatarWrap);
+    avatarCol->setContentsMargins(0, 0, 0, 0);
+    avatarCol->setSpacing(10);
+    m_avatarPreview = new QLabel(avatarWrap);
+    m_avatarPreview->setObjectName(QStringLiteral("editProfileAvatar"));
     m_avatarPreview->setFixedSize(kAvatarPreviewPx, kAvatarPreviewPx);
     m_avatarPreview->setAlignment(Qt::AlignCenter);
     m_avatarPreview->setScaledContents(true);
-    m_avatarPreview->setStyleSheet(QStringLiteral(
-        "QLabel { border: 1px solid #d9d9d9; border-radius: 8px; background: #fafafa; }"));
-    m_btnPickAvatar = new QPushButton(QStringLiteral("选择图片…"), this);
+    m_btnPickAvatar = new QPushButton(QStringLiteral("选择图片…"), avatarWrap);
     connect(m_btnPickAvatar, &QPushButton::clicked, this, &EditProfileDialog::onPickAvatar);
-    avatarRow->addWidget(m_avatarPreview);
-    avatarRow->addWidget(m_btnPickAvatar, 1, Qt::AlignVCenter);
-    root->addLayout(avatarRow);
+    avatarCol->addWidget(m_avatarPreview, 0, Qt::AlignHCenter);
+    avatarCol->addWidget(m_btnPickAvatar, 0, Qt::AlignHCenter);
+    root->addWidget(avatarWrap, 0, Qt::AlignHCenter);
 
     auto* form = new QFormLayout();
     m_loginLoginName = new QLabel(m_user.username, this);
@@ -76,6 +83,7 @@ EditProfileDialog::EditProfileDialog(const UserRecord& user, QWidget* parent)
     form->addRow(QStringLiteral("昵称"), m_nicknameEdit);
 
     m_bioEdit = new QPlainTextEdit(this);
+    m_bioEdit->setObjectName(QStringLiteral("editProfileBio"));
     m_bioEdit->setPlaceholderText(QStringLiteral("个性签名（可选，最多 200 字）"));
     m_bioEdit->setPlainText(m_user.bio);
     m_bioEdit->setTabChangesFocus(true);
@@ -99,15 +107,15 @@ EditProfileDialog::EditProfileDialog(const UserRecord& user, QWidget* parent)
     curRow->addStretch();
     root->addLayout(curRow);
     m_cursorPicHint = new QLabel(this);
+    m_cursorPicHint->setObjectName(QStringLiteral("editProfileHintMuted"));
     m_cursorPicHint->setWordWrap(true);
-    m_cursorPicHint->setStyleSheet(QStringLiteral("color: #666666; font-size: 12px;"));
     root->addWidget(m_cursorPicHint);
     {
         auto* cursorTip = new QLabel(
             QStringLiteral("提示：自定义光标请使用透明底 PNG/JPG。"),
             this);
+        cursorTip->setObjectName(QStringLiteral("editProfileHintFaint"));
         cursorTip->setWordWrap(true);
-        cursorTip->setStyleSheet(QStringLiteral("color: #888888; font-size: 11px;"));
         root->addWidget(cursorTip);
     }
     reloadCursorPreferencesUi();

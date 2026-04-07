@@ -52,6 +52,10 @@ public:
     static QString addWindowDialogStyle(MainWindowTheme theme);
     static QString addWindowDialogStyle();
 
+    /** 编辑个人信息：内核同 addWindowDialogStyle，另含头像框、签名框、次要说明色。 */
+    static QString editProfileDialogStyle(MainWindowTheme theme);
+    static QString editProfileDialogStyle();
+
     static PlatformTreeColors platformTreeColors(MainWindowTheme theme);
 
 private:
