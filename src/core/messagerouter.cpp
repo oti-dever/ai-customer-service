@@ -64,7 +64,10 @@ void MessageRouter::sendMessage(int conversationId, const QString& text)
                               text,
                               QStringLiteral("agent"),
                               QString(),  // platformMsgId 由 Python 侧补充
-                              10);        // sync_status = 10 (pending_send)
+                              10,         // sync_status = 10 (pending_send)
+                              QString(),  // errorReason
+                              QString(),  // senderName（自己发的消息为空）
+                              QString()); // originalTimestamp（自己发的消息为空）
 
     convDao.updateLastMessage(conversationId, text, now);
 
@@ -75,6 +78,7 @@ void MessageRouter::sendMessage(int conversationId, const QString& text)
         rec.direction = QStringLiteral("out");
         rec.content = text;
         rec.sender = QStringLiteral("agent");
+        rec.senderName = QString();
         rec.createdAt = now;
         rec.syncStatus = 10;
         emit messageSentOk(conversationId, rec);
@@ -104,7 +108,10 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
                               msg.content,
                               msg.sender,
                               msg.platformMsgId,
-                              1); // 正常消息
+                              1,  // 正常消息
+                              QString(),  // errorReason
+                              msg.senderName,
+                              msg.originalTimestamp);  // 原始时间戳
 
     ConversationDao convDao;
     convDao.updateLastMessage(convId, msg.content, now);
@@ -118,8 +125,10 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
         rec.direction = msg.direction;
         rec.content = msg.content;
         rec.sender = msg.sender;
+        rec.senderName = msg.senderName;
         rec.createdAt = now;
         rec.platformMsgId = msg.platformMsgId;
+        rec.originalTimestamp = msg.originalTimestamp;
         emit messageReceived(convId, rec);
     }
 
