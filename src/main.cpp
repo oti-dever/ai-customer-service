@@ -3,7 +3,9 @@
 #include "data/database.h"
 #include "core/conversationmanager.h"
 #include "utils/logger.h"
+#include "utils/swordcursor.h"
 #include <QApplication>
+#include <QCoreApplication>
 #include <QIcon>
 #include <QMessageBox>
 
@@ -13,6 +15,8 @@ int main(int argc, char* argv[])
     a.setApplicationName("AI客服");
     a.setOrganizationName("Demo");
     a.setWindowIcon(QIcon(QStringLiteral(":/app_icon.svg")));
+
+    SwordCursor::restore();
 
     qRegisterMetaType<PlatformMessage>("PlatformMessage");
     qRegisterMetaType<ConversationInfo>("ConversationInfo");
@@ -28,9 +32,12 @@ int main(int argc, char* argv[])
 
     ConversationManager::instance().initialize();
 
+    QObject::connect(&a, &QCoreApplication::aboutToQuit, [] { SwordCursor::restore(); });
+
     qInfo() << "加载登录界面...";
     LoginWindow login;
     if (login.exec() != QDialog::Accepted) {
+        SwordCursor::restore();
         Logger::shutdown();
         return 0;
     }
@@ -40,6 +47,7 @@ int main(int argc, char* argv[])
     qInfo() << "已进入AI客服主界面, 用户:" << login.loggedInUsername();
 
     int ret = a.exec();
+    SwordCursor::restore();
     Logger::shutdown();
     return ret;
 }
