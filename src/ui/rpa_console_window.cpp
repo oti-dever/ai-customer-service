@@ -7,6 +7,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QScrollBar>
 #include <QTextCursor>
 #include <QVBoxLayout>
@@ -44,6 +45,10 @@ void RpaConsoleWindow::setupUi()
     m_combo->addItem(QStringLiteral("千牛 PC"), QStringLiteral("qianniu"));
     m_combo->addItem(QStringLiteral("拼多多网页"), QStringLiteral("pdd"));
     row->addWidget(m_combo, 1);
+    auto* clearBtn = new QPushButton(QStringLiteral("清空"), this);
+    clearBtn->setToolTip(QStringLiteral("清空当前平台已缓存的控制台输出"));
+    clearBtn->setCursor(Qt::PointingHandCursor);
+    row->addWidget(clearBtn);
     root->addLayout(row);
 
     m_log = new QPlainTextEdit(this);
@@ -55,6 +60,7 @@ void RpaConsoleWindow::setupUi()
 
     connect(m_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &RpaConsoleWindow::onPlatformChanged);
+    connect(clearBtn, &QPushButton::clicked, this, &RpaConsoleWindow::onClearClicked);
 }
 
 QString RpaConsoleWindow::currentPlatformId() const
@@ -95,6 +101,17 @@ void RpaConsoleWindow::appendToView(const QString& text)
 
 void RpaConsoleWindow::onPlatformChanged(int)
 {
+    reloadCurrentLog();
+}
+
+void RpaConsoleWindow::onClearClicked()
+{
+    if (!m_main)
+        return;
+    const QString id = currentPlatformId();
+    if (id.isEmpty())
+        return;
+    m_main->clearRpaProcessLog(id);
     reloadCurrentLog();
 }
 

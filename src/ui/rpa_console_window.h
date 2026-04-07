@@ -19,6 +19,7 @@ public:
 private slots:
     void onPlatformChanged(int index);
     void onOutputAppended(const QString& platformId, const QString& text);
+    void onClearClicked();
 
 private:
     void setupUi();
