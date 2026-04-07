@@ -1,11 +1,14 @@
 #include "mainwindow.h"
 #include "addwindowdialog.h"
 #include "aggregatechatform.h"
+#include "editprofiledialog.h"
 #include "foldarrowcombobox.h"
 #include "rpamanagedialog.h"
 #include "helpcenterdialog.h"
 #include "rpa_console_window.h"
+#include "../data/userdao.h"
 #include "../utils/applystyle.h"
+#include "../utils/swordcursor.h"
 #include "../utils/win32windowhelper.h"
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
@@ -31,9 +34,12 @@
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
+#include <QProgressDialog>
 #include <QRandomGenerator>
 #include <QScrollBar>
+#include <QSizePolicy>
 #include <QScreen>
 #include <QSettings>
 #include <QStatusBar>
@@ -66,6 +72,63 @@
 #include <QComboBox>
 #include <QGroupBox>
 #include <QLabel>
+#include <QImage>
+#include <QSvgRenderer>
+
+namespace {
+
+class ProfileBarWidget final : public QWidget
+{
+public:
+    explicit ProfileBarWidget(std::function<void()> onTap, QWidget* parent = nullptr)
+        : QWidget(parent)
+        , m_onTap(std::move(onTap))
+    {
+        setCursor(Qt::PointingHandCursor);
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent* e) override
+    {
+        if (e->button() == Qt::LeftButton && m_onTap)
+            m_onTap();
+        QWidget::mousePressEvent(e);
+    }
+
+private:
+    std::function<void()> m_onTap;
+};
+
+} // namespace
+
+static QPixmap roundedSidebarAvatarPixmap(const QPixmap& source, int logicalSide, qreal dpr, int cornerRadiusLogical)
+{
+    if (source.isNull())
+        return source;
+    const int s = qMax(1, qRound(logicalSide * dpr));
+    const int r = qBound(1, qRound(cornerRadiusLogical * dpr), s / 2);
+    QPixmap square(s, s);
+    square.fill(Qt::transparent);
+    {
+        QPainter pt(&square);
+        pt.setRenderHint(QPainter::Antialiasing);
+        QPixmap fill = source.scaled(s, s, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        const int ox = qMax(0, (fill.width() - s) / 2);
+        const int oy = qMax(0, (fill.height() - s) / 2);
+        pt.drawPixmap(0, 0, fill, ox, oy, s, s);
+    }
+    QPixmap out(s, s);
+    out.fill(Qt::transparent);
+    QPainter p(&out);
+    p.setRenderHint(QPainter::Antialiasing);
+    QPainterPath path;
+    path.addRoundedRect(0, 0, s, s, qreal(r), qreal(r));
+    p.setClipPath(path);
+    p.drawPixmap(0, 0, square);
+    p.end();
+    out.setDevicePixelRatio(dpr);
+    return out;
+}
 
 /// 自动扫描强度（与 QSettings quickLaunch/scanMode 对应：0..2）
 enum class QuickLaunchScanMode : int {
@@ -1143,8 +1206,15 @@ protected:
 private:
     void finish(bool ok)
     {
+        const QRect selection = m_selection.normalized();
+        auto callback = m_onFinished;
+        m_onFinished = {};
+        hide();
+        close();
         if (m_onFinished) {
-            m_onFinished(ok, m_selection.normalized());
+            m_onFinished(ok, selection);
+        } else if (callback) {
+            callback(ok, selection);
         }
         deleteLater();
     }
@@ -1223,6 +1293,90 @@ QString formatRect(const QRect& r)
 {
     return QStringLiteral("x=%1 y=%2 w=%3 h=%4")
         .arg(r.x()).arg(r.y()).arg(r.width()).arg(r.height());
+}
+
+struct WechatCalibrationRegionSpec {
+    QString id;
+    QString label;
+    QString helpTip;
+    int minWidth = 8;
+    int minHeight = 8;
+};
+
+const QVector<WechatCalibrationRegionSpec>& wechatCalibrationRegionSpecs()
+{
+    static const QVector<WechatCalibrationRegionSpec> specs = {
+        {
+            QStringLiteral("contact_header_region"),
+            QStringLiteral("聊天标题区"),
+            QStringLiteral("微信 OCR 校准：框选聊天区域上方的会话标题（如“邬鸿涛”），Esc 取消，回车确认"),
+            24,
+            12,
+        },
+        {
+            QStringLiteral("chat_region"),
+            QStringLiteral("聊天区域"),
+            QStringLiteral("微信 OCR 校准：框选中间聊天气泡滚动区，Esc 取消，回车确认"),
+            32,
+            32,
+        },
+        {
+            QStringLiteral("input_box"),
+            QStringLiteral("聊天输入框"),
+            QStringLiteral("微信 OCR 校准：框选底部输入栏区域（用于发送/回执 OCR 与点击位置），Esc 取消，回车确认"),
+            80,
+            24,
+        },
+        {
+            QStringLiteral("search_box"),
+            QStringLiteral("搜索框"),
+            QStringLiteral("微信 OCR 校准：框选左上搜索框完整区域，Esc 取消，回车确认"),
+            32,
+            16,
+        },
+        {
+            QStringLiteral("search_result_region"),
+            QStringLiteral("搜索结果区域"),
+            QStringLiteral("微信 OCR 校准：框选搜索结果列表区域（包含联系人/群聊候选项），Esc 取消，回车确认"),
+            32,
+            16,
+        },
+        {
+            QStringLiteral("unread_scan_band"),
+            QStringLiteral("未读扫描带"),
+            QStringLiteral("微信校准：框选左侧会话列表中红点所在的竖向扫描带，Esc 取消，回车确认"),
+            8,
+            24,
+        },
+        {
+            QStringLiteral("conversation_list_region"),
+            QStringLiteral("会话列表区域"),
+            QStringLiteral("微信 OCR 校准：框选左侧会话列表区域，Esc 取消，回车确认"),
+            48,
+            80,
+        },
+    };
+    return specs;
+}
+
+const WechatCalibrationRegionSpec* wechatCalibrationSpecById(const QString& id)
+{
+    const auto& specs = wechatCalibrationRegionSpecs();
+    for (const auto& spec : specs) {
+        if (spec.id == id)
+            return &spec;
+    }
+    return nullptr;
+}
+
+const WechatCalibrationRegionSpec* wechatCalibrationSpecByLabel(const QString& label)
+{
+    const auto& specs = wechatCalibrationRegionSpecs();
+    for (const auto& spec : specs) {
+        if (spec.label == label)
+            return &spec;
+    }
+    return nullptr;
 }
 
 /// 右键 OCR 校准菜单：按进程 exe / 窗口标题判断，不用用户填写的「平台名」
@@ -1493,11 +1647,24 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
     : QMainWindow(parent)
     , m_username(username)
 {
+    {
+        UserDao dao;
+        if (auto u = dao.findByUsername(username))
+            m_userId = u->id;
+    }
+
     setWindowTitle(QString("AI客服 - %1").arg(username));
     setWindowIcon(resourceIcon(QStringLiteral(":/app_icon.svg"),
                                qApp->style()->standardIcon(QStyle::SP_DesktopIcon)));
     setMinimumSize(1100, 680);
     resize(1440, 840);
+
+    {
+        QSettings pinSettings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+        m_alwaysOnTop = pinSettings.value(QStringLiteral("mainWindow/alwaysOnTop"), false).toBool();
+        if (m_alwaysOnTop)
+            setWindowFlags(windowFlags() | Qt::WindowStaysOnTopHint);
+    }
 
     auto* root = new QWidget(this);
     root->setObjectName("root");
@@ -1524,6 +1691,8 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
             this, &MainWindow::checkManagedWindowsState);
     m_windowStateTimer->start();
     showSystemReadyPage();
+    refreshUserProfileBar();
+    SwordCursor::applyIfEnabled();
 }
 
 MainWindow::~MainWindow()
@@ -1542,6 +1711,26 @@ QWidget* MainWindow::buildLeftSidebar()
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(6);
     layout->setAlignment(Qt::AlignTop);
+
+    m_userProfileBar = new ProfileBarWidget([this] { onUserProfileBarClicked(); }, left);
+    m_userProfileBar->setObjectName(QStringLiteral("userProfileBar"));
+    m_userProfileBar->setFixedHeight(56);
+    m_userProfileBar->setToolTip(QStringLiteral("查看并编辑个人信息"));
+    auto* profileLay = new QHBoxLayout(m_userProfileBar);
+    profileLay->setContentsMargins(6, 4, 6, 4);
+    profileLay->setSpacing(10);
+    m_userProfileAvatar = new QLabel(m_userProfileBar);
+    m_userProfileAvatar->setObjectName(QStringLiteral("sidebarAvatar"));
+    m_userProfileAvatar->setFixedSize(40, 40);
+    m_userProfileAvatar->setAlignment(Qt::AlignCenter);
+    m_userProfileAvatar->setScaledContents(false);
+    m_userProfileNick = new QLabel(m_userProfileBar);
+    m_userProfileNick->setObjectName(QStringLiteral("userProfileNick"));
+    m_userProfileNick->setWordWrap(false);
+    m_userProfileNick->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    profileLay->addWidget(m_userProfileAvatar, 0, Qt::AlignVCenter);
+    profileLay->addWidget(m_userProfileNick, 1, Qt::AlignVCenter);
+    layout->addWidget(m_userProfileBar);
 
     m_platformTreeModel = new QStandardItemModel(this);
 
@@ -1636,6 +1825,64 @@ QWidget* MainWindow::buildLeftSidebar()
     return left;
 }
 
+void MainWindow::refreshUserProfileBar()
+{
+    if (!m_userProfileAvatar || !m_userProfileNick)
+        return;
+    UserDao dao;
+    auto u = dao.findByUsername(m_username);
+    if (!u) {
+        m_userProfileNick->setText(m_username);
+        m_userId = 0;
+        return;
+    }
+    m_userId = u->id;
+    const QString shown = u->displayName.isEmpty() ? u->username : u->displayName;
+    m_userProfileNick->setText(shown);
+
+    const int side = 40;
+    const qreal dpr = devicePixelRatioF();
+    QPixmap pm;
+    if (!u->avatarPath.isEmpty()) {
+        const QString abs = UserDao::absolutePathFromProjectRelative(u->avatarPath);
+        if (QFile::exists(abs)) {
+            QImage img(abs);
+            if (!img.isNull()) {
+                pm = QPixmap::fromImage(
+                    img.scaled(QSize(side, side) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                pm.setDevicePixelRatio(dpr);
+            }
+        }
+    }
+    if (pm.isNull()) {
+        QPixmap canvas(QSize(side, side) * dpr);
+        canvas.setDevicePixelRatio(dpr);
+        canvas.fill(Qt::transparent);
+        QSvgRenderer renderer(QStringLiteral(":/default_avatar_icon.svg"));
+        QPainter painter(&canvas);
+        renderer.render(&painter, QRectF(0, 0, canvas.width(), canvas.height()));
+        pm = canvas;
+    }
+    pm = roundedSidebarAvatarPixmap(pm, side, dpr, 8);
+    m_userProfileAvatar->setPixmap(pm);
+}
+
+void MainWindow::onUserProfileBarClicked()
+{
+    UserDao dao;
+    auto u = dao.findByUsername(m_username);
+    if (!u) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("无法读取当前用户信息"));
+        return;
+    }
+    EditProfileDialog dlg(*u, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        refreshUserProfileBar();
+        if (m_aggregateChatForm)
+            m_aggregateChatForm->refreshLocalUserProfile();
+    }
+}
+
 // ==================== Top Bar ====================
 
 QWidget* MainWindow::buildTopBar()
@@ -1688,6 +1935,14 @@ QWidget* MainWindow::buildTopBar()
     layout->addStretch(1);
     layout->addWidget(bugBtn);
     layout->addWidget(helpBtn);
+
+    m_btnPinTop = makeTopIconButton(bar, QIcon(), QStringLiteral("置顶"));
+    m_btnPinTop->setObjectName(QStringLiteral("pinTopButton"));
+    updatePinTopButtonUi();
+    layout->addWidget(m_btnPinTop);
+    connect(m_btnPinTop, &QToolButton::clicked, this, [this] {
+        applyAlwaysOnTop(!m_alwaysOnTop);
+    });
 
     connect(m_btnAdd, &QToolButton::clicked, this, &MainWindow::openAddWindowDialog);
     connect(m_btnRefresh, &QToolButton::clicked, this, &MainWindow::showSystemReadyPage);
@@ -2017,6 +2272,13 @@ QString MainWindow::rpaProcessLog(const QString& platformId) const
     return m_rpaProcessLogs.value(platformId);
 }
 
+void MainWindow::clearRpaProcessLog(const QString& platformId)
+{
+    if (platformId.isEmpty())
+        return;
+    m_rpaProcessLogs.remove(platformId);
+}
+
 void MainWindow::appendRpaProcessLog(const QString& platformId, const QString& text)
 {
     if (text.isEmpty())
@@ -2213,6 +2475,36 @@ void MainWindow::updateOneClickAggregateTooltip()
         m_btnOneClickAggregate->setToolTip(
             QStringLiteral("自动聚合可识别窗口（客服平台/微信/浏览器及普通应用），在线窗口上限为 %1（右键可修改）").arg(limit));
     }
+}
+
+void MainWindow::updatePinTopButtonUi()
+{
+    if (!m_btnPinTop)
+        return;
+    if (m_alwaysOnTop) {
+        m_btnPinTop->setIcon(resourceIcon(QStringLiteral(":/after_pinning.svg")));
+        m_btnPinTop->setToolTip(QStringLiteral("取消置顶"));
+    } else {
+        m_btnPinTop->setIcon(resourceIcon(QStringLiteral(":/before_pinning.svg")));
+        m_btnPinTop->setToolTip(QStringLiteral("置顶"));
+    }
+}
+
+void MainWindow::applyAlwaysOnTop(bool on)
+{
+    if (m_alwaysOnTop == on)
+        return;
+    m_alwaysOnTop = on;
+    Qt::WindowFlags f = windowFlags();
+    if (on)
+        f |= Qt::WindowStaysOnTopHint;
+    else
+        f &= ~Qt::WindowStaysOnTopHint;
+    setWindowFlags(f);
+    show();
+    QSettings pinSettings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    pinSettings.setValue(QStringLiteral("mainWindow/alwaysOnTop"), m_alwaysOnTop);
+    updatePinTopButtonUi();
 }
 
 void MainWindow::startOneClickAggregate()
@@ -3655,141 +3947,490 @@ void MainWindow::startWechatRpaCalibration(const QString& platformId)
     if (!m_managedWindows.contains(platformId))
         return;
 
-    auto& entry = m_managedWindows[platformId];
+    const auto& entry = m_managedWindows[platformId];
     if (!Win32WindowHelper::isWindowValid(entry.handle)) {
         qWarning() << "[MainWindow] 微信RPA校准失败：窗口无效";
         return;
     }
+    startWechatRpaCalibrationByHwnd(entry.handle);
+}
 
-    // Ensure we are showing the correct page so user can see selection area
-    switchToWindow(platformId);
+void MainWindow::startWechatRpaCalibrationStandalone()
+{
+    const quintptr hwnd = findWechatCalibrationWindow();
+    if (!Win32WindowHelper::isWindowValid(hwnd)) {
+        QMessageBox::warning(this,
+                             QStringLiteral("微信 OCR 校准"),
+                             QStringLiteral("未找到可用的微信主窗口。\n请先打开微信并确保窗口可见、未最小化。"));
+        return;
+    }
+    startWechatRpaCalibrationByHwnd(hwnd);
+}
 
-    // Compute the same target rect used by float-follow so we can place overlay above it.
-    QPoint logicalTopLeft = m_centerStack->mapToGlobal(QPoint(0, 0));
-    QSize logicalSize = m_centerStack->size();
-    QScreen* screen = m_centerStack->screen();
-    if (!screen && windowHandle())
-        screen = windowHandle()->screen();
-    const qreal scale = screen ? screen->devicePixelRatio() : 1.0;
+void MainWindow::startWechatRpaCalibrationByHwnd(quintptr hwnd)
+{
+    if (!Win32WindowHelper::isWindowValid(hwnd)) {
+        QMessageBox::warning(this,
+                             QStringLiteral("微信 OCR 校准"),
+                             QStringLiteral("微信窗口无效，请重新打开微信后再试。"));
+        return;
+    }
 
-    const QRect targetRectPx(qRound(logicalTopLeft.x() * scale),
-                             qRound(logicalTopLeft.y() * scale),
-                             qRound(logicalSize.width() * scale),
-                             qRound(logicalSize.height() * scale));
-    const QRect targetRectLogical(logicalTopLeft, logicalSize);
+    QStringList labels;
+    const auto& specs = wechatCalibrationRegionSpecs();
+    for (const auto& spec : specs)
+        labels.append(spec.label);
 
-    // Top-level overlay window stays above external float window.
+    bool ok = false;
+    const QString choice = QInputDialog::getItem(
+        this,
+        QStringLiteral("微信 OCR 校准"),
+        QStringLiteral("请选择要校准的区域："),
+        labels,
+        0,
+        false,
+        &ok);
+    if (!ok || choice.isEmpty())
+        return;
+
+    const WechatCalibrationRegionSpec* spec = wechatCalibrationSpecByLabel(choice);
+    if (!spec) {
+        QMessageBox::warning(this,
+                             QStringLiteral("微信 OCR 校准"),
+                             QStringLiteral("未知的微信校准区域，请重试。"));
+        return;
+    }
+
+    const QRect wr = Win32WindowHelper::windowRect(hwnd);
+    if (!wr.isValid()) {
+        QMessageBox::warning(this,
+                             QStringLiteral("微信 OCR 校准"),
+                             QStringLiteral("无法读取微信窗口位置，请重试。"));
+        return;
+    }
+    Win32WindowHelper::showWindowAt(hwnd, wr.x(), wr.y(), wr.width(), wr.height(), true);
+
+    QScreen* baseScreen = QGuiApplication::screenAt(wr.center());
+    if (!baseScreen)
+        baseScreen = QGuiApplication::primaryScreen();
+    const QRect screenGeom = baseScreen ? baseScreen->geometry() : QRect();
+    if (!screenGeom.isValid()) {
+        QMessageBox::warning(this,
+                             QStringLiteral("微信 OCR 校准"),
+                             QStringLiteral("无法确定微信所在屏幕，请重试。"));
+        return;
+    }
+
     auto* overlay = new RpaRegionCalibrationOverlay(nullptr);
-    overlay->setGeometry(targetRectLogical);
+    overlay->setAttribute(Qt::WA_NativeWindow, true);
+    overlay->setHelpTip(spec->helpTip);
+    overlay->setDimColor(QColor(24, 26, 32, 72));
+    overlay->setGeometry(screenGeom);
     overlay->show();
     overlay->raise();
     overlay->activateWindow();
     overlay->setFocus();
 
-    qInfo() << "[MainWindow] 启动微信RPA校准：请框选聊天气泡滚动区，回车确认，Esc取消"
-            << "platformId=" << platformId
-            << "handle=0x" << QString::number(static_cast<qulonglong>(entry.handle), 16)
-            << "scale=" << scale
-            << "targetRectPx(" << formatRect(targetRectPx) << ")"
-            << "targetRectLogical(" << formatRect(QRect(QPoint(0, 0), logicalSize)) << ")";
+    qInfo() << "[MainWindow] 微信 OCR 校准开始 handle=0x"
+            << QString::number(static_cast<qulonglong>(hwnd), 16)
+            << "region=" << spec->id
+            << "screenGeom(" << formatRect(screenGeom) << ")";
 
-    overlay->setOnFinished([this, platformId](bool ok, const QRect& selectionLogical) {
-        if (!ok) {
-            qInfo() << "[MainWindow] 微信RPA校准已取消";
+    overlay->setOnFinished([this, hwnd, spec, overlay](bool ok2, QRect sel) {
+        if (!ok2) {
+            qInfo() << "[MainWindow] 微信 OCR 校准已取消 region=" << spec->id;
             return;
         }
-        if (!m_managedWindows.contains(platformId)) {
-            qWarning() << "[MainWindow] 微信RPA校准失败：平台已移除";
-            return;
-        }
-
-        const auto& entry2 = m_managedWindows[platformId];
-        if (!Win32WindowHelper::isWindowValid(entry2.handle)) {
-            qWarning() << "[MainWindow] 微信RPA校准失败：窗口无效";
+        if (!Win32WindowHelper::isWindowValid(hwnd)) {
+            qWarning() << "[MainWindow] 微信 OCR 校准失败：窗口已无效";
             return;
         }
 
-        // Convert logical selection (relative to m_centerStack) -> window-relative pixels
-        QScreen* screen = m_centerStack->screen();
-        if (!screen && windowHandle())
-            screen = windowHandle()->screen();
-        const qreal scale = screen ? screen->devicePixelRatio() : 1.0;
+        QScreen* sc = overlay->screen();
+        const qreal dpr = sc ? sc->devicePixelRatio() : 1.0;
+        const QRect mapped = Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(
+            overlay->winId(), hwnd, sel, dpr, overlay->size());
+        if (mapped.width() < spec->minWidth || mapped.height() < spec->minHeight) {
+            qWarning() << "[MainWindow] 微信 OCR 校准映射失败 region=" << spec->id
+                       << "sel=" << formatRect(sel)
+                       << "mapped=" << formatRect(mapped);
+            QMessageBox::warning(
+                this,
+                QStringLiteral("微信 OCR 校准"),
+                QStringLiteral("选区映射失败或过小，请重试。"));
+            return;
+        }
 
-        const QRect chatRectInWindowPx(qRound(selectionLogical.x() * scale),
-                                       qRound(selectionLogical.y() * scale),
-                                       qRound(selectionLogical.width() * scale),
-                                       qRound(selectionLogical.height() * scale));
+        const bool saved = mergeWriteWechatRpaConfig(hwnd, spec->id, mapped);
+        qInfo() << "[MainWindow] 微信 OCR 校准结果 region=" << spec->id
+                << "mapped(" << formatRect(mapped) << ")"
+                << "saved=" << saved;
+        overlay->hide();
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        statusBar()->showMessage(
+            saved
+                ? QStringLiteral("已写入 python/rpa/config/wechat_config.json：%1").arg(spec->label)
+                : QStringLiteral("微信 OCR 配置写入失败，请查看日志"),
+            5000);
+        if (!saved)
+            return;
+        if (spec->id == QLatin1String("unread_scan_band")) {
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QProgressDialog bandPreviewProgress(
+                QStringLiteral("正在生成未读扫描带预览，请等待..."),
+                QString(),
+                0,
+                0,
+                this);
+            bandPreviewProgress.setWindowTitle(QStringLiteral("微信未读扫描带"));
+            bandPreviewProgress.setCancelButton(nullptr);
+            bandPreviewProgress.setWindowModality(Qt::ApplicationModal);
+            bandPreviewProgress.setMinimumDuration(0);
+            bandPreviewProgress.setAutoClose(false);
+            bandPreviewProgress.setAutoReset(false);
+            bandPreviewProgress.show();
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
-        const QSize windowSizePx = entry2.lastDisplayGeometry.isValid()
-                                       ? entry2.lastDisplayGeometry.size()
-                                       : Win32WindowHelper::windowRect(entry2.handle).size();
+            QProcess proc;
+            proc.setWorkingDirectory(QStringLiteral(PROJECT_ROOT_DIR));
+            proc.setProcessChannelMode(QProcess::MergedChannels);
+            QStringList bandPreviewArgs;
+            bandPreviewArgs << QStringLiteral("python/rpa/preview_wechat_unread_band.py");
+            proc.start(QStringLiteral("python"), bandPreviewArgs);
 
-        const bool saved = writeWechatRpaConfigRelativeToWindow(entry2.handle,
-                                                                chatRectInWindowPx,
-                                                                windowSizePx,
-                                                                QStringLiteral("demo_wechat_conv_1"),
-                                                                QStringLiteral("演示微信联系人"));
+            if (!proc.waitForStarted(3000)) {
+                bandPreviewProgress.close();
+                QApplication::restoreOverrideCursor();
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("微信未读扫描带"),
+                    QStringLiteral("已保存未读扫描带校准，但无法启动预览脚本。\n请确认命令行中的 python 可用。"));
+                return;
+            }
+            if (!proc.waitForFinished(30000)) {
+                proc.kill();
+                proc.waitForFinished(1000);
+                bandPreviewProgress.close();
+                QApplication::restoreOverrideCursor();
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("微信未读扫描带"),
+                    QStringLiteral("已保存未读扫描带校准，但预览生成超时。"));
+                return;
+            }
+            bandPreviewProgress.close();
+            QApplication::restoreOverrideCursor();
 
-        qInfo() << "[MainWindow] 微信RPA校准结果:"
-                << "saved=" << saved
-                << "scale=" << scale
-                << "windowSizePx=" << windowSizePx
-                << "chatRectInWindowPx(" << formatRect(chatRectInWindowPx) << ")";
+            const QString output = QString::fromUtf8(proc.readAllStandardOutput());
+            const QString prefix = QStringLiteral("UNREAD_BAND_PREVIEW_JSON=");
+            const int pos = output.lastIndexOf(prefix);
+            if (pos < 0) {
+                QMessageBox::information(
+                    this,
+                    QStringLiteral("微信未读扫描带"),
+                    QStringLiteral(
+                        "已保存未读扫描带校准。\n"
+                        "后续运行 Reader 时，会按新的扫描带检测红点，并在 python/rpa/_debug/wechat "
+                        "中输出 unread 调试截图。"));
+                return;
+            }
 
-        statusBar()->showMessage(saved
-                                     ? QStringLiteral("微信RPA校准已保存（python/rpa/wechat_config.json）")
-                                     : QStringLiteral("微信RPA校准保存失败，请查看日志"),
-                                 4000);
+            QJsonParseError err{};
+            const QByteArray jsonBytes = output.mid(pos + prefix.size()).trimmed().toUtf8();
+            const QJsonDocument doc = QJsonDocument::fromJson(jsonBytes, &err);
+            if (!doc.isObject()) {
+                QMessageBox::information(
+                    this,
+                    QStringLiteral("微信未读扫描带"),
+                    QStringLiteral(
+                        "已保存未读扫描带校准。\n"
+                        "但未读扫描带预览解析失败：%1").arg(err.errorString()));
+                return;
+            }
+
+            const QJsonObject preview = doc.object();
+            const bool previewOk = preview.value(QStringLiteral("ok")).toBool();
+            const QString listPath = preview.value(QStringLiteral("list_image_path")).toString();
+            const QString bandPath = preview.value(QStringLiteral("band_image_path")).toString();
+            const QString overlayHint = preview.value(QStringLiteral("overlay_hint")).toString();
+            const QString errorText = preview.value(QStringLiteral("error")).toString();
+            const QString msg = previewOk
+                ? QStringLiteral(
+                      "已保存未读扫描带校准。\n\n"
+                      "扫描带：%1\n"
+                      "会话列表截图：%2\n"
+                      "扫描带截图：%3\n\n"
+                      "后续运行 Reader 时，还会在 python/rpa/_debug/wechat 中继续输出 unread 调试截图。")
+                      .arg(overlayHint.isEmpty() ? QStringLiteral("（未提供）") : overlayHint,
+                           listPath.isEmpty() ? QStringLiteral("（未保存）") : listPath,
+                           bandPath.isEmpty() ? QStringLiteral("（未保存）") : bandPath)
+                : QStringLiteral(
+                      "已保存未读扫描带校准，但即时预览失败：%1").arg(
+                          errorText.isEmpty() ? QStringLiteral("未知错误") : errorText);
+            QMessageBox::information(this, QStringLiteral("微信未读扫描带"), msg);
+            return;
+        }
+
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        QProgressDialog previewProgress(
+            QStringLiteral("正在进行即时 OCR 预览验证，请等待...\n首次加载 OCR 或窗口截图可能需要几秒。"),
+            QString(),
+            0,
+            0,
+            this);
+        previewProgress.setWindowTitle(QStringLiteral("微信 OCR 预览"));
+        previewProgress.setCancelButton(nullptr);
+        previewProgress.setWindowModality(Qt::ApplicationModal);
+        previewProgress.setMinimumDuration(0);
+        previewProgress.setAutoClose(false);
+        previewProgress.setAutoReset(false);
+        previewProgress.show();
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+        QProcess proc;
+        proc.setWorkingDirectory(QStringLiteral(PROJECT_ROOT_DIR));
+        proc.setProcessChannelMode(QProcess::MergedChannels);
+        QStringList previewArgs;
+        previewArgs << QStringLiteral("python/rpa/preview_wechat_region_ocr.py") << spec->id;
+        proc.start(QStringLiteral("python"), previewArgs);
+        if (!proc.waitForStarted(3000)) {
+            previewProgress.close();
+            QApplication::restoreOverrideCursor();
+            QMessageBox::warning(
+                this,
+                QStringLiteral("微信 OCR 预览"),
+                QStringLiteral("已保存校准，但无法启动 Python 进行 OCR 预览。\n请确认命令行中的 python 可用。"));
+            return;
+        }
+        if (!proc.waitForFinished(90000)) {
+            proc.kill();
+            proc.waitForFinished(1000);
+            previewProgress.close();
+            QApplication::restoreOverrideCursor();
+            QMessageBox::warning(
+                this,
+                QStringLiteral("微信 OCR 预览"),
+                QStringLiteral("已保存校准，但 OCR 预览超时。\n可稍后查看 python/rpa/_debug/wechat 中的截图。"));
+            return;
+        }
+        previewProgress.close();
+        QApplication::restoreOverrideCursor();
+
+        const QString output = QString::fromUtf8(proc.readAllStandardOutput());
+        const QString prefix = QStringLiteral("OCR_PREVIEW_JSON=");
+        const int pos = output.lastIndexOf(prefix);
+        if (pos < 0) {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("微信 OCR 预览"),
+                QStringLiteral("已保存校准，但未解析到 OCR 预览结果。\n输出如下：\n%1")
+                    .arg(output.trimmed().left(800)));
+            return;
+        }
+
+        QJsonParseError err{};
+        const QByteArray jsonBytes = output.mid(pos + prefix.size()).trimmed().toUtf8();
+        const QJsonDocument doc = QJsonDocument::fromJson(jsonBytes, &err);
+        if (!doc.isObject()) {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("微信 OCR 预览"),
+                QStringLiteral("已保存校准，但 OCR 预览结果解析失败：%1").arg(err.errorString()));
+            return;
+        }
+
+        const QJsonObject preview = doc.object();
+        const bool previewOk = preview.value(QStringLiteral("ok")).toBool();
+        const QString previewText = preview.value(QStringLiteral("text")).toString().trimmed();
+        const QString imagePath = preview.value(QStringLiteral("image_path")).toString().trimmed();
+        const QString errorText = preview.value(QStringLiteral("error")).toString().trimmed();
+        const QString msg = previewOk
+            ? QStringLiteral("区域：%1\nOCR 预览：%2\n截图：%3\n\n说明：OCR 内容仅用于快速验证区域是否命中，可能出现乱码或误识别。")
+                  .arg(spec->label,
+                       previewText.isEmpty() ? QStringLiteral("（未识别到文本）") : previewText,
+                       imagePath.isEmpty() ? QStringLiteral("（未保存）") : imagePath)
+            : QStringLiteral("区域：%1\nOCR 预览失败：%2\n截图：%3")
+                  .arg(spec->label,
+                       errorText.isEmpty() ? QStringLiteral("未知错误") : errorText,
+                       imagePath.isEmpty() ? QStringLiteral("（未保存）") : imagePath);
+        QMessageBox::information(this, QStringLiteral("微信 OCR 预览"), msg);
     });
 }
 
-bool MainWindow::writeWechatRpaConfigRelativeToWindow(quintptr hwnd,
-                                                      const QRect& chatRectInWindowPx,
-                                                      const QSize& windowSizePx,
-                                                      const QString& platformConversationId,
-                                                      const QString& customerName) const
+quintptr MainWindow::findWechatCalibrationWindow() const
 {
-    const QString path = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python/rpa/wechat_config.json");
+    quintptr bestHandle = 0;
+    int bestArea = 0;
+
+    for (auto it = m_managedWindows.constBegin(); it != m_managedWindows.constEnd(); ++it) {
+        const auto& entry = it.value();
+        if (!Win32WindowHelper::isWindowValid(entry.handle))
+            continue;
+        WindowInfo info;
+        info.platformName = entry.platformName;
+        info.processName = Win32WindowHelper::executableBaseNameForWindow(entry.handle);
+        if (!isWechatWindowInfo(info))
+            continue;
+        const QRect wr = Win32WindowHelper::windowRect(entry.handle);
+        const int area = wr.width() * wr.height();
+        if (area > bestArea) {
+            bestArea = area;
+            bestHandle = entry.handle;
+        }
+    }
+
+    if (bestHandle)
+        return bestHandle;
+
+    const QVector<WindowInfo> windows = Win32WindowHelper::enumTopLevelWindows();
+    for (const auto& info : windows) {
+        if (!isWechatWindowInfo(info))
+            continue;
+        const QRect wr = Win32WindowHelper::windowRect(info.handle);
+        const int area = wr.width() * wr.height();
+        if (area > bestArea) {
+            bestArea = area;
+            bestHandle = info.handle;
+        }
+    }
+    return bestHandle;
+}
+
+bool MainWindow::mergeWriteWechatRpaConfig(quintptr hwnd,
+                                           const QString& regionId,
+                                           const QRect& regionRectWindowPx) const
+{
+    const QString path = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python/rpa/config/wechat_config.json");
 
     QJsonObject root;
-    root.insert(QStringLiteral("platform"), QStringLiteral("wechat_pc"));
-    root.insert(QStringLiteral("poll_interval_sec"), 3);
+    {
+        QFile fin(path);
+        if (fin.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QByteArray raw = fin.readAll();
+            fin.close();
+            QJsonParseError err{};
+            const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
+            if (doc.isObject()) {
+                root = doc.object();
+            } else if (err.error != QJsonParseError::NoError) {
+                qWarning() << "[MainWindow] wechat_config.json 解析失败，将仅保留合并字段:" << err.errorString();
+            }
+        }
+    }
 
-    QJsonObject windowMatch;
-    // Some distributions use Weixin.exe (common on CN Windows). Use that as default.
-    windowMatch.insert(QStringLiteral("process_name"), QStringLiteral("Weixin.exe"));
-    windowMatch.insert(QStringLiteral("title_contains"), QStringLiteral("微信"));
+    root.insert(QStringLiteral("platform"), QStringLiteral("wechat_pc"));
+    if (!root.contains(QStringLiteral("poll_interval_sec")))
+        root.insert(QStringLiteral("poll_interval_sec"), 2);
+    root.insert(QStringLiteral("hwnd_hex"),
+                QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(hwnd), 16)));
+
+    QJsonObject windowMatch = root.value(QStringLiteral("window_match")).toObject();
+    if (!windowMatch.contains(QStringLiteral("process_name")))
+        windowMatch.insert(QStringLiteral("process_name"), QStringLiteral("Weixin.exe"));
+    if (!windowMatch.contains(QStringLiteral("title_contains")))
+        windowMatch.insert(QStringLiteral("title_contains"), QStringLiteral("微信"));
     root.insert(QStringLiteral("window_match"), windowMatch);
 
-    // Persist hwnd from the currently managed window if possible.
-    // Python reader can use it directly to avoid EnumWindows ambiguity under Embed/FloatFollow.
-    root.insert(QStringLiteral("hwnd_hex"), QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(hwnd), 16)));
+    const QRect wr = Win32WindowHelper::windowRect(hwnd);
+    if (wr.isValid()) {
+        QJsonObject windowSize = root.value(QStringLiteral("window_size_px")).toObject();
+        windowSize.insert(QStringLiteral("w"), wr.width());
+        windowSize.insert(QStringLiteral("h"), wr.height());
+        root.insert(QStringLiteral("window_size_px"), windowSize);
+    }
 
-    QJsonObject chatRegion;
-    chatRegion.insert(QStringLiteral("mode"), QStringLiteral("relative_to_window"));
-    chatRegion.insert(QStringLiteral("x"), chatRectInWindowPx.x());
-    chatRegion.insert(QStringLiteral("y"), chatRectInWindowPx.y());
-    chatRegion.insert(QStringLiteral("w"), chatRectInWindowPx.width());
-    chatRegion.insert(QStringLiteral("h"), chatRectInWindowPx.height());
-    root.insert(QStringLiteral("chat_region"), chatRegion);
+    if (regionId == QLatin1String("chat_region")) {
+        QJsonObject chatRegion = root.value(QStringLiteral("chat_region")).toObject();
+        chatRegion.insert(QStringLiteral("mode"), QStringLiteral("relative_to_window"));
+        chatRegion.insert(QStringLiteral("x"), regionRectWindowPx.x());
+        chatRegion.insert(QStringLiteral("y"), regionRectWindowPx.y());
+        chatRegion.insert(QStringLiteral("w"), regionRectWindowPx.width());
+        chatRegion.insert(QStringLiteral("h"), regionRectWindowPx.height());
+        root.insert(QStringLiteral("chat_region"), chatRegion);
+    } else if (regionId == QLatin1String("input_box")) {
+        QJsonObject inputBox = root.value(QStringLiteral("input_box")).toObject();
+        inputBox.insert(QStringLiteral("x"), regionRectWindowPx.x());
+        inputBox.insert(QStringLiteral("y"), regionRectWindowPx.y());
+        inputBox.insert(QStringLiteral("w"), regionRectWindowPx.width());
+        inputBox.insert(QStringLiteral("h"), regionRectWindowPx.height());
+        root.insert(QStringLiteral("input_box"), inputBox);
+    } else if (regionId == QLatin1String("contact_header_region")) {
+        QJsonObject headerRegion = root.value(QStringLiteral("contact_header_region")).toObject();
+        headerRegion.insert(QStringLiteral("x"), regionRectWindowPx.x());
+        headerRegion.insert(QStringLiteral("y"), regionRectWindowPx.y());
+        headerRegion.insert(QStringLiteral("w"), regionRectWindowPx.width());
+        headerRegion.insert(QStringLiteral("h"), regionRectWindowPx.height());
+        root.insert(QStringLiteral("contact_header_region"), headerRegion);
+    } else if (regionId == QLatin1String("conversation_list_region")) {
+        QJsonObject listRegion = root.value(QStringLiteral("conversation_list_region")).toObject();
+        listRegion.insert(QStringLiteral("x"), regionRectWindowPx.x());
+        listRegion.insert(QStringLiteral("y"), regionRectWindowPx.y());
+        listRegion.insert(QStringLiteral("w"), regionRectWindowPx.width());
+        listRegion.insert(QStringLiteral("h"), regionRectWindowPx.height());
+        if (!listRegion.contains(QStringLiteral("row_height_guess")))
+            listRegion.insert(QStringLiteral("row_height_guess"), 65);
+        root.insert(QStringLiteral("conversation_list_region"), listRegion);
+    } else if (regionId == QLatin1String("search_box")) {
+        QJsonObject searchBox = root.value(QStringLiteral("search_box")).toObject();
+        const int centerX = regionRectWindowPx.x() + regionRectWindowPx.width() / 2;
+        const int centerY = regionRectWindowPx.y() + regionRectWindowPx.height() / 2;
+        searchBox.insert(QStringLiteral("x"), centerX);
+        searchBox.insert(QStringLiteral("y"), centerY);
+        searchBox.insert(QStringLiteral("w"), regionRectWindowPx.width());
+        searchBox.insert(QStringLiteral("h"), regionRectWindowPx.height());
+        searchBox.insert(QStringLiteral("ocr_x"), regionRectWindowPx.x());
+        searchBox.insert(QStringLiteral("ocr_y"), regionRectWindowPx.y());
+        searchBox.insert(QStringLiteral("ocr_w"), regionRectWindowPx.width());
+        searchBox.insert(QStringLiteral("ocr_h"), regionRectWindowPx.height());
+        root.insert(QStringLiteral("search_box"), searchBox);
+    } else if (regionId == QLatin1String("search_result_region")) {
+        QJsonObject searchBox = root.value(QStringLiteral("search_box")).toObject();
+        const int centerX = regionRectWindowPx.x() + regionRectWindowPx.width() / 2;
+        const int centerY = regionRectWindowPx.y() + regionRectWindowPx.height() / 2;
+        searchBox.insert(QStringLiteral("first_result_x"), centerX);
+        searchBox.insert(QStringLiteral("first_result_y"), centerY);
+        searchBox.insert(QStringLiteral("result_x"), regionRectWindowPx.x());
+        searchBox.insert(QStringLiteral("result_y"), regionRectWindowPx.y());
+        searchBox.insert(QStringLiteral("result_w"), regionRectWindowPx.width());
+        searchBox.insert(QStringLiteral("result_h"), regionRectWindowPx.height());
+        root.insert(QStringLiteral("search_box"), searchBox);
+    } else if (regionId == QLatin1String("unread_scan_band")) {
+        const QJsonObject listRegion = root.value(QStringLiteral("conversation_list_region")).toObject();
+        const int listX = listRegion.value(QStringLiteral("x")).toInt();
+        const int listW = listRegion.value(QStringLiteral("w")).toInt();
+        if (listW <= 0) {
+            qWarning() << "[MainWindow] 未读扫描带校准失败：conversation_list_region 未配置有效宽度";
+            return false;
+        }
+        const int localLeft = qBound(0, regionRectWindowPx.x() - listX, listW - 1);
+        const int localRight = qBound(localLeft + 1, regionRectWindowPx.x() + regionRectWindowPx.width() - listX, listW);
+        const double startRatio = double(localLeft) / double(listW);
+        const double endRatio = double(localRight) / double(listW);
 
-    QJsonObject windowSize;
-    windowSize.insert(QStringLiteral("w"), windowSizePx.width());
-    windowSize.insert(QStringLiteral("h"), windowSizePx.height());
-    root.insert(QStringLiteral("window_size_px"), windowSize);
+        QJsonObject unread = root.value(QStringLiteral("unread_detection")).toObject();
+        unread.insert(QStringLiteral("scan_x_start_ratio"), startRatio);
+        unread.insert(QStringLiteral("scan_x_end_ratio"), endRatio);
+        unread.insert(QStringLiteral("scan_band_comment"),
+                      QStringLiteral("由微信OCR校准的『未读扫描带』生成；相对 conversation_list_region 宽度的比例"));
+        root.insert(QStringLiteral("unread_detection"), unread);
 
-    QJsonObject conv;
-    conv.insert(QStringLiteral("platform_conversation_id"), platformConversationId);
-    conv.insert(QStringLiteral("customer_name"), customerName);
-    root.insert(QStringLiteral("conversation"), conv);
-
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        qWarning() << "[MainWindow] 写入 wechat_config.json 失败:" << path << f.errorString();
+        qInfo() << "[MainWindow] 微信未读扫描带已保存"
+                << "listX=" << listX
+                << "listW=" << listW
+                << "local=[" << localLeft << "," << localRight << ")"
+                << "ratio=[" << startRatio << "," << endRatio << ")";
+    } else {
+        qWarning() << "[MainWindow] 未知微信校准区域:" << regionId;
         return false;
     }
-    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    f.close();
+
+    QFile fout(path);
+    if (!fout.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        qWarning() << "[MainWindow] 写入 wechat_config.json 失败:" << path << fout.errorString();
+        return false;
+    }
+    fout.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    fout.close();
     return true;
 }
 
@@ -4132,7 +4773,7 @@ bool MainWindow::mergeWritePddRpaConfig(quintptr hwnd,
 void MainWindow::openAggregateChatForm()
 {
     if (!m_aggregateChatForm) {
-        m_aggregateChatForm = new AggregateChatForm(this);
+        m_aggregateChatForm = new AggregateChatForm(m_username, this);
         m_centerStack->addWidget(m_aggregateChatForm);
     }
     m_centerStack->setCurrentWidget(m_aggregateChatForm);
@@ -4172,6 +4813,7 @@ void EmbeddedWindowContainer::resizeEvent(QResizeEvent* event)
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    SwordCursor::restore();
     detachAllWindows();
     const QStringList keys = m_rpaProcesses.keys();
     for (const QString& id : keys) {

@@ -75,6 +75,8 @@ public:
 
     /** 指定平台 RPA 子进程已缓存的控制台文本（按平台分桶，有长度上限）。 */
     QString rpaProcessLog(const QString& platformId) const;
+    /** 清空指定平台已缓存的控制台文本（不影响子进程继续输出）。 */
+    void clearRpaProcessLog(const QString& platformId);
 
 signals:
     /** 某平台新增一段控制台输出（UTF-8 解码；与 rpaProcessLog() 缓存同步）。 */
@@ -95,6 +97,8 @@ private:
     void buildStatusBar();
     void setupStyles();
     void updateTreeViewHeight();
+    void refreshUserProfileBar();
+    void onUserProfileBarClicked();
 
     void showSystemReadyPage();
     void showPlaceholderPage(const QString& title);
@@ -134,13 +138,14 @@ private:
     QStandardItem* findChildItem(QStandardItem* parent, const QString& platformId) const;
     void showPlatformContextMenu(const QPoint& pos);
     void startWechatRpaCalibration(const QString& platformId);
+    void startWechatRpaCalibrationStandalone();
+    void startWechatRpaCalibrationByHwnd(quintptr hwnd);
     void startQianniuRpaCalibration(const QString& platformId);
     void startPddRpaCalibration(const QString& platformId);
-    bool writeWechatRpaConfigRelativeToWindow(quintptr hwnd,
-                                              const QRect& chatRectInWindowPx,
-                                              const QSize& windowSizePx,
-                                              const QString& platformConversationId,
-                                              const QString& customerName) const;
+    quintptr findWechatCalibrationWindow() const;
+    bool mergeWriteWechatRpaConfig(quintptr hwnd,
+                                   const QString& regionId,
+                                   const QRect& regionRectWindowPx) const;
     bool mergeWriteQianniuRpaConfig(quintptr hwnd,
                                     const QRect& chatRectWindowPx,
                                     const QRect& headerRectWindowPx) const;
@@ -153,6 +158,8 @@ private:
     int oneClickMaxOnlineLimit() const;
     void setOneClickMaxOnlineLimit(int n);
     void updateOneClickAggregateTooltip();
+    void applyAlwaysOnTop(bool on);
+    void updatePinTopButtonUi();
 
     QStringList runningRpaPlatformIds() const;
     void startRpaPlatforms(const QStringList& platformIds);
@@ -166,6 +173,10 @@ private slots:
 
 private:
     QString m_username;
+    int m_userId = 0;
+    QWidget* m_userProfileBar = nullptr;
+    QLabel* m_userProfileAvatar = nullptr;
+    QLabel* m_userProfileNick = nullptr;
     QStackedWidget* m_centerStack = nullptr;
     QStandardItemModel* m_platformTreeModel = nullptr;
     QTreeView* m_platformTree = nullptr;
@@ -210,6 +221,8 @@ private:
     QMap<QString, QString> m_rpaProcessLogs;
     RpaConsoleWindow* m_rpaConsoleWindow = nullptr;
     QToolButton* m_btnRpaManage = nullptr;
+    QToolButton* m_btnPinTop = nullptr;
+    bool m_alwaysOnTop = false;
 };
 
 #endif // MAINWINDOW_H
