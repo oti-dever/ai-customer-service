@@ -618,3 +618,17 @@ QString Win32WindowHelper::resolveShortcutTarget(const QString& lnkAbsolutePath)
     return out;
 }
 #endif
+
+void Win32WindowHelper::applyNativeTopMost(QWidget* window, bool topMost)
+{
+    if (!window)
+        return;
+    const WId wid = window->winId();
+    if (!wid)
+        return;
+    auto* hwnd = reinterpret_cast<HWND>(wid);
+    if (!IsWindow(hwnd))
+        return;
+    SetWindowPos(hwnd, topMost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}

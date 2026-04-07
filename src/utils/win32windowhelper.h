@@ -71,6 +71,9 @@ public:
     static bool isLeftMouseButtonPressed();
     static bool isPointInsideWindow(quintptr handle, const QPoint& globalPos);
 
+    /** Win32 HWND_TOPMOST / NOTOPMOST，不修改 Qt windowFlags，避免主窗口 setWindowFlags 重建闪烁。 */
+    static void applyNativeTopMost(QWidget* window, bool topMost);
+
 #ifdef Q_OS_WIN
     /// 解析 Windows 快捷方式（.lnk）的目标路径；失败或非 .lnk 返回空串。
     static QString resolveShortcutTarget(const QString& lnkAbsolutePath);

@@ -42,6 +42,7 @@
 #include <QSizePolicy>
 #include <QScreen>
 #include <QSettings>
+#include <QShowEvent>
 #include <QStatusBar>
 #include <QSplitter>
 #include <QStyledItemDelegate>
@@ -1662,8 +1663,6 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
     {
         QSettings pinSettings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
         m_alwaysOnTop = pinSettings.value(QStringLiteral("mainWindow/alwaysOnTop"), false).toBool();
-        if (m_alwaysOnTop)
-            setWindowFlags(windowFlags() | Qt::WindowStaysOnTopHint);
     }
 
     auto* root = new QWidget(this);
@@ -2495,13 +2494,7 @@ void MainWindow::applyAlwaysOnTop(bool on)
     if (m_alwaysOnTop == on)
         return;
     m_alwaysOnTop = on;
-    Qt::WindowFlags f = windowFlags();
-    if (on)
-        f |= Qt::WindowStaysOnTopHint;
-    else
-        f &= ~Qt::WindowStaysOnTopHint;
-    setWindowFlags(f);
-    show();
+    Win32WindowHelper::applyNativeTopMost(this, on);
     QSettings pinSettings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
     pinSettings.setValue(QStringLiteral("mainWindow/alwaysOnTop"), m_alwaysOnTop);
     updatePinTopButtonUi();
@@ -4810,6 +4803,13 @@ void EmbeddedWindowContainer::resizeEvent(QResizeEvent* event)
 }
 
 // ==================== Window Events ====================
+
+void MainWindow::showEvent(QShowEvent* event)
+{
+    QMainWindow::showEvent(event);
+    if (m_alwaysOnTop)
+        Win32WindowHelper::applyNativeTopMost(this, true);
+}
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {

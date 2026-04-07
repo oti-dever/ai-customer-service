@@ -21,6 +21,7 @@
 class AggregateChatForm;
 class RpaConsoleWindow;
 class RpaManageDialog;
+class QShowEvent;
 
 struct QuickLaunchApp {
     QString name;   ///< 列表显示名（可编辑）
@@ -83,6 +84,7 @@ signals:
     void rpaProcessOutputAppended(const QString& platformId, const QString& text);
 
 protected:
+    void showEvent(QShowEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     void moveEvent(QMoveEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
