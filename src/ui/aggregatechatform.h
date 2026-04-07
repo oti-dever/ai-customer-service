@@ -2,6 +2,7 @@
 #define AGGREGATECHATFORM_H
 
 #include <QComboBox>
+#include <QPoint>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -11,6 +12,9 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QStackedWidget>
+#include <QTimer>
+#include <QPixmap>
+#include <QString>
 #include <QVBoxLayout>
 #include "../core/types.h"
 #include "../utils/applystyle.h"
@@ -21,9 +25,11 @@ class AggregateChatForm : public QWidget
 {
     Q_OBJECT
 public:
-    explicit AggregateChatForm(QWidget* parent = nullptr);
+    explicit AggregateChatForm(const QString& loginUsername, QWidget* parent = nullptr);
     ~AggregateChatForm();
     void applyTheme(ApplyStyle::MainWindowTheme theme);
+    /** 个人信息等变更后刷新己方气泡用的昵称与头像缓存，并可重绘当前会话。 */
+    void refreshLocalUserProfile();
 
 private:
     void setupUI();
@@ -36,17 +42,23 @@ private:
 
     void refreshConversationList();
     void showConversation(int conversationId);
+    void renderConversationMessages(const QVector<MessageRecord>& messages);
     void appendMessageBubble(const MessageRecord& msg);
+    QString buildMessageSignature(const QVector<MessageRecord>& messages) const;
+    void refreshVisibleConversationMessages();
     void scrollToBottom();
+    /** 在布局完成后再滚到底部（切换会话、追加消息等场景） */
+    void scheduleScrollChatToBottom();
     void updateCustomerInfo(const ConversationInfo& conv);
+    void resetSendTimelineForConversation();
     void showCenterEmptyState();
     void showRightEmptyState();
     void showStatusMessage(const QString& text, int timeoutMs);
 
     QWidget* createConversationItem(const ConversationInfo& conv);
-    QWidget* createBubble(const QString& text, const QString& sender,
-                          const QDateTime& time, bool isOutgoing);
+    QWidget* createBubble(const MessageRecord& msg);
     QWidget* createDateSeparator(const QDate& date);
+    void loadSelfBubbleIdentity();
 
 private slots:
     void onTabPendingClicked();
@@ -58,6 +70,9 @@ private slots:
     void onConversationListChanged();
     void onNewMessage(int conversationId, const MessageRecord& msg);
     void onSentOk(int conversationId, const MessageRecord& msg);
+    void onClearSendTimeline();
+    void pollSendTimeline();
+    void onConversationListContextMenu(const QPoint& pos);
 
 private:
     QWidget* m_leftPanel = nullptr;
@@ -85,11 +100,22 @@ private:
     QLabel* m_customerName = nullptr;
     QLabel* m_customerPlatform = nullptr;
     QLabel* m_customerStatus = nullptr;
+    QLabel* m_sendTimelineLabel = nullptr;
+    QPlainTextEdit* m_sendTimeline = nullptr;
+    QPushButton* m_btnClearSendTimeline = nullptr;
     QLabel* m_statusLabel = nullptr;
+    QTimer* m_messageRefreshTimer = nullptr;
+    QTimer* m_sendTimelineTimer = nullptr;
+    qint64 m_sendTimelineBaselineId = 0;
 
     bool m_currentTabIsPending = true;
     int m_currentConvId = -1;
     QDate m_lastBubbleDate;
+    QString m_currentMessageSignature;
+
+    QString m_loginUsername;
+    QString m_selfDisplayName;
+    QPixmap m_selfAvatarPixmap;
 };
 
 #endif // AGGREGATECHATFORM_H
