@@ -1,5 +1,6 @@
 #include "userdao.h"
 #include "database.h"
+#include <QDir>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QVariant>
@@ -23,7 +24,11 @@ bool UserDao::create(const QString& username, const QString& passwordHash, const
 std::optional<UserRecord> UserDao::findByUsername(const QString& username)
 {
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare("SELECT id, username, password_hash, salt, created_at FROM users WHERE username = :username");
+    q.prepare(
+        "SELECT id, username, password_hash, salt, created_at, "
+        "IFNULL(display_name, '') AS display_name, IFNULL(bio, '') AS bio, "
+        "IFNULL(avatar_path, '') AS avatar_path "
+        "FROM users WHERE username = :username");
     q.bindValue(":username", username);
 
     if (!q.exec() || !q.next()) {
@@ -37,6 +42,9 @@ std::optional<UserRecord> UserDao::findByUsername(const QString& username)
     rec.passwordHash = q.value("password_hash").toString();
     rec.salt = q.value("salt").toString();
     rec.createdAt = q.value("created_at").toString();
+    rec.displayName = q.value(QStringLiteral("display_name")).toString();
+    rec.bio = q.value(QStringLiteral("bio")).toString();
+    rec.avatarPath = q.value(QStringLiteral("avatar_path")).toString();
     return rec;
 }
 
@@ -54,4 +62,35 @@ std::optional<QString> UserDao::getLastRegisterUsername()
         return std::nullopt;
     }
     return q.value("username").toString();
+}
+
+bool UserDao::updateProfile(int userId, const QString& displayName, const QString& bio, const QString& avatarRelativePath)
+{
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare("UPDATE users SET display_name = :d, bio = :b, avatar_path = :a WHERE id = :id");
+    q.bindValue(":d", displayName);
+    q.bindValue(":b", bio);
+    q.bindValue(":a", avatarRelativePath);
+    q.bindValue(":id", userId);
+    if (!q.exec()) {
+        qWarning() << "UserDao::updateProfile failed:" << q.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QString UserDao::absolutePathFromProjectRelative(const QString& relativePath)
+{
+    return QDir(QStringLiteral(PROJECT_ROOT_DIR)).absoluteFilePath(relativePath);
+}
+
+QString UserDao::relativeAvatarPathForUserId(int userId, const QString& suffix)
+{
+    return QStringLiteral("database/avatars/%1%2").arg(userId).arg(suffix);
+}
+
+bool UserDao::ensureAvatarsDirectory()
+{
+    QDir root(QStringLiteral(PROJECT_ROOT_DIR));
+    return root.mkpath(QStringLiteral("database/avatars"));
 }
