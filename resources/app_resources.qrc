@@ -32,6 +32,11 @@
         <file>aggregate_reception_icons/search_icon.svg</file>
         <file>question_mark_icon.svg</file>
         <file>bug_log_icon.svg</file>
+        <file>before_pinning.svg</file>
+        <file>after_pinning.svg</file>
         <file>prohibit_icon.svg</file>
+        <file>close_window_icon.svg</file>
+        <file>default_avatar_icon.svg</file>
+        <file>sword_cursor.png</file>
     </qresource>
 </RCC>
