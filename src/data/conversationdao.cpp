@@ -1,4 +1,5 @@
 #include "conversationdao.h"
+#include "messagedao.h"
 #include "database.h"
 #include <QSqlError>
 #include <QSqlQuery>
@@ -134,10 +135,29 @@ bool ConversationDao::remove(int id)
 {
     QSqlDatabase db = Database::getInstance().connection();
     QSqlQuery q(db);
-    q.prepare("DELETE FROM messages WHERE conversation_id = :id");
-    q.bindValue(":id", id);
+
+    const auto conv = findById(id);
+    if (conv) {
+        q.prepare(
+            QStringLiteral("DELETE FROM rpa_inbox_messages WHERE platform = :p "
+                           "AND platform_conversation_id = :pcid"));
+        q.bindValue(QStringLiteral(":p"), conv->platform);
+        q.bindValue(QStringLiteral(":pcid"), conv->platformConversationId);
+        if (!q.exec())
+            qWarning() << "ConversationDao::remove 清理 rpa_inbox_messages 失败:"
+                       << q.lastError().text();
+    }
+
+    q.prepare(QStringLiteral("DELETE FROM message_send_events WHERE conversation_id = :id"));
+    q.bindValue(QStringLiteral(":id"), id);
     q.exec();
-    q.prepare("DELETE FROM conversations WHERE id = :id");
-    q.bindValue(":id", id);
-    return q.exec();
+    q.prepare(QStringLiteral("DELETE FROM messages WHERE conversation_id = :id"));
+    q.bindValue(QStringLiteral(":id"), id);
+    q.exec();
+    q.prepare(QStringLiteral("DELETE FROM conversations WHERE id = :id"));
+    q.bindValue(QStringLiteral(":id"), id);
+    const bool ok = q.exec();
+    if (ok && conv)
+        MessageDao::notifyReaderIncrementalStatePurge(conv->platform, conv->platformConversationId);
+    return ok;
 }
