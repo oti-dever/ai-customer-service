@@ -31,6 +31,7 @@ bool Database::open(const QString& path)
         pragma.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
         pragma.exec(QStringLiteral("PRAGMA synchronous=NORMAL"));
         pragma.exec(QStringLiteral("PRAGMA busy_timeout=3000"));
+        pragma.exec(QStringLiteral("PRAGMA foreign_keys=ON"));
     }
     return runMigrations();
 }
@@ -125,6 +126,27 @@ bool Database::runMigrations()
         ")",
         "CREATE INDEX IF NOT EXISTS idx_send_events_conv_id ON message_send_events(conversation_id)",
         "CREATE INDEX IF NOT EXISTS idx_send_events_message_id ON message_send_events(message_id)",
+
+        "CREATE TABLE IF NOT EXISTS ai_assistant_sessions ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  user_id INTEGER NOT NULL,"
+        "  model_key TEXT NOT NULL,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
+        "  UNIQUE(user_id, model_key)"
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS ai_assistant_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  session_id INTEGER NOT NULL,"
+        "  role TEXT NOT NULL,"
+        "  content TEXT NOT NULL,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(session_id) REFERENCES ai_assistant_sessions(id) ON DELETE CASCADE"
+        ")",
+
+        "CREATE INDEX IF NOT EXISTS idx_ai_assistant_messages_session_id "
+        "  ON ai_assistant_messages(session_id, id)",
     };
 
     // 可选迁移（ALTER TABLE ADD COLUMN，列已存在时会失败，忽略错误）

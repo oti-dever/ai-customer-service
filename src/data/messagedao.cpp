@@ -74,6 +74,41 @@ QVector<MessageRecord> MessageDao::listByConversation(int conversationId, int li
     return result;
 }
 
+std::optional<QString> MessageDao::latestInboundContent(int conversationId) const
+{
+    if (conversationId <= 0)
+        return std::nullopt;
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral(
+        "SELECT content FROM messages WHERE conversation_id = :cid AND direction = 'in' "
+        "AND length(trim(coalesce(content, ''))) > 0 ORDER BY id DESC LIMIT 1"));
+    q.bindValue(QStringLiteral(":cid"), conversationId);
+    if (!q.exec()) {
+        qWarning() << "MessageDao::latestInboundContent failed:" << q.lastError().text();
+        return std::nullopt;
+    }
+    if (q.next())
+        return q.value(0).toString();
+    return std::nullopt;
+}
+
+QHash<int, QString> MessageDao::lastDirectionsByConversation() const
+{
+    QHash<int, QString> out;
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral(
+        "SELECT conversation_id, direction FROM messages WHERE id IN "
+        "(SELECT MAX(id) FROM messages GROUP BY conversation_id)"));
+    if (!q.exec()) {
+        qWarning() << "MessageDao::lastDirectionsByConversation 失败:" << q.lastError().text();
+        return out;
+    }
+    while (q.next())
+        out.insert(q.value(0).toInt(), q.value(1).toString());
+    return out;
+}
+
 void MessageDao::notifyReaderIncrementalStatePurge(const QString& platform,
                                                    const QString& platformConversationId)
 {
