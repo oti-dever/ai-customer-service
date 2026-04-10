@@ -19,6 +19,7 @@
 #include "../utils/win32windowhelper.h"
 
 class AggregateChatForm;
+class RobotAssistantWidget;
 class RpaConsoleWindow;
 class RpaManageDialog;
 class QShowEvent;
@@ -106,6 +107,7 @@ private:
     void showPlaceholderPage(const QString& title);
     void openAddWindowDialog();
     void openAggregateChatForm();
+    void openRobotAssistantPage();
     void startOneClickAggregate();
     void openQuickLaunchManager();
     void runQuickLaunchApps();
@@ -143,14 +145,18 @@ private:
     void startWechatRpaCalibrationStandalone();
     void startWechatRpaCalibrationByHwnd(quintptr hwnd);
     void startQianniuRpaCalibration(const QString& platformId);
+    void startQianniuRpaCalibrationStandalone();
+    void startQianniuRpaCalibrationByHwnd(quintptr hwnd);
     void startPddRpaCalibration(const QString& platformId);
     quintptr findWechatCalibrationWindow() const;
+    quintptr findQianniuCalibrationWindow() const;
+    static bool isQianniuCalibrationWindowInfo(const WindowInfo& info);
     bool mergeWriteWechatRpaConfig(quintptr hwnd,
                                    const QString& regionId,
                                    const QRect& regionRectWindowPx) const;
-    bool mergeWriteQianniuRpaConfig(quintptr hwnd,
-                                    const QRect& chatRectWindowPx,
-                                    const QRect& headerRectWindowPx) const;
+    bool mergeWriteQianniuRpaRegion(quintptr hwnd,
+                                    const QString& regionId,
+                                    const QRect& regionRectWindowPx) const;
     bool mergeWritePddRpaConfig(quintptr hwnd,
                                  const QRect& chatRectWindowPx,
                                  const QRect& inputRectWindowPx) const;
@@ -197,6 +203,7 @@ private:
     QToolButton* m_btnThemeSwitch = nullptr;
     ApplyStyle::MainWindowTheme m_mainWindowTheme = ApplyStyle::MainWindowTheme::Default;
     AggregateChatForm* m_aggregateChatForm = nullptr;
+    RobotAssistantWidget* m_robotAssistantWidget = nullptr;
 
     QStandardItem* m_onlineGroup = nullptr;
     QStandardItem* m_manageGroup = nullptr;
