@@ -68,11 +68,9 @@ void ConversationManager::initialize()
     qInfo() << "[ConversationManager] 初始化完成，模拟平台/千牛RPA/微信RPA/PDD RPA 适配器已就绪";
 }
 
-QVector<ConversationInfo> ConversationManager::conversations(bool pendingOnly) const
+QVector<ConversationInfo> ConversationManager::allConversations() const
 {
     ConversationDao dao;
-    if (pendingOnly)
-        return dao.listByStatus(QStringLiteral("open"));
     return dao.listAll();
 }
 

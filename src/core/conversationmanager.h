@@ -25,7 +25,8 @@ public:
     WechatRPAAdapter* wechat() const { return m_wechat; }
     PddRPAAdapter* pdd() const { return m_pdd; }
 
-    QVector<ConversationInfo> conversations(bool pendingOnly) const;
+    /** 全部会话（聚合左侧列表在界面层按最后一条 direction 再分栏）。 */
+    QVector<ConversationInfo> allConversations() const;
     QVector<MessageRecord> messages(int conversationId) const;
     int currentConversationId() const { return m_currentConvId; }
 

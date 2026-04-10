@@ -20,6 +20,8 @@
 #include "../utils/applystyle.h"
 
 class ConversationManager;
+class QNetworkAccessManager;
+class OpenAiCompatClient;
 
 class AggregateChatForm : public QWidget
 {
@@ -54,6 +56,9 @@ private:
     void showCenterEmptyState();
     void showRightEmptyState();
     void showStatusMessage(const QString& text, int timeoutMs);
+    void updateAggregateAiControlsVisibility();
+    void setAggregateAiBusy(bool busy);
+    void abortAggregateAiRequest();
 
     QWidget* createConversationItem(const ConversationInfo& conv);
     QWidget* createBubble(const MessageRecord& msg);
@@ -66,6 +71,11 @@ private slots:
     void onConversationItemClicked(QListWidgetItem* item);
     void onSendClicked();
     void onSimulateClicked();
+    void onModeComboChanged();
+    void onGenerateAiDraftClicked();
+    void onAggregateAiStreamDelta(const QString& delta);
+    void onAggregateAiCompleted();
+    void onAggregateAiFailed(const QString& reason);
 
     void onConversationListChanged();
     void onNewMessage(int conversationId, const MessageRecord& msg);
@@ -93,7 +103,13 @@ private:
     QVBoxLayout* m_messageLayout = nullptr;
     QWidget* m_messageContainer = nullptr;
     QPlainTextEdit* m_inputEdit = nullptr;
+    QPushButton* m_btnAiGenerate = nullptr;
     QPushButton* m_btnSend = nullptr;
+    QNetworkAccessManager* m_aggregateAiNam = nullptr;
+    OpenAiCompatClient* m_aggregateAiClient = nullptr;
+    bool m_aggregateAiGenerating = false;
+    QString m_aggregateAiBaseline;
+    QString m_aggregateAiAccumulated;
     QLabel* m_chatHeader = nullptr;
     QWidget* m_rightEmptyState = nullptr;
     QWidget* m_customerDetail = nullptr;
@@ -110,6 +126,8 @@ private:
 
     bool m_currentTabIsPending = true;
     int m_currentConvId = -1;
+    /** 发送成功且最后一条为 out 时暂留在「待处理」，切换离开该会话后清除（见 refreshConversationList）。 */
+    int m_pendingStickyConvId = -1;
     QDate m_lastBubbleDate;
     QString m_currentMessageSignature;
 

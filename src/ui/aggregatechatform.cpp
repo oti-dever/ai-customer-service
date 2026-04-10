@@ -5,14 +5,20 @@
 #include "../data/messagedao.h"
 #include "../data/messagesendeventdao.h"
 #include "../data/userdao.h"
+#include "../services/ai/openaicompatclient.h"
 #include "../services/platforms/simplatformadapter.h"
 #include "../utils/applystyle.h"
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QSettings>
 #include <algorithm>
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QDateTime>
 #include <QEventLoop>
 #include <QFile>
+#include <QHash>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QImage>
@@ -128,6 +134,46 @@ static QPixmap roundedAggregateAvatarPixmap(const QPixmap& source, int logicalSi
     return out;
 }
 
+/** 与 `m_modeCombo` 项顺序一致：0 人工接待，1 AI 辅助，2 AI托管（占位，未实现）。 */
+constexpr int kAggregateModeIndexAiAssist = 1;
+
+QString aggregateAiMvpSystemPrompt()
+{
+    return QStringLiteral(
+        "你是电商客服场景的辅助起草助手。请根据用户给出的「客户最后一条入站消息」和下列店铺知识，起草一条可直接发送给客户的回复正文。\n"
+        "要求：语气专业、友好；不要编造未在知识中出现的承诺；不要加「客服：」等前缀或引号。\n\n"
+        "【店铺知识·MVP 占位，可随版本替换】\n"
+        "礼貌问候；明确订单、物流、售后的查询途径；避免无法兑现的承诺。具体规则以公司内部文档为准。");
+}
+
+void readAiSettingsForAggregate(QString* baseUrl, QString* model, QString* apiKey)
+{
+    QSettings s;
+    *baseUrl = s.value(QStringLiteral("aggregateAi/baseUrl")).toString().trimmed();
+    if (baseUrl->isEmpty())
+        *baseUrl = s.value(QStringLiteral("ai/baseUrl"), QStringLiteral("https://api.deepseek.com")).toString();
+    *model = s.value(QStringLiteral("aggregateAi/model")).toString().trimmed();
+    if (model->isEmpty())
+        *model = s.value(QStringLiteral("ai/model"), QStringLiteral("deepseek-chat")).toString();
+    *apiKey = s.value(QStringLiteral("aggregateAi/apiKey")).toString();
+    if (apiKey->isEmpty())
+        *apiKey = s.value(QStringLiteral("ai/apiKey")).toString();
+}
+
+void showAggregateInfo(QWidget* parent, const QString& title, const QString& text)
+{
+    QMessageBox box(QMessageBox::Information, title, text, QMessageBox::Ok, parent);
+    box.setStyleSheet(aggregateMessageBoxContrastStyle());
+    box.exec();
+}
+
+void showAggregateWarning(QWidget* parent, const QString& title, const QString& text)
+{
+    QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::Ok, parent);
+    box.setStyleSheet(aggregateMessageBoxContrastStyle());
+    box.exec();
+}
+
 } // namespace
 
 AggregateChatForm::AggregateChatForm(const QString& loginUsername, QWidget* parent)
@@ -135,6 +181,14 @@ AggregateChatForm::AggregateChatForm(const QString& loginUsername, QWidget* pare
     , m_loginUsername(loginUsername)
 {
     setupUI();
+    m_aggregateAiNam = new QNetworkAccessManager(this);
+    m_aggregateAiClient = new OpenAiCompatClient(m_aggregateAiNam, this);
+    connect(m_aggregateAiClient, &OpenAiCompatClient::streamDelta, this,
+            &AggregateChatForm::onAggregateAiStreamDelta);
+    connect(m_aggregateAiClient, &OpenAiCompatClient::completed, this,
+            &AggregateChatForm::onAggregateAiCompleted);
+    connect(m_aggregateAiClient, &OpenAiCompatClient::failed, this,
+            &AggregateChatForm::onAggregateAiFailed);
     setupStyles();
     loadSelfBubbleIdentity();
     connectSignals();
@@ -224,6 +278,7 @@ void AggregateChatForm::setupStyles()
 void AggregateChatForm::applyTheme(ApplyStyle::MainWindowTheme theme)
 {
     setStyleSheet(ApplyStyle::aggregateChatFormStyle(theme));
+    updateAggregateAiControlsVisibility();
 }
 
 void AggregateChatForm::connectSignals()
@@ -252,6 +307,9 @@ void AggregateChatForm::connectSignals()
     connect(m_sendTimelineTimer, &QTimer::timeout,
             this, &AggregateChatForm::pollSendTimeline);
     m_sendTimelineTimer->start();
+
+    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &AggregateChatForm::onModeComboChanged);
 }
 
 // ===================== Left Panel =====================
@@ -275,7 +333,8 @@ QWidget* AggregateChatForm::buildLeftPanel()
     modeLabel->setObjectName(QStringLiteral("aggregateModeLabel"));
     m_modeCombo = new FoldArrowComboBox(modeRow);
     m_modeCombo->addItem(QStringLiteral("人工接待"));
-    m_modeCombo->addItem(QStringLiteral("人工休息"));
+    m_modeCombo->addItem(QStringLiteral("AI 辅助"));
+    m_modeCombo->addItem(QStringLiteral("AI托管（即将支持）"));
     m_modeCombo->setMinimumWidth(90);
     modeLayout->addWidget(modeLabel);
     modeLayout->addWidget(m_modeCombo);
@@ -299,8 +358,8 @@ QWidget* AggregateChatForm::buildLeftPanel()
     m_btnPending->setCheckable(true);
     m_btnPending->setChecked(true);
     m_btnPending->setCursor(Qt::PointingHandCursor);
-    m_btnAll = new QPushButton(QStringLiteral("全部会话"), tabRow);
-    m_btnAll->setObjectName("aggregateTabAll");
+    m_btnAll = new QPushButton(QStringLiteral("已回复"), tabRow);
+    m_btnAll->setObjectName("aggregateTabReplied");
     m_btnAll->setCheckable(true);
     m_btnAll->setChecked(false);
     m_btnAll->setCursor(Qt::PointingHandCursor);
@@ -445,11 +504,17 @@ QWidget* AggregateChatForm::buildCenterPanel()
 
     auto* btnRow = new QHBoxLayout();
     btnRow->addStretch(1);
+    m_btnAiGenerate = new QPushButton(QStringLiteral("生成本条回复"), inputArea);
+    m_btnAiGenerate->setObjectName(QStringLiteral("simulateButton"));
+    m_btnAiGenerate->setCursor(Qt::PointingHandCursor);
+    m_btnAiGenerate->setVisible(false);
+    connect(m_btnAiGenerate, &QPushButton::clicked, this, &AggregateChatForm::onGenerateAiDraftClicked);
     m_btnSend = new QPushButton(QStringLiteral("发送"), inputArea);
     m_btnSend->setObjectName("sendButton");
     m_btnSend->setCursor(Qt::PointingHandCursor);
     m_btnSend->setFixedWidth(80);
     connect(m_btnSend, &QPushButton::clicked, this, &AggregateChatForm::onSendClicked);
+    btnRow->addWidget(m_btnAiGenerate);
     btnRow->addWidget(m_btnSend);
     inputLayout->addLayout(btnRow);
     chatLayout->addWidget(inputArea);
@@ -805,13 +870,31 @@ QWidget* AggregateChatForm::createDateSeparator(const QDate& date)
 void AggregateChatForm::refreshConversationList()
 {
     auto& mgr = ConversationManager::instance();
-    auto convs = mgr.conversations(m_currentTabIsPending);
+    const auto convs = mgr.allConversations();
+    MessageDao msgDao;
+    const QHash<int, QString> lastDirs = msgDao.lastDirectionsByConversation();
 
     QString keyword = m_searchEdit ? m_searchEdit->text().trimmed() : QString();
 
     m_conversationList->clear();
     int count = 0;
     for (const auto& conv : convs) {
+        const QString lastDir = lastDirs.value(conv.id);
+
+        bool inThisTab = false;
+        if (m_currentTabIsPending) {
+            if (lastDir == QLatin1String("in"))
+                inThisTab = true;
+            else if (lastDir == QLatin1String("out") && m_pendingStickyConvId == conv.id)
+                inThisTab = true;
+        } else {
+            // 无消息、己方回复、或其它非 in 方向均归入「已回复」（与「待处理」互补，避免遗漏）
+            if (lastDir.isEmpty() || lastDir != QLatin1String("in"))
+                inThisTab = true;
+        }
+        if (!inThisTab)
+            continue;
+
         if (!keyword.isEmpty() && !conv.customerName.contains(keyword, Qt::CaseInsensitive)
             && !conv.lastMessage.contains(keyword, Qt::CaseInsensitive))
             continue;
@@ -843,6 +926,12 @@ void AggregateChatForm::refreshConversationList()
 
 void AggregateChatForm::showConversation(int conversationId)
 {
+    abortAggregateAiRequest();
+
+    const int prevId = m_currentConvId;
+    if (prevId > 0 && prevId != conversationId && m_pendingStickyConvId == prevId)
+        m_pendingStickyConvId = -1;
+
     m_currentConvId = conversationId;
     auto& mgr = ConversationManager::instance();
     mgr.selectConversation(conversationId);
@@ -864,6 +953,7 @@ void AggregateChatForm::showConversation(int conversationId)
     m_inputEdit->setFocus();
 
     scheduleScrollChatToBottom();
+    updateAggregateAiControlsVisibility();
 }
 
 void AggregateChatForm::renderConversationMessages(const QVector<MessageRecord>& messages)
@@ -990,7 +1080,9 @@ void AggregateChatForm::onClearSendTimeline()
 
 void AggregateChatForm::showCenterEmptyState()
 {
+    abortAggregateAiRequest();
     m_centerStack->setCurrentWidget(m_centerEmptyState);
+    updateAggregateAiControlsVisibility();
 }
 
 void AggregateChatForm::showRightEmptyState()
@@ -1073,6 +1165,9 @@ void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
         ConversationDao convDao;
         convDao.updateLastMessage(convId, QString(), QDateTime::currentDateTime());
 
+        if (m_pendingStickyConvId == convId)
+            m_pendingStickyConvId = -1;
+
         if (m_currentConvId == convId) {
             m_lastBubbleDate = QDate();
             renderConversationMessages({});
@@ -1107,6 +1202,8 @@ void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
             if (m_inputEdit)
                 m_inputEdit->clear();
         }
+        if (m_pendingStickyConvId == convId)
+            m_pendingStickyConvId = -1;
 
         ConversationManager::instance().deleteConversation(convId);
         showStatusMessage(QStringLiteral("已删除会话"), 3000);
@@ -1138,6 +1235,8 @@ void AggregateChatForm::onConversationListChanged()
 
 void AggregateChatForm::onNewMessage(int conversationId, const MessageRecord& msg)
 {
+    if (msg.direction == QLatin1String("in") && m_pendingStickyConvId == conversationId)
+        m_pendingStickyConvId = -1;
     if (conversationId == m_currentConvId) {
         appendMessageBubble(msg);
         scheduleScrollChatToBottom();
@@ -1148,6 +1247,8 @@ void AggregateChatForm::onNewMessage(int conversationId, const MessageRecord& ms
 
 void AggregateChatForm::onSentOk(int conversationId, const MessageRecord& msg)
 {
+    if (conversationId == m_currentConvId && msg.direction == QLatin1String("out"))
+        m_pendingStickyConvId = conversationId;
     if (conversationId == m_currentConvId) {
         appendMessageBubble(msg);
         scheduleScrollChatToBottom();
@@ -1165,4 +1266,109 @@ void AggregateChatForm::showStatusMessage(const QString& text, int timeoutMs)
                 m_statusLabel->clear();
         });
     }
+}
+
+void AggregateChatForm::updateAggregateAiControlsVisibility()
+{
+    const bool modeAi = m_modeCombo && m_modeCombo->currentIndex() == kAggregateModeIndexAiAssist;
+    const bool convOk = m_currentConvId > 0;
+    const bool onChat = m_centerStack && m_centerStack->currentWidget() == m_chatArea;
+    const bool showGen = modeAi && convOk && onChat;
+    if (m_btnAiGenerate) {
+        m_btnAiGenerate->setVisible(showGen);
+        m_btnAiGenerate->setEnabled(showGen && !m_aggregateAiGenerating);
+    }
+}
+
+void AggregateChatForm::setAggregateAiBusy(bool busy)
+{
+    m_aggregateAiGenerating = busy;
+    if (m_btnSend)
+        m_btnSend->setEnabled(!busy);
+    if (m_inputEdit)
+        m_inputEdit->setReadOnly(busy);
+    if (m_modeCombo)
+        m_modeCombo->setEnabled(!busy);
+    updateAggregateAiControlsVisibility();
+}
+
+void AggregateChatForm::abortAggregateAiRequest()
+{
+    if (m_aggregateAiClient)
+        m_aggregateAiClient->abortActive();
+    if (m_aggregateAiGenerating)
+        setAggregateAiBusy(false);
+}
+
+void AggregateChatForm::onModeComboChanged()
+{
+    updateAggregateAiControlsVisibility();
+}
+
+void AggregateChatForm::onGenerateAiDraftClicked()
+{
+    if (m_currentConvId <= 0 || m_aggregateAiGenerating || !m_aggregateAiClient)
+        return;
+
+    QString baseUrl;
+    QString model;
+    QString apiKey;
+    readAiSettingsForAggregate(&baseUrl, &model, &apiKey);
+    if (apiKey.trimmed().isEmpty()) {
+        showAggregateWarning(this, QStringLiteral("API Key"),
+                             QStringLiteral("请先在「机器人管理」→「设置」中配置 API Key；或为聚合辅助单独配置 "
+                                            "QSettings 键 aggregateAi/apiKey。"));
+        return;
+    }
+
+    MessageDao dao;
+    const auto inbound = dao.latestInboundContent(m_currentConvId);
+    if (!inbound || inbound->trimmed().isEmpty()) {
+        showAggregateInfo(this, QStringLiteral("AI 辅助"),
+                          QStringLiteral("暂无可辅助的客户入站消息。请先收到客户消息后再试。"));
+        return;
+    }
+
+    m_aggregateAiBaseline = m_inputEdit ? m_inputEdit->toPlainText() : QString();
+    m_aggregateAiAccumulated.clear();
+    setAggregateAiBusy(true);
+
+    QJsonArray msgs;
+    msgs.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("system")},
+                            {QStringLiteral("content"), aggregateAiMvpSystemPrompt()}});
+    msgs.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("user")},
+                            {QStringLiteral("content"),
+                             QStringLiteral("【客户最后一条入站消息】\n%1").arg(*inbound)}});
+
+    const QString url = OpenAiCompatClient::buildCompletionsUrl(baseUrl);
+    m_aggregateAiClient->requestChatCompletion(url, apiKey.trimmed(), model, msgs, true);
+}
+
+void AggregateChatForm::onAggregateAiStreamDelta(const QString& delta)
+{
+    if (!m_aggregateAiGenerating)
+        return;
+    m_aggregateAiAccumulated += delta;
+    if (m_inputEdit)
+        m_inputEdit->setPlainText(m_aggregateAiBaseline + m_aggregateAiAccumulated);
+}
+
+void AggregateChatForm::onAggregateAiCompleted()
+{
+    if (!m_aggregateAiGenerating)
+        return;
+    setAggregateAiBusy(false);
+}
+
+void AggregateChatForm::onAggregateAiFailed(const QString& reason)
+{
+    if (!m_aggregateAiGenerating)
+        return;
+    const QString tail =
+        m_aggregateAiAccumulated.isEmpty()
+            ? QStringLiteral("\n\n（AI 未能完成：%1）").arg(reason)
+            : QStringLiteral("\n\n（后续内容未能完成：%1）").arg(reason);
+    if (m_inputEdit)
+        m_inputEdit->setPlainText(m_aggregateAiBaseline + m_aggregateAiAccumulated + tail);
+    setAggregateAiBusy(false);
 }
