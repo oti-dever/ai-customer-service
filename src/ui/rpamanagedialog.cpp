@@ -97,16 +97,39 @@ void RpaManageDialog::setupUI()
     listLayout->setSpacing(8);
 
     for (const auto& it : items) {
-        auto* cb = new QCheckBox(QString::fromUtf8(it.label), listArea);
+        auto* row = new QWidget(listArea);
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(10);
+
+        auto* cb = new QCheckBox(QString::fromUtf8(it.label), row);
         m_checks.insert(QString::fromLatin1(it.id), cb);
-        listLayout->addWidget(cb);
+        rowLayout->addWidget(cb);
         connect(cb, &QCheckBox::stateChanged, this, &RpaManageDialog::onCheckboxChanged);
+
+        if (QString::fromLatin1(it.id) == QLatin1String("wechat")) {
+            m_btnWechatCalibrate = new QPushButton(QStringLiteral("微信OCR校准"), row);
+            m_btnWechatCalibrate->setToolTip(
+                QStringLiteral("多区域手动校准（消息区、未读条带等），写入 wechat_config.json"));
+            rowLayout->addWidget(m_btnWechatCalibrate);
+            connect(m_btnWechatCalibrate, &QPushButton::clicked, this,
+                    &RpaManageDialog::onWechatCalibrateClicked);
+        } else if (QString::fromLatin1(it.id) == QLatin1String("qianniu")) {
+            m_btnQianniuCalibrate = new QPushButton(QStringLiteral("千牛OCR校准"), row);
+            m_btnQianniuCalibrate->setToolTip(
+                QStringLiteral("两步框选消息区与标题区，写入 qianniu_config.json；无需先嵌入千牛"));
+            rowLayout->addWidget(m_btnQianniuCalibrate);
+            connect(m_btnQianniuCalibrate, &QPushButton::clicked, this,
+                    &RpaManageDialog::onQianniuCalibrateClicked);
+        }
+
+        rowLayout->addStretch(1);
+        listLayout->addWidget(row);
     }
     mainLayout->addWidget(listArea, 1);
 
     auto* bottom = new QHBoxLayout();
     bottom->setSpacing(10);
-    m_btnWechatCalibrate = new QPushButton(QStringLiteral("微信OCR校准"), this);
     m_btnStart = new QPushButton(QStringLiteral("启动"), this);
     m_btnStop = new QPushButton(QStringLiteral("停止"), this);
     m_btnClose = new QPushButton(QStringLiteral("关闭"), this);
@@ -114,7 +137,6 @@ void RpaManageDialog::setupUI()
     m_btnStart->setIconSize(iconSz);
     m_btnStop->setIconSize(iconSz);
     bottom->addStretch(1);
-    bottom->addWidget(m_btnWechatCalibrate);
     bottom->addWidget(m_btnStart);
     bottom->addWidget(m_btnStop);
     bottom->addWidget(m_btnClose);
@@ -122,7 +144,6 @@ void RpaManageDialog::setupUI()
 
     connect(btnAll, &QPushButton::clicked, this, &RpaManageDialog::onSelectAllClicked);
     connect(btnNone, &QPushButton::clicked, this, &RpaManageDialog::onDeselectAllClicked);
-    connect(m_btnWechatCalibrate, &QPushButton::clicked, this, &RpaManageDialog::onWechatCalibrateClicked);
     connect(m_btnStart, &QPushButton::clicked, this, &RpaManageDialog::onStartClicked);
     connect(m_btnStop, &QPushButton::clicked, this, &RpaManageDialog::onStopClicked);
     connect(m_btnClose, &QPushButton::clicked, this, &QDialog::reject);
@@ -220,6 +241,18 @@ void RpaManageDialog::onWechatCalibrateClicked()
         return;
     QTimer::singleShot(0, main, [main]() {
         main->startWechatRpaCalibrationStandalone();
+    });
+}
+
+void RpaManageDialog::onQianniuCalibrateClicked()
+{
+    MainWindow* main = m_main;
+    hide();
+    accept();
+    if (!main)
+        return;
+    QTimer::singleShot(0, main, [main]() {
+        main->startQianniuRpaCalibrationStandalone();
     });
 }
 
