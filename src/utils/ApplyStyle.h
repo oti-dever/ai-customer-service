@@ -41,6 +41,8 @@ public:
 
     static QString aggregateChatFormStyle();
     static QString aggregateChatFormStyle(MainWindowTheme theme);
+    /** 机器人助手页：Tab、设置区、头像等与聚合样式配套的补充 QSS。 */
+    static QString robotAssistantExtraStyle(MainWindowTheme theme);
     static QString helpDialogStyle();
     static QString helpDialogStyle(MainWindowTheme theme);
     static QString helpDialogHtmlBodyTextColor(MainWindowTheme theme);

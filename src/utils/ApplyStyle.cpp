@@ -1726,7 +1726,7 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
         QPushButton#aggregateTabPending:hover:!checked {
             background: %10;
         }
-        QPushButton#aggregateTabAll {
+        QPushButton#aggregateTabReplied {
             background: transparent;
             color: %9;
             border: none;
@@ -1734,11 +1734,11 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             padding: 6px 14px;
             font-size: 13px;
         }
-        QPushButton#aggregateTabAll:checked {
+        QPushButton#aggregateTabReplied:checked {
             background: %6;
             color: white;
         }
-        QPushButton#aggregateTabAll:hover:!checked {
+        QPushButton#aggregateTabReplied:hover:!checked {
             background: %10;
         }
         QLineEdit#aggregateSearch {
@@ -2045,6 +2045,244 @@ QString ApplyStyle::aggregateChatFormStyle(MainWindowTheme theme)
     case MainWindowTheme::Default:
     default:
         return buildAggregateChatFormQss(kAggDefault) + unifiedScrollBarQss(MainWindowTheme::Default);
+    }
+}
+
+QString ApplyStyle::robotAssistantExtraStyle(MainWindowTheme theme)
+{
+    switch (theme) {
+    case MainWindowTheme::Cool:
+        return QStringLiteral(
+            R"QSS(
+            RobotAssistantWidget QTabWidget::pane {
+                border: none;
+                background: transparent;
+            }
+            RobotAssistantWidget QTabBar::tab {
+                padding: 10px 22px;
+                font-size: 13px;
+                color: #64748b;
+                background: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }
+            RobotAssistantWidget QTabBar::tab:selected {
+                color: #0f172a;
+                font-weight: 600;
+                border-bottom: 2px solid #0284c7;
+            }
+            RobotAssistantWidget QTabBar::tab:hover:!selected {
+                color: #334155;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage {
+                background: #f1f5f9;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLabel#robotSettingsFieldLabel {
+                color: #0f172a;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLabel {
+                color: #0f172a;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLineEdit#robotSettingsField {
+                background: #ffffff;
+                border: 1px solid #94a3b8;
+                border-radius: 8px;
+                padding: 8px 10px;
+                font-size: 13px;
+                color: #0f172a;
+                min-height: 22px;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLineEdit#robotSettingsField:focus {
+                border-color: #0284c7;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo {
+                background: #ffffff;
+                border: 1px solid #94a3b8;
+                border-radius: 8px;
+                padding: 4px 10px;
+                padding-right: 28px;
+                font-size: 13px;
+                color: #0f172a;
+                min-height: 22px;
+                min-width: 168px;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo:focus {
+                border-color: #0284c7;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo::drop-down {
+                border: none;
+                width: 24px;
+            }
+            RobotAssistantWidget QLabel#robotAssistantAvatarIn {
+                background: transparent;
+                border-radius: 18px;
+            }
+            RobotAssistantWidget QLabel#robotAssistantPrivacy {
+                font-size: 12px;
+                color: #475569;
+            }
+            RobotAssistantWidget QLabel#robotAssistantStatus {
+                font-size: 12px;
+                color: #94a3b8;
+            }
+            )QSS");
+    case MainWindowTheme::Warm:
+        return QStringLiteral(
+            R"QSS(
+            RobotAssistantWidget QTabWidget::pane {
+                border: none;
+                background: transparent;
+            }
+            RobotAssistantWidget QTabBar::tab {
+                padding: 10px 22px;
+                font-size: 13px;
+                color: #78716c;
+                background: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }
+            RobotAssistantWidget QTabBar::tab:selected {
+                color: #3d3429;
+                font-weight: 600;
+                border-bottom: 2px solid #b45309;
+            }
+            RobotAssistantWidget QTabBar::tab:hover:!selected {
+                color: #57534e;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage {
+                background: #fffaf5;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLabel#robotSettingsFieldLabel {
+                color: #3d3429;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLabel {
+                color: #3d3429;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLineEdit#robotSettingsField {
+                background: #ffffff;
+                border: 1px solid #d6cbc0;
+                border-radius: 8px;
+                padding: 8px 10px;
+                font-size: 13px;
+                color: #3d3429;
+                min-height: 22px;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLineEdit#robotSettingsField:focus {
+                border-color: #b45309;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo {
+                background: #ffffff;
+                border: 1px solid #d6cbc0;
+                border-radius: 8px;
+                padding: 4px 10px;
+                padding-right: 28px;
+                font-size: 13px;
+                color: #3d3429;
+                min-height: 22px;
+                min-width: 168px;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo:focus {
+                border-color: #b45309;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo::drop-down {
+                border: none;
+                width: 24px;
+            }
+            RobotAssistantWidget QLabel#robotAssistantAvatarIn {
+                background: transparent;
+                border-radius: 18px;
+            }
+            RobotAssistantWidget QLabel#robotAssistantPrivacy {
+                font-size: 12px;
+                color: #78716c;
+            }
+            RobotAssistantWidget QLabel#robotAssistantStatus {
+                font-size: 12px;
+                color: #78716c;
+            }
+            )QSS");
+    case MainWindowTheme::Default:
+    default:
+        return QStringLiteral(
+            R"QSS(
+            RobotAssistantWidget QTabWidget::pane {
+                border: none;
+                background: transparent;
+            }
+            RobotAssistantWidget QTabBar::tab {
+                padding: 10px 22px;
+                font-size: 13px;
+                color: #71717a;
+                background: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }
+            RobotAssistantWidget QTabBar::tab:selected {
+                color: #18181b;
+                font-weight: 600;
+                border-bottom: 2px solid #71717a;
+            }
+            RobotAssistantWidget QTabBar::tab:hover:!selected {
+                color: #3f3f46;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage {
+                background: #ffffff;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLabel#robotSettingsFieldLabel {
+                color: #18181b;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLabel {
+                color: #18181b;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLineEdit#robotSettingsField {
+                background: #ffffff;
+                border: 1px solid #d4d4d8;
+                border-radius: 8px;
+                padding: 8px 10px;
+                font-size: 13px;
+                color: #18181b;
+                min-height: 22px;
+            }
+            RobotAssistantWidget QWidget#robotAssistantSettingsPage QLineEdit#robotSettingsField:focus {
+                border-color: #71717a;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo {
+                background: #ffffff;
+                border: 1px solid #d4d4d8;
+                border-radius: 8px;
+                padding: 4px 10px;
+                padding-right: 28px;
+                font-size: 13px;
+                color: #18181b;
+                min-height: 22px;
+                min-width: 168px;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo:focus {
+                border-color: #71717a;
+            }
+            RobotAssistantWidget QComboBox#robotAssistantModelCombo::drop-down {
+                border: none;
+                width: 24px;
+            }
+            RobotAssistantWidget QLabel#robotAssistantAvatarIn {
+                background: transparent;
+                border-radius: 18px;
+            }
+            RobotAssistantWidget QLabel#robotAssistantPrivacy {
+                font-size: 12px;
+                color: #71717a;
+            }
+            RobotAssistantWidget QLabel#robotAssistantStatus {
+                font-size: 12px;
+                color: #71717a;
+            }
+            )QSS");
     }
 }
 
