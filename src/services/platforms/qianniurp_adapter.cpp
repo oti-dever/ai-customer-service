@@ -8,7 +8,7 @@ QianniuRPAAdapter::QianniuRPAAdapter(QObject* parent)
     : IPlatformAdapter(parent)
 {
     m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(800);
+    m_pollTimer->setInterval(500);
     connect(m_pollTimer, &QTimer::timeout, this, &QianniuRPAAdapter::pollInboxOnce);
 }
 
@@ -63,7 +63,8 @@ void QianniuRPAAdapter::pollInboxOnce()
 
     QSqlQuery q(db);
     q.prepare(
-        "SELECT id, platform_conversation_id, customer_name, content, created_at, platform_msg_id "
+        "SELECT id, platform_conversation_id, customer_name, content, created_at, platform_msg_id, "
+        "       sender_name, original_timestamp "
         "FROM rpa_inbox_messages "
         "WHERE platform = :platform "
         "  AND consume_status = 0 "
@@ -85,6 +86,8 @@ void QianniuRPAAdapter::pollInboxOnce()
         const QString content = q.value(3).toString();
         const QDateTime createdAt = q.value(4).toDateTime();
         const QString platformMsgId = q.value(5).toString();
+        const QString senderName = q.value(6).toString();
+        const QString originalTimestamp = q.value(7).toString();
 
         PlatformMessage msg;
         msg.platform = platformName();
@@ -92,9 +95,11 @@ void QianniuRPAAdapter::pollInboxOnce()
         msg.customerName = customerName;
         msg.content = content;
         msg.direction = QStringLiteral("in");
-        msg.sender = QStringLiteral("customer");
+        msg.sender = senderName.isEmpty() ? QStringLiteral("customer") : senderName;
         msg.createdAt = createdAt.isValid() ? createdAt : QDateTime::currentDateTime();
         msg.platformMsgId = platformMsgId;
+        msg.senderName = senderName;
+        msg.originalTimestamp = originalTimestamp;
 
         emit incomingMessage(msg);
 

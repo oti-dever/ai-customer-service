@@ -4,12 +4,27 @@
 #include <QSqlError>
 #include <QSqlQuery>
 
+namespace {
+// 空闲时略长于原 500ms，有流量时缩短以尽快 drain（含单批 LIMIT 50 后的连续批次）。
+constexpr int kInboxPollIdleMs = 600;
+constexpr int kInboxPollActiveMs = 150;
+} // namespace
+
 WechatRPAAdapter::WechatRPAAdapter(QObject* parent)
     : IPlatformAdapter(parent)
 {
     m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(500);
+    m_pollTimer->setInterval(kInboxPollIdleMs);
     connect(m_pollTimer, &QTimer::timeout, this, &WechatRPAAdapter::pollInboxOnce);
+}
+
+void WechatRPAAdapter::applyInboxPollCadence(bool hadInboundWork)
+{
+    if (!m_pollTimer)
+        return;
+    const int ms = hadInboundWork ? kInboxPollActiveMs : kInboxPollIdleMs;
+    if (m_pollTimer->interval() != ms)
+        m_pollTimer->setInterval(ms);
 }
 
 void WechatRPAAdapter::connectPlatform()
@@ -32,9 +47,11 @@ void WechatRPAAdapter::startListening()
     if (!m_connected) {
         connectPlatform();
     }
+    applyInboxPollCadence(false);
     if (!m_pollTimer->isActive())
         m_pollTimer->start();
-    qInfo() << "[WechatRPAAdapter] startListening（轮询 rpa_inbox_messages）";
+    qInfo() << "[WechatRPAAdapter] startListening（动态轮询 rpa_inbox_messages，空闲"
+             << kInboxPollIdleMs << "ms / 有流量" << kInboxPollActiveMs << "ms）";
 }
 
 void WechatRPAAdapter::stopListening()
@@ -57,12 +74,15 @@ void WechatRPAAdapter::pollInboxOnce()
         return;
 
     QSqlDatabase db = Database::getInstance().connection();
-    if (!db.isOpen())
+    if (!db.isOpen()) {
+        applyInboxPollCadence(false);
         return;
+    }
 
     QSqlQuery q(db);
     q.prepare(
-        "SELECT id, platform_conversation_id, customer_name, content, created_at, platform_msg_id "
+        "SELECT id, platform_conversation_id, customer_name, content, created_at, platform_msg_id, "
+        "       sender_name, original_timestamp "
         "FROM rpa_inbox_messages "
         "WHERE platform = :platform "
         "  AND consume_status = 0 "
@@ -73,6 +93,7 @@ void WechatRPAAdapter::pollInboxOnce()
 
     if (!q.exec()) {
         qWarning() << "[WechatRPAAdapter] inbox 查询失败:" << q.lastError().text();
+        applyInboxPollCadence(false);
         return;
     }
 
@@ -84,6 +105,8 @@ void WechatRPAAdapter::pollInboxOnce()
         const QString content = q.value(3).toString();
         const QDateTime createdAt = q.value(4).toDateTime();
         const QString platformMsgId = q.value(5).toString();
+        const QString senderName = q.value(6).toString();
+        const QString originalTimestamp = q.value(7).toString();
 
         PlatformMessage msg;
         msg.platform = platformName();
@@ -94,6 +117,8 @@ void WechatRPAAdapter::pollInboxOnce()
         msg.sender = QStringLiteral("customer");
         msg.createdAt = createdAt.isValid() ? createdAt : QDateTime::currentDateTime();
         msg.platformMsgId = platformMsgId;
+        msg.senderName = senderName;
+        msg.originalTimestamp = originalTimestamp;
 
         emit incomingMessage(msg);
 
@@ -102,8 +127,10 @@ void WechatRPAAdapter::pollInboxOnce()
             m_lastInboxId = inboxId;
     }
 
-    if (consumedIds.isEmpty())
+    if (consumedIds.isEmpty()) {
+        applyInboxPollCadence(false);
         return;
+    }
 
     QSqlQuery u(db);
     u.prepare("UPDATE rpa_inbox_messages SET consume_status = 1 WHERE id = :id");
@@ -117,5 +144,6 @@ void WechatRPAAdapter::pollInboxOnce()
         }
     }
     ok ? db.commit() : db.rollback();
+    applyInboxPollCadence(ok);
 }
 

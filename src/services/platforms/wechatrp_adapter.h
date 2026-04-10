@@ -22,6 +22,8 @@ public:
 
 private:
     void pollInboxOnce();
+    /** hadWork=true：刚消费到入站行，下次轮询缩短间隔；false：空闲或异常，拉长间隔。 */
+    void applyInboxPollCadence(bool hadInboundWork);
 
     bool m_connected = false;
     QTimer* m_pollTimer = nullptr;
