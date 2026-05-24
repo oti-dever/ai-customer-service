@@ -181,6 +181,22 @@ def set_clipboard_text(text: str) -> bool:
     CF_UNICODETEXT = 13
     GMEM_MOVEABLE = 0x0002
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
     if not user32.OpenClipboard(None):
         return False
     try:
@@ -205,6 +221,12 @@ def set_clipboard_text(text: str) -> bool:
 def get_clipboard_text() -> Optional[str]:
     """Get clipboard text. Returns None if not text."""
     CF_UNICODETEXT = 13
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
     if not user32.OpenClipboard(None):
         return None
     try:
@@ -212,6 +234,10 @@ def get_clipboard_text() -> Optional[str]:
         if not h:
             return None
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = wintypes.LPVOID
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
         ptr = kernel32.GlobalLock(h)
         if not ptr:
             return None
@@ -273,17 +299,29 @@ def post_click_window_at_point(screen_x: int, screen_y: int, delay_ms: int = 20)
     PostMessage click to the concrete child window at screen point.
     Compared with posting to top-level hwnd, this is more reliable for Qt child controls.
     """
+    target = get_window_at_point(screen_x, screen_y)
+    if not target:
+        return False
+    hwnd, client_x, client_y = target
+    post_click(hwnd, client_x, client_y, delay_ms=delay_ms)
+    return True
+
+
+def get_window_at_point(screen_x: int, screen_y: int) -> Optional[tuple[int, int, int]]:
+    """
+    Resolve the concrete child window and its client coordinates at a screen point.
+    Returns (hwnd, client_x, client_y) or None.
+    """
     class POINT(ctypes.Structure):
         _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
     pt = POINT(screen_x, screen_y)
     h = user32.WindowFromPoint(pt)
     if not h:
-        return False
+        return None
     if not user32.ScreenToClient(h, ctypes.byref(pt)):
-        return False
-    post_click(int(h), int(pt.x), int(pt.y), delay_ms=delay_ms)
-    return True
+        return None
+    return int(h), int(pt.x), int(pt.y)
 
 
 def post_key(hwnd: int, vk: int) -> None:

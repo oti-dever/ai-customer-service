@@ -1,0 +1,50 @@
+{
+  "chat_region": {
+    "coordinates": "client",
+    "left_ratio": 0.08,
+    "top_ratio": 0.18,
+    "right_ratio": 0.95,
+    "bottom_ratio": 0.78,
+    "mode": "relative_to_window",
+    "comment": "PDD 商家后台聊天区（用于截图 OCR）。未校准时请先保持浏览器缩放为 100%"
+  },
+  "conversation": {
+    "platform_conversation_id": "pdd_demo_conv_1",
+    "customer_name": "未知买家",
+    "default_customer_name": "未知买家",
+    "conv_id_prefix": "pdd_"
+  },
+  "layout": {
+    "left_threshold": 0.4,
+    "right_threshold": 0.6,
+    "merge_y_gap": 40,
+    "fuzzy_dedup_threshold": 0.85
+  },
+  "ocr": {
+    "engine": "paddleocr",
+    "lang": "ch",
+    "min_confidence": 0.5,
+    "max_side": 960,
+    "invert_for_dark_mode": true,
+    "det_thresh": 0.2,
+    "det_box_thresh": 0.4
+  },
+  "window_match": {
+    "process_name": "chrome.exe",
+    "title_contains": "拼多多"
+  },
+  "input_region": {
+    "coordinates": "client",
+    "left_ratio": 0.14,
+    "top_ratio": 0.77,
+    "right_ratio": 0.86,
+    "bottom_ratio": 0.93,
+    "comment": "输入框区域（用于点击聚焦）。"
+  },
+  "poll_interval_sec": 2,
+  "writer_poll_sec": 0.8,
+  "writer": {
+    "max_retries": 1
+  }
+}
+

@@ -1,0 +1,180 @@
+{
+    "allow_foreground_fallback": false,
+    "chat_region": {
+        "h": 530,
+        "mode": "relative_to_window",
+        "w": 718,
+        "x": 370,
+        "y": 79
+    },
+    "contact_header_region": {
+        "comment_preprocess": "ocr_preprocess=selected_green_white：暗色标题栏先转绿底白字再 OCR，贴近会话选中行对比；浅色主题由 header_auto_skip_light 自动跳过。关闭设 ocr_preprocess 为 none。",
+        "h": 37,
+        "header_auto_skip_light": true,
+        "header_luma_threshold": 125,
+        "ocr_preprocess": "selected_green_white",
+        "w": 301,
+        "x": 317,
+        "y": 38
+    },
+    "conversation": {
+        "conv_id_prefix": "wechat_",
+        "default_customer_name": "未知联系人"
+    },
+    "conversation_list_region": {
+        "auto_switch": true,
+        "exclude": [
+            "公众号",
+            "服务号",
+            "文件传输助手",
+            "微信支付",
+            "微信团队",
+            "微信运动",
+            "腾讯新闻",
+            "朋友圈"
+        ],
+        "h": 671,
+        "row_height_guess": 65,
+        "w": 237,
+        "x": 68,
+        "y": 78
+    },
+    "debug": {
+        "every_n_scans": 1,
+        "log_max_content_len": 120,
+        "log_phase_timing": true,
+        "log_phase_timing_comment": "true：每轮发现未读/处理会话总耗时 + 聊天区分项 ms。当前已关 save_screenshots 与 log_parsed_messages，仅保留本项做耗时分析",
+        "log_parsed_messages": false,
+        "max_png_files": 300,
+        "save_screenshots": false,
+        "screenshot_dir": "python/rpa/_debug/wechat"
+    },
+    "hwnd_hex": "0x206ee",
+    "input_box": {
+        "click_before_paste": true,
+        "click_offset_x": 80,
+        "click_offset_y": 40,
+        "comment": "x/y/w/h 可通过「微信OCR校准 → 聊天输入框」更新；input_method: unicode(逐字输入,默认)|paste(Ctrl+V)|wm_paste(WM_PASTE)",
+        "double_click": false,
+        "h": 75,
+        "input_method": "unicode",
+        "w": 374,
+        "x": 320,
+        "y": 664
+    },
+    "layout": {
+        "left_threshold": 0.4,
+        "merge_y_gap": 20,
+        "right_threshold": 0.6
+    },
+    "ocr": {
+        "det_box_thresh": 0.4,
+        "det_thresh": 0.2,
+        "engine": "paddleocr",
+        "invert_for_dark_mode": true,
+        "lang": "ch",
+        "max_side": 960,
+        "min_confidence": 0.5
+    },
+    "platform": "wechat_pc",
+    "poll_interval_sec": 2,
+    "production_mode": false,
+    "production_mode_comment": "true 时 Reader 强制关闭 debug.save_screenshots 与 log_parsed_messages，适合生产；排障改回 false",
+    "reader_ocr": {
+        "comment": "D=定时全量列表OCR刷新缓存；中间轮次用缓存+红点。C=红点y与列表条目对不齐时点行+标题OCR入队。当前会话路径：聊天区每轮OCR，标题/列表校对按 sec 与 scans 降频。list/header 均设为 0 表示每轮全量列表OCR（旧行为）。",
+        "current_chat_header_refresh_scans": 4,
+        "current_chat_header_refresh_sec": 8,
+        "list_full_refresh_scans": 0,
+        "list_full_refresh_sec": 12,
+        "list_switch_comment": "红点后台点列表失败前的等待(秒)与额外重试次数；仍失败则读标题 fuzzy 匹配，再不行才走搜索框",
+        "list_switch_max_retry": 2,
+        "list_switch_settle_sec": 0.42,
+        "red_dot_header_click_settle_sec": 0.45
+    },
+    "receipt_verify": {
+        "chat_bottom_height": 96,
+        "comment": "发送后轻量回执：检测输入框是否被清空/改变，或聊天区底部是否变化；失败先记日志，不阻断成功判定",
+        "enabled": true,
+        "timeout_sec": 2
+    },
+    "search_box": {
+        "comment": "x/y=后台点击搜索框中心点；ocr_*=搜索框OCR校验区域；use_enter_first=优先回车直达普通联系人；keyboard_nav_max_steps=回车失败后最多尝试多少次下方向键+回车；result_*=搜索结果列表OCR定位区域；use_result_region_ocr=是否启用结果区域OCR兜底",
+        "first_result_x": 194,
+        "first_result_y": 404,
+        "h": 26,
+        "keyboard_nav_max_steps": 8,
+        "ocr_h": 26,
+        "ocr_w": 155,
+        "ocr_x": 104,
+        "ocr_y": 41,
+        "result_h": 666,
+        "result_w": 230,
+        "result_x": 79,
+        "result_y": 71,
+        "use_enter_first": true,
+        "use_result_region_ocr": true,
+        "w": 155,
+        "x": 181,
+        "y": 54
+    },
+    "send_mode": "background",
+    "send_mode_comment": "background=后台PostMessage发送(不中断客服操作)|foreground=前台激活发送(可靠但会短暂切换窗口)",
+    "unread_detection": {
+        "comment": "红点检测参数。row_height=会话行高(px), red_threshold=最少红色像素数, scan_x_ratio=扫描左侧比例(头像区)",
+        "cooldown_sec": 2,
+        "enabled": true,
+        "max_pending_targets": 12,
+        "red_threshold": 18,
+        "row_height": 65,
+        "scan_band_comment": "由微信OCR校准的『未读扫描带』生成；相对 conversation_list_region 宽度的比例",
+        "scan_current_chat": true,
+        "scan_x_end_ratio": 0.22362869198312235,
+        "scan_x_ratio": 1,
+        "scan_x_start_ratio": 0.16877637130801687
+    },
+    "uia": {
+        "comment": "UIA 主路径：讲述人前置且控件树完整时优先用于切会话、找输入框、点击发送；失败后回退到现有 OCR/ROI 路径",
+        "enabled": true,
+        "max_depth": 40,
+        "max_visits": 22000,
+        "prefer_send_button_click": true,
+        "require_probe_ok": false,
+        "session_list_max_x_ratio": 0.42,
+        "session_match_mode": "contains",
+        "session_settle_sec": 0.35,
+        "session_switch_strategy": [
+            "uia",
+            "foreground",
+            "background"
+        ]
+    },
+    "uia_reader": {
+        "comment": "UIA Reader 实验开关。当前默认只读取当前可见文本消息并输出结构化结果；方向判定优先尝试头像-气泡配对；write_inbox=false 时不接正式 inbox，属于安全模式",
+        "avatar_hit_test_enabled": true,
+        "avatar_pairing_max_vertical_gap": 48,
+        "assume_all_text_as_incoming": false,
+        "direction_mode": "avatar_pairing",
+        "enabled": true,
+        "max_items": 60,
+        "only_text_messages": true,
+        "write_inbox": false
+    },
+    "window_lock": {
+        "comment": "Reader/Writer 对微信窗口的串行锁，避免切会话与发送互相打断",
+        "enabled": true,
+        "retry_interval_sec": 0.15,
+        "timeout_sec": 15
+    },
+    "window_match": {
+        "process_name": "Weixin.exe",
+        "title_contains": "微信"
+    },
+    "window_size_px": {
+        "h": 797,
+        "w": 1113
+    },
+    "writer_lazy_ocr_init": true,
+    "writer_lazy_ocr_init_comment": "true 时 Writer 的 PaddleOCR 推迟到首条待发消息再加载，与 Reader 错峰；需启动即加载设 false",
+    "writer_poll_sec": 0.8,
+    "writer_poll_sec_comment": "Writer单独轮询间隔(秒)。Writer只做轻量DB查询,可以比Reader更快。Reader用poll_interval_sec"
+}
