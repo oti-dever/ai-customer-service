@@ -42,6 +42,10 @@ env/
 python/rpa/_state/
 python/rpa/_debug/
 python/rpa/config/*.local.json
+python/rpa/_media/
+
+# 本地工具定位/缓存
+.locator/
 
 # 操作系统与杂项
 .DS_Store
