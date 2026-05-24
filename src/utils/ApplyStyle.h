@@ -26,6 +26,7 @@ struct PlatformTreeColors {
 
 class ApplyStyle {
 public:
+    /** Compatibility shim while callers are migrated to the single default theme. */
     enum class MainWindowTheme {
         Default = 0,
         Cool = 1,
@@ -33,7 +34,8 @@ public:
     };
 
     static QString loginWindowStyle();
-    /** 主窗口 QSS；Default 为经典黑灰白（深侧栏 + 浅工作区 + 白卡片）。 */
+    static QString messageBoxContrastStyle();
+    /** 主窗口 QSS；Default 为浅蓝 + 白（与聚合接待默认主题一致方向）。 */
     static QString mainWindowStyle();
     static QString mainWindowStyle(MainWindowTheme theme);
     static MainWindowTheme loadSavedMainWindowTheme();
@@ -45,6 +47,8 @@ public:
     static QString robotAssistantExtraStyle(MainWindowTheme theme);
     static QString helpDialogStyle();
     static QString helpDialogStyle(MainWindowTheme theme);
+    /** 帮助中心 / AI 后台等左侧目录树：与 QStyledItemDelegate 自绘配套（Fusion + indentation=0）。 */
+    static QString sidebarTocTreeStyleSheet(const QString& treeObjectName, MainWindowTheme theme);
     static QString helpDialogHtmlBodyTextColor(MainWindowTheme theme);
     static QString helpDialogHtmlHrBorderColor(MainWindowTheme theme);
     static QString helpDialogHtmlWarningColor(MainWindowTheme theme);

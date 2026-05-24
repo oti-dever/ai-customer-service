@@ -3,6 +3,7 @@
 
 #include <QByteArray>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QObject>
 #include <QString>
 
@@ -16,18 +17,24 @@ class QNetworkReply;
 class OpenAiCompatClient : public QObject
 {
     Q_OBJECT
+    friend class TestOpenAiCompatClient;
 public:
     explicit OpenAiCompatClient(QNetworkAccessManager* nam, QObject* parent = nullptr);
     ~OpenAiCompatClient() override;
 
     void abortActive();
 
-    /** POST JSON to completions URL; emits streamDelta / completed / failed on main thread. */
+    /**
+     * POST JSON to completions URL; emits streamDelta / completed / failed on main thread.
+     * 对火山方舟域名会自动附加 thinking=disabled（关闭豆包 Seed 等模型的思考链，除非 extraRootFields 覆盖）。
+     * extraRootFields 会与根对象合并（后者覆盖同名键），可用于 max_tokens 等。
+     */
     void requestChatCompletion(const QString& completionsUrl,
                                const QString& apiKey,
                                const QString& model,
                                const QJsonArray& messages,
-                               bool stream);
+                               bool stream,
+                               const QJsonObject& extraRootFields = {});
 
     static QString buildCompletionsUrl(const QString& baseUrl);
 

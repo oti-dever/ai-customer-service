@@ -71,7 +71,8 @@ void OpenAiCompatClient::requestChatCompletion(const QString& completionsUrl,
                                                const QString& apiKey,
                                                const QString& model,
                                                const QJsonArray& messages,
-                                               bool stream)
+                                               bool stream,
+                                               const QJsonObject& extraRootFields)
 {
     abortActive();
     m_streamMode = stream;
@@ -87,6 +88,17 @@ void OpenAiCompatClient::requestChatCompletion(const QString& completionsUrl,
     root[QStringLiteral("model")] = model;
     root[QStringLiteral("messages")] = messages;
     root[QStringLiteral("stream")] = stream;
+
+    // 火山方舟：豆包 Seed 等默认可能开启思考；关闭可减少延迟与冗长推理片段（见官方 thinking 参数）
+    if (completionsUrl.contains(QStringLiteral("volces.com"), Qt::CaseInsensitive)
+        || completionsUrl.contains(QStringLiteral("ark.cn-beijing"), Qt::CaseInsensitive)) {
+        QJsonObject thinking;
+        thinking[QStringLiteral("type")] = QStringLiteral("disabled");
+        root[QStringLiteral("thinking")] = thinking;
+    }
+
+    for (auto it = extraRootFields.constBegin(); it != extraRootFields.constEnd(); ++it)
+        root[it.key()] = it.value();
 
     const QJsonDocument doc(root);
     const QByteArray body = doc.toJson(QJsonDocument::Compact);
@@ -109,7 +121,15 @@ void OpenAiCompatClient::onReadyRead()
 {
     if (!m_reply || !m_streamMode)
         return;
-    m_sseBuffer += m_reply->readAll();
+    constexpr qsizetype kMaxSseBuffer = 64 * 1024 * 1024;
+    const QByteArray chunk = m_reply->readAll();
+    if (m_sseBuffer.size() + chunk.size() > kMaxSseBuffer) {
+        m_sseBuffer.clear();
+        abortActive();
+        emit failed(QStringLiteral("流式数据缓冲过大，已中止以防内存耗尽（请缩短输出或联系服务商）。"));
+        return;
+    }
+    m_sseBuffer += chunk;
     processSseBuffer();
 }
 
@@ -154,12 +174,12 @@ bool OpenAiCompatClient::handleSseLine(const QByteArray& line)
     const QJsonObject c0 = choices.at(0).toObject();
     const QJsonObject delta = c0.value(QStringLiteral("delta")).toObject();
     const QString piece = delta.value(QStringLiteral("content")).toString();
-    if (!piece.isEmpty())
-        emit streamDelta(piece);
-
     const QJsonObject msg = c0.value(QStringLiteral("message")).toObject();
     const QString whole = msg.value(QStringLiteral("content")).toString();
-    if (!whole.isEmpty())
+    // 流式最后一包有些服务会同时带 delta 片段与 message 全文，若两次 emit 会导致整段重复、内存暴涨。
+    if (!piece.isEmpty())
+        emit streamDelta(piece);
+    else if (!whole.isEmpty())
         emit streamDelta(whole);
 
     return true;

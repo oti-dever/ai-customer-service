@@ -1,16 +1,60 @@
 #include "database.h"
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QStandardPaths>
 #include <QDebug>
+
+namespace {
+
+QString defaultDatabasePath()
+{
+    QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (dataDir.isEmpty())
+        dataDir = QDir::homePath() + QStringLiteral("/.yy-ai-customer-service");
+    QDir().mkpath(dataDir);
+    return dataDir + QDir::separator() + QStringLiteral("app.db");
+}
+
+void migrateLegacyDatabaseIfNeeded(const QString& targetPath)
+{
+    const QFileInfo targetInfo(targetPath);
+    if (targetInfo.exists())
+        return;
+
+    const QString legacyDir = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/database");
+    const QString legacyPath = legacyDir + QDir::separator() + QStringLiteral("app.db");
+    if (!QFileInfo::exists(legacyPath))
+        return;
+
+    QDir().mkpath(targetInfo.absolutePath());
+    if (QFile::copy(legacyPath, targetPath))
+        qInfo() << "已迁移旧数据库到应用数据目录:" << targetPath;
+
+    const QStringList sidecars = {
+        QStringLiteral(".db-wal"),
+        QStringLiteral(".db-shm"),
+        QStringLiteral(".db-journal")
+    };
+    for (const QString& suffix : sidecars) {
+        const QString legacySidecar = legacyPath + suffix.mid(3);
+        const QString targetSidecar = targetPath + suffix.mid(3);
+        if (!QFileInfo::exists(legacySidecar) || QFileInfo::exists(targetSidecar))
+            continue;
+        QFile::copy(legacySidecar, targetSidecar);
+    }
+}
+
+} // namespace
 
 bool Database::open(const QString& path)
 {
     if (m_path.isEmpty()) {
         if (path.isEmpty()) {
-            QString dataDir = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/database");
-            QDir().mkpath(dataDir);
-            m_path = dataDir + QDir::separator() + "app.db";
+            m_path = defaultDatabasePath();
+            migrateLegacyDatabaseIfNeeded(m_path);
         } else {
             m_path = path;
         }
@@ -23,7 +67,8 @@ bool Database::open(const QString& path)
         qWarning() << "数据库打开失败:" << db.lastError().text();
         return false;
     }
-    qDebug() << "数据库打开成功";
+    qInfo() << "[Database] SQLite 路径:" << m_path
+            << "（Python RPA 默认与此路径对齐；覆盖请设环境变量 AI_CUSTOMER_SERVICE_DB）";
 
     // Multi-process read/write (Qt + Python RPA) recommended defaults
     {
@@ -38,7 +83,16 @@ bool Database::open(const QString& path)
 
 void Database::close()
 {
-    QSqlDatabase::database().close();
+    const QString connectionName = QSqlDatabase::defaultConnection;
+    if (QSqlDatabase::contains(connectionName)) {
+        {
+            QSqlDatabase db = QSqlDatabase::database(connectionName, false);
+            if (db.isValid())
+                db.close();
+        }
+        QSqlDatabase::removeDatabase(connectionName);
+    }
+    m_path.clear();
 }
 
 bool Database::isOpen() const
@@ -158,6 +212,8 @@ bool Database::runMigrations()
         "ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN avatar_path TEXT DEFAULT ''",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN content_image_path TEXT DEFAULT ''",
+        "ALTER TABLE messages ADD COLUMN content_image_path TEXT DEFAULT ''",
     };
 
     for (const char* sql : requiredMigrations) {

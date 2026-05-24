@@ -2,6 +2,8 @@
 #include "ui/mainwindow.h"
 #include "data/database.h"
 #include "core/conversationmanager.h"
+#include "core/platformbootstrap.h"
+#include "utils/appsettings.h"
 #include "utils/logger.h"
 #include "utils/swordcursor.h"
 #include <QApplication>
@@ -12,8 +14,7 @@
 int main(int argc, char* argv[])
 {
     QApplication a(argc, argv);
-    a.setApplicationName("AI客服");
-    a.setOrganizationName("Demo");
+    AppSettings::configureApplication(a);
     a.setWindowIcon(QIcon(QStringLiteral(":/app_icon.svg")));
 
     SwordCursor::restore();
@@ -30,7 +31,7 @@ int main(int argc, char* argv[])
     }
     qInfo() << "数据库初始化成功";
 
-    ConversationManager::instance().initialize();
+    PlatformBootstrap::initializeDefaultPlatforms(ConversationManager::instance());
 
     QObject::connect(&a, &QCoreApplication::aboutToQuit, [] { SwordCursor::restore(); });
 

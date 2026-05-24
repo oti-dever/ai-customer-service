@@ -2,10 +2,7 @@
 #include "messagerouter.h"
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
-#include "../services/platforms/simplatformadapter.h"
-#include "../services/platforms/qianniurp_adapter.h"
-#include "../services/platforms/wechatrp_adapter.h"
-#include "../services/platforms/pddrp_adapter.h"
+#include <QDebug>
 
 ConversationManager& ConversationManager::instance()
 {
@@ -18,29 +15,18 @@ ConversationManager::ConversationManager(QObject* parent)
 {
 }
 
-void ConversationManager::initialize()
+void ConversationManager::initialize(MessageRouter* router)
 {
-    m_router = new MessageRouter(this);
+    if (!router) {
+        qWarning() << "[ConversationManager] 初始化失败：MessageRouter 不能为空";
+        return;
+    }
+    if (m_router) {
+        qWarning() << "[ConversationManager] 已初始化，忽略重复装配";
+        return;
+    }
 
-    m_simulator = new SimPlatformAdapter(this);
-    m_router->registerAdapter(m_simulator);
-    m_simulator->connectPlatform();
-    m_simulator->startListening();
-
-    m_qianniu = new QianniuRPAAdapter(this);
-    m_router->registerAdapter(m_qianniu);
-    m_qianniu->connectPlatform();
-    m_qianniu->startListening();
-
-    m_wechat = new WechatRPAAdapter(this);
-    m_router->registerAdapter(m_wechat);
-    m_wechat->connectPlatform();
-    m_wechat->startListening();
-
-    m_pdd = new PddRPAAdapter(this);
-    m_router->registerAdapter(m_pdd);
-    m_pdd->connectPlatform();
-    m_pdd->startListening();
+    m_router = router;
 
     connect(m_router, &MessageRouter::conversationCreated, this, [this](const ConversationInfo& conv) {
         qDebug() << "[ConversationManager] 新会话:" << conv.customerName;
@@ -65,7 +51,7 @@ void ConversationManager::initialize()
         emit messageSendFailed(convId, reason);
     });
 
-    qInfo() << "[ConversationManager] 初始化完成，模拟平台/千牛RPA/微信RPA/PDD RPA 适配器已就绪";
+    qInfo() << "[ConversationManager] 初始化完成，消息路由已装配";
 }
 
 QVector<ConversationInfo> ConversationManager::allConversations() const
@@ -85,7 +71,8 @@ void ConversationManager::selectConversation(int conversationId)
     if (m_currentConvId == conversationId)
         return;
     m_currentConvId = conversationId;
-    clearUnread(conversationId);
+    if (conversationId > 0)
+        clearUnread(conversationId);
     qDebug() << "[ConversationManager] 选择会话:" << conversationId;
     emit currentConversationChanged(conversationId);
 }
@@ -93,6 +80,11 @@ void ConversationManager::selectConversation(int conversationId)
 void ConversationManager::sendMessage(int conversationId, const QString& text)
 {
     if (text.trimmed().isEmpty()) return;
+    if (!m_router) {
+        qWarning() << "[ConversationManager] 消息路由未初始化，无法发送";
+        emit messageSendFailed(conversationId, QStringLiteral("消息路由未初始化"));
+        return;
+    }
     qDebug() << "[ConversationManager] 发送消息 convId=" << conversationId;
     m_router->sendMessage(conversationId, text);
 }

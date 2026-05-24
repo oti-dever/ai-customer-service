@@ -12,16 +12,16 @@
 #include <QStandardItemModel>
 #include <QTreeView>
 #include <QRect>
-#include <QProcess>
-#include <QStringDecoder>
-#include <QSharedPointer>
 #include "../utils/applystyle.h"
 #include "../utils/win32windowhelper.h"
 
 class AggregateChatForm;
 class RobotAssistantWidget;
+class AiCustomerServiceBackendWindow;
 class RpaConsoleWindow;
 class RpaManageDialog;
+class RpaProcessController;
+class WeChatWorkbenchDialog;
 class QShowEvent;
 
 struct QuickLaunchApp {
@@ -122,6 +122,8 @@ public:
     void startBatchAddWindows(const QVector<WindowInfo>& list);
     QSet<quintptr> managedWindowHandles() const;
     ApplyStyle::MainWindowTheme mainWindowTheme() const { return m_mainWindowTheme; }
+    void openWechatWorkbenchDialog();
+    void openAiCustomerServiceBackendWindow(bool goToApiModelPage = false);
 
 private:
     void switchToWindow(const QString& platformId);
@@ -190,8 +192,6 @@ private:
     QTreeView* m_platformTree = nullptr;
     QLabel* m_placeholderLabel = nullptr;
     QWidget* m_placeholderPage = nullptr;
-    QToolButton* m_btnAdd = nullptr;
-    QToolButton* m_btnRefresh = nullptr;
     QToolButton* m_btnQuickStart = nullptr;
     QToolButton* m_btnOneClickAggregate = nullptr;
     QFrame* m_readyCard = nullptr;
@@ -200,10 +200,12 @@ private:
     QLabel* m_statusMessage = nullptr;
     QLabel* m_statusSeparator = nullptr;
     QLabel* m_statusTime = nullptr;
-    QToolButton* m_btnThemeSwitch = nullptr;
     ApplyStyle::MainWindowTheme m_mainWindowTheme = ApplyStyle::MainWindowTheme::Default;
+    /** 聚合接待独立顶层窗；`m_aggregateChatForm` 为其 centralWidget，随窗体销毁。 */
+    QMainWindow* m_aggregateReceptionWindow = nullptr;
     AggregateChatForm* m_aggregateChatForm = nullptr;
     RobotAssistantWidget* m_robotAssistantWidget = nullptr;
+    AiCustomerServiceBackendWindow* m_aiCustomerServiceBackendWindow = nullptr;
 
     QStandardItem* m_onlineGroup = nullptr;
     QStandardItem* m_manageGroup = nullptr;
@@ -224,11 +226,9 @@ private:
     QVector<QuickLaunchApp> m_quickLaunchApps;
     bool m_quickLaunchOnlyIfNotRunning = true;
 
-    QMap<QString, QProcess*> m_rpaProcesses;
-    /** 与 m_rpaProcesses 同步：子进程控制台输出按 UTF-8 增量解码。 */
-    QMap<QString, QSharedPointer<QStringDecoder>> m_rpaConsoleDecoders;
-    QMap<QString, QString> m_rpaProcessLogs;
+    RpaProcessController* m_rpaProcessController = nullptr;
     RpaConsoleWindow* m_rpaConsoleWindow = nullptr;
+    WeChatWorkbenchDialog* m_wechatWorkbenchDialog = nullptr;
     QToolButton* m_btnRpaManage = nullptr;
     QToolButton* m_btnPinTop = nullptr;
     bool m_alwaysOnTop = false;

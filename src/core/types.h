@@ -16,6 +16,7 @@ struct PlatformMessage {
     QString platformMsgId;
     QString senderName;        // OCR 识别的发送者名称（如 "店铺:昵称"）
     QString originalTimestamp; // 入站展示用时间（如微信 RPA 为入库/解析时刻；千牛等可为 OCR 时间）
+    QString contentImagePath;  // 千牛聊天区截图等；空表示纯文本入站
 };
 
 struct ConversationInfo {
@@ -42,6 +43,13 @@ struct MessageRecord {
     int syncStatus = 1;      // 1=normal, 10=pending_send, 11=sent_ok, 12=sent_failed
     QString errorReason;
     QString originalTimestamp; // 对方消息在聚合侧的展示时间（来源依平台：入库时刻或 OCR）
+    QString contentImagePath;  // 千牛等：聊天区截图本地路径；空表示纯文本
+};
+
+/** 聚合「生成本条回复」：最后一条有效入站文本与可选聊天区截图路径。 */
+struct LatestInboundSnapshot {
+    QString content;
+    QString contentImagePath;
 };
 
 Q_DECLARE_METATYPE(PlatformMessage)

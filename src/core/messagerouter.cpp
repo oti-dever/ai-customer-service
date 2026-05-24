@@ -54,8 +54,6 @@ void MessageRouter::sendMessage(int conversationId, const QString& text)
         return;
     }
 
-    a->sendMessage(conv->platformConversationId, text);
-
     MessageDao msgDao;
     QDateTime now = QDateTime::currentDateTime();
     // 标记为待发送，等待 Python RPA 组件实际送达平台
@@ -69,20 +67,18 @@ void MessageRouter::sendMessage(int conversationId, const QString& text)
                               QString(),  // senderName（自己发的消息为空）
                               QString()); // originalTimestamp（自己发的消息为空）
 
+    if (msgId <= 0) {
+        emit messageSendFailed(conversationId, QStringLiteral("消息入库失败"));
+        return;
+    }
+
+    a->sendMessage(conv->platformConversationId, text);
+
     convDao.updateLastMessage(conversationId, text, now);
 
-    if (msgId > 0) {
-        MessageRecord rec;
-        rec.id = msgId;
-        rec.conversationId = conversationId;
-        rec.direction = QStringLiteral("out");
-        rec.content = text;
-        rec.sender = QStringLiteral("agent");
-        rec.senderName = QString();
-        rec.createdAt = now;
-        rec.syncStatus = 10;
-        emit messageSentOk(conversationId, rec);
-    }
+    const auto persisted = msgDao.findById(msgId);
+    if (persisted)
+        emit messageSentOk(conversationId, *persisted);
 
     auto updatedConv = convDao.findById(conversationId);
     if (updatedConv)
@@ -111,7 +107,8 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
                               1,  // 正常消息
                               QString(),  // errorReason
                               msg.senderName,
-                              msg.originalTimestamp);  // 原始时间戳
+                              msg.originalTimestamp,
+                              msg.contentImagePath);
 
     ConversationDao convDao;
     convDao.updateLastMessage(convId, msg.content, now);
@@ -129,6 +126,7 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
         rec.createdAt = now;
         rec.platformMsgId = msg.platformMsgId;
         rec.originalTimestamp = msg.originalTimestamp;
+        rec.contentImagePath = msg.contentImagePath;
         emit messageReceived(convId, rec);
     }
 
@@ -142,16 +140,50 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
 
 void MessageRouter::onMessageSent(const QString& conversationId, const QString& text)
 {
-    Q_UNUSED(conversationId)
-    Q_UNUSED(text)
+    const auto* sentAdapter = qobject_cast<IPlatformAdapter*>(sender());
+    if (!sentAdapter)
+        return;
+
+    ConversationDao convDao;
+    const auto conv = convDao.findByPlatformId(sentAdapter->platformName(), conversationId);
+    if (!conv)
+        return;
+
+    MessageDao msgDao;
+    const auto pending = msgDao.latestPendingOutbound(conv->id, text);
+    if (!pending) {
+        qWarning() << "[MessageRouter] 未找到待确认的出站消息 platform="
+                   << sentAdapter->platformName() << "conv=" << conversationId;
+        return;
+    }
+    if (msgDao.updateDeliveryState(pending->id, 11)) {
+        qInfo() << "[MessageRouter] 消息发送确认 convId=" << conv->id << "msgId=" << pending->id;
+        const auto updatedConv = convDao.findById(conv->id);
+        if (updatedConv)
+            emit conversationUpdated(*updatedConv);
+    }
 }
 
 void MessageRouter::onSendFailed(const QString& conversationId, const QString& reason)
 {
     ConversationDao dao;
-    auto conv = dao.findByPlatformId(QStringLiteral("simulator"), conversationId);
+    const auto* failedAdapter = qobject_cast<IPlatformAdapter*>(sender());
+    const QString platformName = failedAdapter ? failedAdapter->platformName() : QString();
+    auto conv = platformName.isEmpty() ? std::nullopt : dao.findByPlatformId(platformName, conversationId);
     int cid = conv ? conv->id : 0;
-    qWarning() << "[MessageRouter] 发送失败 conv=" << conversationId << "reason=" << reason;
+
+    if (conv) {
+        MessageDao msgDao;
+        const auto pending = msgDao.latestPendingOutbound(conv->id);
+        if (pending)
+            msgDao.updateDeliveryState(pending->id, 12, reason);
+        const auto updatedConv = dao.findById(conv->id);
+        if (updatedConv)
+            emit conversationUpdated(*updatedConv);
+    }
+
+    qWarning() << "[MessageRouter] 发送失败 platform=" << platformName
+               << "conv=" << conversationId << "reason=" << reason;
     emit messageSendFailed(cid, reason);
 }
 

@@ -9,6 +9,7 @@ class MainWindow;
 
 /**
  * 非模态窗口：按平台查看 RPA 子进程（python -m rpa.main）的控制台输出。
+ * mainWindow 用于读日志；parent 宜为 nullptr，避免作为主窗子 QDialog 时始终叠在主窗之上。
  */
 class RpaConsoleWindow : public QDialog
 {

@@ -8,7 +8,7 @@ QianniuRPAAdapter::QianniuRPAAdapter(QObject* parent)
     : IPlatformAdapter(parent)
 {
     m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(500);
+    m_pollTimer->setInterval(250);
     connect(m_pollTimer, &QTimer::timeout, this, &QianniuRPAAdapter::pollInboxOnce);
 }
 
@@ -64,7 +64,7 @@ void QianniuRPAAdapter::pollInboxOnce()
     QSqlQuery q(db);
     q.prepare(
         "SELECT id, platform_conversation_id, customer_name, content, created_at, platform_msg_id, "
-        "       sender_name, original_timestamp "
+        "       sender_name, original_timestamp, content_image_path "
         "FROM rpa_inbox_messages "
         "WHERE platform = :platform "
         "  AND consume_status = 0 "
@@ -88,6 +88,7 @@ void QianniuRPAAdapter::pollInboxOnce()
         const QString platformMsgId = q.value(5).toString();
         const QString senderName = q.value(6).toString();
         const QString originalTimestamp = q.value(7).toString();
+        const QString contentImagePath = q.value(8).toString();
 
         PlatformMessage msg;
         msg.platform = platformName();
@@ -100,6 +101,7 @@ void QianniuRPAAdapter::pollInboxOnce()
         msg.platformMsgId = platformMsgId;
         msg.senderName = senderName;
         msg.originalTimestamp = originalTimestamp;
+        msg.contentImagePath = contentImagePath;
 
         emit incomingMessage(msg);
 

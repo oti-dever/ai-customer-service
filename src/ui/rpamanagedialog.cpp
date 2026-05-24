@@ -114,10 +114,18 @@ void RpaManageDialog::setupUI()
             rowLayout->addWidget(m_btnWechatCalibrate);
             connect(m_btnWechatCalibrate, &QPushButton::clicked, this,
                     &RpaManageDialog::onWechatCalibrateClicked);
+
+            m_btnWechatWorkbench = new QPushButton(QStringLiteral("打开微信工作台"), row);
+            m_btnWechatWorkbench->setToolTip(
+                QStringLiteral("打开微信独立工作台：查看会话、消息、AI 建议回复与人工发送"));
+            rowLayout->addWidget(m_btnWechatWorkbench);
+            connect(m_btnWechatWorkbench, &QPushButton::clicked, this,
+                    &RpaManageDialog::onWechatWorkbenchClicked);
         } else if (QString::fromLatin1(it.id) == QLatin1String("qianniu")) {
             m_btnQianniuCalibrate = new QPushButton(QStringLiteral("千牛OCR校准"), row);
             m_btnQianniuCalibrate->setToolTip(
-                QStringLiteral("两步框选消息区与标题区，写入 qianniu_config.json；无需先嵌入千牛"));
+                QStringLiteral(
+                    "多区域框选（消息区、标题、会话列表、红点带等），写入 qianniu_config.json；无需先嵌入千牛"));
             rowLayout->addWidget(m_btnQianniuCalibrate);
             connect(m_btnQianniuCalibrate, &QPushButton::clicked, this,
                     &RpaManageDialog::onQianniuCalibrateClicked);
@@ -241,6 +249,18 @@ void RpaManageDialog::onWechatCalibrateClicked()
         return;
     QTimer::singleShot(0, main, [main]() {
         main->startWechatRpaCalibrationStandalone();
+    });
+}
+
+void RpaManageDialog::onWechatWorkbenchClicked()
+{
+    MainWindow* main = m_main;
+    hide();
+    accept();
+    if (!main)
+        return;
+    QTimer::singleShot(0, main, [main]() {
+        main->openWechatWorkbenchDialog();
     });
 }
 

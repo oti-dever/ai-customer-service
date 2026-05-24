@@ -1,6 +1,7 @@
 #include "loginwindow.h"
 #include "mainwindow.h"
 #include "../core/authmanager.h"
+#include "../utils/appsettings.h"
 #include "../utils/applystyle.h"
 #include "../data/userdao.h"
 #include <QFile>
@@ -480,7 +481,7 @@ void LoginWindow::refreshLoginAvatarForUsernameField()
     if (!m_avatarLabel)
         return;
     const QString typed = m_usernameEdit->text().trimmed();
-    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    QSettings settings = AppSettings::create();
     const QString lastLogin = settings.value(QStringLiteral("auth/lastLoginUsername")).toString();
 
     const qreal dpr = devicePixelRatioF();

@@ -17,17 +17,36 @@ static QDateTime messageRowCreatedAtToLocal(const QVariant& v)
     return QDateTime(parsed.date(), parsed.time(), Qt::UTC).toLocalTime();
 }
 
+static MessageRecord messageRecordFromQuery(QSqlQuery& q)
+{
+    MessageRecord m;
+    m.id = q.value(QStringLiteral("id")).toInt();
+    m.conversationId = q.value(QStringLiteral("conversation_id")).toInt();
+    m.direction = q.value(QStringLiteral("direction")).toString();
+    m.content = q.value(QStringLiteral("content")).toString();
+    m.sender = q.value(QStringLiteral("sender")).toString();
+    m.senderName = q.value(QStringLiteral("sender_name")).toString();
+    m.createdAt = messageRowCreatedAtToLocal(q.value(QStringLiteral("created_at")));
+    m.platformMsgId = q.value(QStringLiteral("platform_msg_id")).toString();
+    m.syncStatus = q.value(QStringLiteral("sync_status")).isNull() ? 1 : q.value(QStringLiteral("sync_status")).toInt();
+    m.errorReason = q.value(QStringLiteral("error_reason")).toString();
+    m.originalTimestamp = q.value(QStringLiteral("original_timestamp")).toString();
+    m.contentImagePath = q.value(QStringLiteral("content_image_path")).toString();
+    return m;
+}
+
 int MessageDao::create(int conversationId, const QString& direction,
                        const QString& content, const QString& sender,
                        const QString& platformMsgId,
                        int syncStatus,
                        const QString& errorReason,
                        const QString& senderName,
-                       const QString& originalTimestamp)
+                       const QString& originalTimestamp,
+                       const QString& contentImagePath)
 {
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare("INSERT INTO messages (conversation_id, direction, content, sender, sender_name, platform_msg_id, sync_status, error_reason, original_timestamp) "
-              "VALUES (:cid, :dir, :content, :sender, :sname, :pmid, :status, :reason, :ots)");
+    q.prepare("INSERT INTO messages (conversation_id, direction, content, sender, sender_name, platform_msg_id, sync_status, error_reason, original_timestamp, content_image_path) "
+              "VALUES (:cid, :dir, :content, :sender, :sname, :pmid, :status, :reason, :ots, :cimg)");
     q.bindValue(":cid", conversationId);
     q.bindValue(":dir", direction);
     q.bindValue(":content", content);
@@ -37,12 +56,30 @@ int MessageDao::create(int conversationId, const QString& direction,
     q.bindValue(":status", syncStatus);
     q.bindValue(":reason", errorReason);
     q.bindValue(":ots", originalTimestamp);
+    q.bindValue(":cimg", contentImagePath.isEmpty() ? QVariant() : contentImagePath);
 
     if (!q.exec()) {
         qWarning() << "MessageDao::create 失败:" << q.lastError().text();
         return -1;
     }
     return q.lastInsertId().toInt();
+}
+
+std::optional<MessageRecord> MessageDao::findById(int messageId) const
+{
+    if (messageId <= 0)
+        return std::nullopt;
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral("SELECT * FROM messages WHERE id = :id"));
+    q.bindValue(QStringLiteral(":id"), messageId);
+    if (!q.exec()) {
+        qWarning() << "MessageDao::findById 失败:" << q.lastError().text();
+        return std::nullopt;
+    }
+    if (!q.next())
+        return std::nullopt;
+    return messageRecordFromQuery(q);
 }
 
 QVector<MessageRecord> MessageDao::listByConversation(int conversationId, int limit, int offset)
@@ -56,41 +93,111 @@ QVector<MessageRecord> MessageDao::listByConversation(int conversationId, int li
     q.exec();
 
     QVector<MessageRecord> result;
-    while (q.next()) {
-        MessageRecord m;
-        m.id = q.value("id").toInt();
-        m.conversationId = q.value("conversation_id").toInt();
-        m.direction = q.value("direction").toString();
-        m.content = q.value("content").toString();
-        m.sender = q.value("sender").toString();
-        m.senderName = q.value("sender_name").toString();
-        m.createdAt = messageRowCreatedAtToLocal(q.value("created_at"));
-        m.platformMsgId = q.value("platform_msg_id").toString();
-        m.syncStatus = q.value("sync_status").isNull() ? 1 : q.value("sync_status").toInt();
-        m.errorReason = q.value("error_reason").toString();
-        m.originalTimestamp = q.value("original_timestamp").toString();
-        result.append(m);
-    }
+    while (q.next())
+        result.append(messageRecordFromQuery(q));
     return result;
 }
 
-std::optional<QString> MessageDao::latestInboundContent(int conversationId) const
+std::optional<MessageRecord> MessageDao::lastMessageForConversation(int conversationId) const
+{
+    if (conversationId <= 0)
+        return std::nullopt;
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral("SELECT * FROM messages WHERE conversation_id = :cid ORDER BY id DESC LIMIT 1"));
+    q.bindValue(QStringLiteral(":cid"), conversationId);
+    if (!q.exec()) {
+        qWarning() << "MessageDao::lastMessageForConversation 失败:" << q.lastError().text();
+        return std::nullopt;
+    }
+    if (!q.next())
+        return std::nullopt;
+
+    return messageRecordFromQuery(q);
+}
+
+std::optional<MessageRecord> MessageDao::latestPendingOutbound(int conversationId, const QString& content) const
+{
+    if (conversationId <= 0)
+        return std::nullopt;
+
+    QSqlQuery q(Database::getInstance().connection());
+    QString sql = QStringLiteral(
+        "SELECT * FROM messages WHERE conversation_id = :cid "
+        "AND direction = 'out' AND sync_status = 10");
+    if (!content.isEmpty())
+        sql += QStringLiteral(" AND content = :content");
+    sql += QStringLiteral(" ORDER BY id DESC LIMIT 1");
+
+    q.prepare(sql);
+    q.bindValue(QStringLiteral(":cid"), conversationId);
+    if (!content.isEmpty())
+        q.bindValue(QStringLiteral(":content"), content);
+    if (!q.exec()) {
+        qWarning() << "MessageDao::latestPendingOutbound 失败:" << q.lastError().text();
+        return std::nullopt;
+    }
+    if (!q.next())
+        return std::nullopt;
+    return messageRecordFromQuery(q);
+}
+
+bool MessageDao::updateDeliveryState(int messageId,
+                                     int syncStatus,
+                                     const QString& errorReason,
+                                     const QString& platformMsgId)
+{
+    if (messageId <= 0)
+        return false;
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral(
+        "UPDATE messages SET sync_status = :status, error_reason = :reason, "
+        "platform_msg_id = COALESCE(NULLIF(:pmid, ''), platform_msg_id) "
+        "WHERE id = :id"));
+    q.bindValue(QStringLiteral(":status"), syncStatus);
+    q.bindValue(QStringLiteral(":reason"), errorReason);
+    q.bindValue(QStringLiteral(":pmid"), platformMsgId);
+    q.bindValue(QStringLiteral(":id"), messageId);
+    if (!q.exec()) {
+        qWarning() << "MessageDao::updateDeliveryState 失败:" << q.lastError().text();
+        return false;
+    }
+    return q.numRowsAffected() > 0;
+}
+
+std::optional<LatestInboundSnapshot> MessageDao::latestInboundSnapshot(int conversationId) const
 {
     if (conversationId <= 0)
         return std::nullopt;
 
     QSqlQuery q(Database::getInstance().connection());
     q.prepare(QStringLiteral(
-        "SELECT content FROM messages WHERE conversation_id = :cid AND direction = 'in' "
-        "AND length(trim(coalesce(content, ''))) > 0 ORDER BY id DESC LIMIT 1"));
+        "SELECT content, coalesce(content_image_path, '') FROM messages "
+        "WHERE conversation_id = :cid AND direction = 'in' AND "
+        "(length(trim(coalesce(content, ''))) > 0 OR length(trim(coalesce(content_image_path, ''))) > 0) "
+        "ORDER BY id DESC LIMIT 1"));
     q.bindValue(QStringLiteral(":cid"), conversationId);
     if (!q.exec()) {
-        qWarning() << "MessageDao::latestInboundContent failed:" << q.lastError().text();
+        qWarning() << "MessageDao::latestInboundSnapshot failed:" << q.lastError().text();
         return std::nullopt;
     }
-    if (q.next())
-        return q.value(0).toString();
-    return std::nullopt;
+    if (!q.next())
+        return std::nullopt;
+    LatestInboundSnapshot s;
+    s.content = q.value(0).toString();
+    s.contentImagePath = q.value(1).toString().trimmed();
+    return s;
+}
+
+std::optional<QString> MessageDao::latestInboundContent(int conversationId) const
+{
+    const auto s = latestInboundSnapshot(conversationId);
+    if (!s)
+        return std::nullopt;
+    if (s->content.trimmed().isEmpty())
+        return std::nullopt;
+    return s->content;
 }
 
 QHash<int, QString> MessageDao::lastDirectionsByConversation() const

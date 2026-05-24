@@ -2,12 +2,16 @@
 #include "addwindowdialog.h"
 #include "aggregatechatform.h"
 #include "robotassistantwidget.h"
+#include "aicustomerservicebackendwindow.h"
 #include "editprofiledialog.h"
 #include "foldarrowcombobox.h"
 #include "rpamanagedialog.h"
+#include "wechatworkbenchdialog.h"
 #include "helpcenterdialog.h"
 #include "rpa_console_window.h"
+#include "rpaprocesscontroller.h"
 #include "../data/userdao.h"
+#include "../utils/appsettings.h"
 #include "../utils/applystyle.h"
 #include "../utils/swordcursor.h"
 #include "../utils/win32windowhelper.h"
@@ -54,6 +58,7 @@
 #include <QToolButton>
 #include <QStyle>
 #include <QStyleFactory>
+#include <QStyleOptionViewItem>
 #include <QTreeView>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
@@ -62,6 +67,7 @@
 #include <QProgressDialog>
 #include <QStandardPaths>
 #include <QUrl>
+#include <QGridLayout>
 #include <QVBoxLayout>
 #include <QWindow>
 #include <functional>
@@ -70,9 +76,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
-#include <QProcessEnvironment>
 #include <QRegularExpression>
-#include <QStringDecoder>
 #include <QComboBox>
 #include <QGroupBox>
 #include <QLabel>
@@ -140,28 +144,6 @@ enum class QuickLaunchScanMode : int {
     Normal = 1, ///< 在严格基础上，桌面根目录 .lnk 只要过目录+exe 即收录
     Loose = 2,  ///< 仅目录黑名单 + exe 黑名单，不做常用关键字过滤
 };
-
-namespace {
-
-QString stripAnsiEscapes(const QString& s)
-{
-    QString t = s;
-    // CSI：ESC [ … 最终字节在 @–~
-    static const QRegularExpression csi(QStringLiteral(R"(\x1B\[[0-?]*[ -/]*[@-~])"));
-    t.replace(csi, QString());
-    // OSC：ESC ] … BEL
-    static const QRegularExpression osc(QStringLiteral(R"(\x1B\][^\x07]*\x07)"));
-    t.replace(osc, QString());
-    // 部分终端用 ST：ESC \ 结束 OSC
-    static const QRegularExpression oscSt(QStringLiteral(R"(\x1B\][^\x1B]*\x1B\\)"));
-    t.replace(oscSt, QString());
-    // 规范化换行，避免输出里残留 '\r' 导致显示异常
-    t.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-    t.replace(QChar('\r'), QStringLiteral(""));
-    return t;
-}
-
-} // namespace
 
 namespace {
 
@@ -724,7 +706,7 @@ static void quickLaunchLoadScanRules(QSet<QString>& forceIncKeys,
                                      QSet<QString>& forceExcKeys,
                                      QuickLaunchScanMode& mode)
 {
-    QSettings settings;
+    QSettings settings = AppSettings::create();
     const int m = settings.value(QStringLiteral("quickLaunch/scanMode"), 0).toInt();
     mode = static_cast<QuickLaunchScanMode>(qBound(0, m, 2));
 
@@ -756,7 +738,7 @@ static void quickLaunchSaveScanRules(const QSet<QString>& forceIncKeys,
                                      const QSet<QString>& forceExcKeys,
                                      QuickLaunchScanMode mode)
 {
-    QSettings settings;
+    QSettings settings = AppSettings::create();
     settings.setValue(QStringLiteral("quickLaunch/scanMode"), static_cast<int>(mode));
 
     settings.beginWriteArray(QStringLiteral("quickLaunch/scanForceInclude"));
@@ -1237,7 +1219,6 @@ namespace {
 enum PlatformTreeRole {
     PlatformIdRole = Qt::UserRole,
     IsGroupRole,
-    DotColorRole,
     IsCustomerServiceItemRole,
     IsActivatedRole
 };
@@ -1263,6 +1244,36 @@ QIcon customerServiceIcon(const QString& platformId)
     if (platformId == QLatin1String("douyin"))
         return resourceIcon(QStringLiteral(":/doudian_logo.svg"));
     return {};
+}
+
+/** 树行展示名：Display 可为空（纯图标）；占位页等回退到 tooltip。 */
+QString platformTreeRowLabel(const QModelIndex& idx)
+{
+    const QString d = idx.data(Qt::DisplayRole).toString();
+    if (!d.isEmpty())
+        return d;
+    return idx.data(Qt::ToolTipRole).toString();
+}
+
+/**
+ * QTreeView 传给委托的 option.rect 往往在「分支/展开」占位右侧，宽度也只是内容列；
+ * 在窄栏里按 rect 几何中心画图标会整体偏右甚至裁切。「在线平台」等分组行尤其明显。
+ */
+QRect platformTreeItemFullRowRect(const QStyleOptionViewItem& option)
+{
+    QRect rect = option.rect;
+    const QWidget* w = option.widget;
+    const QTreeView* tree = w ? qobject_cast<const QTreeView*>(w) : nullptr;
+    const QTreeView* tv = tree ? tree : (w && w->parentWidget()
+                                            ? qobject_cast<const QTreeView*>(w->parentWidget())
+                                            : nullptr);
+    if (tv) {
+        const QWidget* vp = tv->viewport();
+        const int vw = vp ? vp->width() : rect.width();
+        rect.setX(0);
+        rect.setWidth(vw);
+    }
+    return rect;
 }
 
 const QStringList& builtinEncouragementMessages()
@@ -1414,6 +1425,29 @@ const QVector<QianniuCalibrationRegionSpec>& qianniuCalibrationRegionSpecs()
             QStringLiteral("千牛 OCR：框选左侧会话列表（头像/昵称列；与 chat 底边大致对齐，勿扫到输入区），Esc 取消，回车确认"),
             48,
             32,
+        },
+        {
+            QStringLiteral("unread_scan_band"),
+            QStringLiteral("红点带（未读扫描带）"),
+            QStringLiteral(
+                "千牛：请先校准「会话列表区域」。再在列表左侧框选一条竖向窄带，仅覆盖未读红点小角标区域，"
+                "尽量避开头像主图（减少肤色偏红误报）；Esc 取消，回车确认"),
+            8,
+            24,
+        },
+        {
+            QStringLiteral("input_region"),
+            QStringLiteral("消息输入框区域"),
+            QStringLiteral("千牛 OCR：框选底部多行输入框区域（用于点击聚焦、回执 OCR），勿包含工具栏与发送钮，Esc 取消，回车确认"),
+            80,
+            24,
+        },
+        {
+            QStringLiteral("send_button"),
+            QStringLiteral("发送按钮区域"),
+            QStringLiteral("千牛 OCR：框选蓝色「发送」按钮（避开右侧下拉小箭头），Esc 取消，回车确认"),
+            24,
+            16,
         },
     };
     return specs;
@@ -1574,20 +1608,6 @@ bool showStyledIntInputDialog(QWidget* parent,
 } // namespace
 
 /// 右键 OCR 校准菜单：按进程 exe / 窗口标题判断，不用用户填写的「平台名」
-bool managedWindowShowsWechatOcrCalibration(quintptr hwnd)
-{
-    if (!Win32WindowHelper::isWindowValid(hwnd))
-        return false;
-    const QString exe = Win32WindowHelper::executableBaseNameForWindow(hwnd).toLower();
-    if (exe == QLatin1String("weixin.exe") || exe == QLatin1String("wechat.exe")
-        || exe == QLatin1String("wechatappex.exe")) {
-        return true;
-    }
-    const QString t = Win32WindowHelper::windowTitle(hwnd);
-    return t.contains(QStringLiteral("微信"))
-        || t.contains(QLatin1String("WeChat"), Qt::CaseInsensitive);
-}
-
 bool managedWindowShowsQianniuOcrCalibration(quintptr hwnd)
 {
     if (!Win32WindowHelper::isWindowValid(hwnd))
@@ -1619,13 +1639,13 @@ bool managedWindowShowsPddOcrCalibration(quintptr hwnd)
 
 QStringList loadCustomEncouragementMessages()
 {
-    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    QSettings settings = AppSettings::create();
     return normalizedMessages(settings.value(QStringLiteral("statusBar/customMessages")).toStringList());
 }
 
 void saveCustomEncouragementMessages(const QStringList& messages)
 {
-    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    QSettings settings = AppSettings::create();
     settings.setValue(QStringLiteral("statusBar/customMessages"), normalizedMessages(messages));
 }
 
@@ -1697,13 +1717,14 @@ QIcon onlinePlatformFallbackIcon(const WindowInfo& info)
 class PlatformTreeDelegate : public QStyledItemDelegate
 {
 public:
-    explicit PlatformTreeDelegate(QTreeView* tree, QObject* parent = nullptr)
-        : QStyledItemDelegate(parent), m_tree(tree) {}
+    explicit PlatformTreeDelegate(QObject* parent = nullptr)
+        : QStyledItemDelegate(parent) {}
 
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
     {
         const bool isGroup = index.data(IsGroupRole).toBool();
-        return {option.rect.width(), isGroup ? 44 : 50};
+        const QRect row = platformTreeItemFullRowRect(option);
+        return {row.width(), isGroup ? 48 : 52};
     }
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
@@ -1711,83 +1732,60 @@ public:
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing, true);
 
-        const ApplyStyle::MainWindowTheme theme = ApplyStyle::loadSavedMainWindowTheme();
-        const PlatformTreeColors c = ApplyStyle::platformTreeColors(theme);
+        const PlatformTreeColors c = ApplyStyle::platformTreeColors(ApplyStyle::MainWindowTheme::Default);
 
-        const QString title = index.data(Qt::DisplayRole).toString();
         const bool isGroup = index.data(IsGroupRole).toBool();
-        const bool expanded = m_tree && m_tree->isExpanded(index);
         const bool sel = (option.state & QStyle::State_Selected) != 0;
         const bool hover = (option.state & QStyle::State_MouseOver) != 0;
 
-        QRect r = option.rect.adjusted(6, 3, -6, -3);
+        const QRect rowRect = platformTreeItemFullRowRect(option);
+        const int cellW = rowRect.width();
+        const bool narrow = cellW <= 96;
+
+        QRect r = narrow ? rowRect.adjusted(4, 4, -4, -4) : rowRect.adjusted(8, 4, -8, -4);
 
         if (isGroup) {
-            const QColor dotColor = index.data(DotColorRole).value<QColor>();
             QColor bg = c.groupBgDefault;
             if (hover) bg = c.groupBgHover;
             if (sel) bg = c.groupBgSelected;
             painter->setPen(Qt::NoPen);
             painter->setBrush(bg);
-            painter->drawRoundedRect(r, 8, 8);
+            painter->drawRoundedRect(r, narrow ? 6 : 8, narrow ? 6 : 8);
 
-            const int dot = 8;
-            QRect dotRect(r.left() + 12, r.center().y() - dot / 2, dot, dot);
-            painter->setBrush(dotColor);
-            painter->drawEllipse(dotRect);
+            QIcon groupIcon = index.data(Qt::DecorationRole).value<QIcon>();
+            const int iconSz = 28;
 
-            QFont f = option.font;
-            f.setBold(true);
-            painter->setFont(f);
-            painter->setPen(c.groupTextColor);
-            const bool hasChildren = index.model() && index.model()->rowCount(index) > 0;
-            const int textRight = hasChildren ? r.right() - 28 : r.right() - 8;
-            QRect textRect(r.left() + 12 + dot + 8, r.top(), textRight - (r.left() + 12 + dot + 8), r.height());
-            painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, title);
-
-            if (hasChildren) {
-                const QIcon expandIcon(QStringLiteral(":/fold_arrow_to_expand_icon.svg"));
-                const QIcon collapseIcon(QStringLiteral(":/fold_arrow_to_collapse_icon.svg"));
-                const QSize arrowSize(16, 16);
-                QRect arrowRect(r.right() - 24, r.top(), 20, r.height());
-                QPixmap pix = (expanded ? collapseIcon : expandIcon).pixmap(arrowSize);
-                if (!pix.isNull()) {
-                    QPoint pt(arrowRect.center().x() - pix.width() / 2, arrowRect.center().y() - pix.height() / 2);
-                    painter->drawPixmap(pt, pix);
-                }
-            }
+            QRect iconRect(0, 0, iconSz, iconSz);
+            iconRect.moveCenter(r.center());
+            if (!groupIcon.isNull())
+                groupIcon.paint(painter, iconRect, Qt::AlignCenter);
         } else {
-            bool isCS = index.data(IsCustomerServiceItemRole).toBool();
-            bool isActivated = index.data(IsActivatedRole).toBool();
+            const QString title = index.data(Qt::DisplayRole).toString();
+            const bool isCS = index.data(IsCustomerServiceItemRole).toBool();
+            const bool isActivated = index.data(IsActivatedRole).toBool();
 
             QColor bg;
-            if (isCS && !isActivated) {
+            if (sel) {
+                bg = c.itemBgSelected;
+            } else if (isCS && !isActivated) {
                 bg = c.itemInactiveBgDefault;
                 if (hover) bg = c.itemInactiveBgHover;
-                if (sel) bg = c.itemInactiveBgSelected;
             } else {
                 bg = c.itemBgDefault;
                 if (hover) bg = c.itemBgHover;
-                if (sel) bg = c.itemBgSelected;
             }
             painter->setPen(Qt::NoPen);
             painter->setBrush(bg);
-            painter->drawRoundedRect(r, 10, 10);
-
-            int xOff = r.left() + 12;
-
-            if (isCS) {
-                int dotSz = 8;
-                QColor dotClr = isActivated ? c.csDotActivated : c.csDotInactive;
-                QRect dotR(xOff, r.center().y() - dotSz / 2, dotSz, dotSz);
-                painter->setBrush(dotClr);
-                painter->drawEllipse(dotR);
-                xOff += dotSz + 8;
-            }
+            painter->drawRoundedRect(r, narrow ? 6 : 8, narrow ? 6 : 8);
 
             QIcon icon = index.data(Qt::DecorationRole).value<QIcon>();
-            QSize iconSize(22, 22);
-            QRect iconRect(xOff, r.center().y() - iconSize.height() / 2, iconSize.width(), iconSize.height());
+            QSize iconSize(28, 28);
+            QRect iconRect(0, 0, iconSize.width(), iconSize.height());
+            if (narrow) {
+                iconRect.moveCenter(r.center());
+            } else {
+                iconRect.moveTopLeft(QPoint(r.left() + 14, r.center().y() - iconSize.height() / 2));
+            }
             if (!icon.isNull()) {
                 if (isCS && !isActivated) {
                     auto pix = icon.pixmap(iconSize);
@@ -1798,23 +1796,22 @@ public:
                     icon.paint(painter, iconRect, Qt::AlignCenter);
                 }
             }
-            xOff += iconSize.width() + 10;
+            if (!narrow && !title.isEmpty()) {
+                const int textLeft = iconRect.right() + 10;
+                QColor textClr = (isCS && !isActivated && !sel) ? c.itemInactiveTextColor : c.itemTextColor;
+                painter->setPen(textClr);
+                QRect textRect(textLeft, r.top(), r.right() - 8 - textLeft, r.height());
+                painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, title);
+            }
 
-            QColor textClr = (isCS && !isActivated) ? c.itemInactiveTextColor : c.itemTextColor;
-            painter->setPen(textClr);
-            QRect textRect(xOff, r.top(), r.right() - 8 - xOff, r.height());
-            painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, title);
-
-            if (sel && !isCS) {
+            if (sel && !narrow) {
                 painter->setPen(Qt::NoPen);
                 painter->setBrush(c.itemAccentBarColor);
-                painter->drawRoundedRect(QRect(r.left(), r.top() + 6, 3, r.height() - 12), 1, 1);
+                painter->drawRoundedRect(QRect(r.left() + 2, r.top() + 7, 3, r.height() - 14), 1, 1);
             }
         }
         painter->restore();
     }
-private:
-    QTreeView* m_tree = nullptr;
 };
 
 QFrame* makeCard(QWidget* parent) {
@@ -1826,11 +1823,12 @@ QFrame* makeCard(QWidget* parent) {
 
 QToolButton* makeTopIconButton(QWidget* parent, const QIcon& icon, const QString& toolTip) {
     auto* button = new QToolButton(parent);
+    button->setObjectName(QStringLiteral("topIconButton"));
     button->setIcon(icon);
     button->setToolTip(toolTip);
     button->setAutoRaise(true);
     button->setCursor(Qt::PointingHandCursor);
-    button->setIconSize(QSize(18, 18));
+    button->setIconSize(QSize(22, 22));
     return button;
 }
 }
@@ -1851,10 +1849,10 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
     setWindowIcon(resourceIcon(QStringLiteral(":/app_icon.svg"),
                                qApp->style()->standardIcon(QStyle::SP_DesktopIcon)));
     setMinimumSize(1100, 680);
-    resize(1440, 840);
+    resize(1350, 835);
 
     {
-        QSettings pinSettings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+        QSettings pinSettings = AppSettings::create();
         m_alwaysOnTop = pinSettings.value(QStringLiteral("mainWindow/alwaysOnTop"), false).toBool();
     }
 
@@ -1877,6 +1875,14 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
 
     setupStyles();
     buildStatusBar();
+    m_rpaProcessController = new RpaProcessController(this);
+    connect(m_rpaProcessController, &RpaProcessController::logAppended,
+            this, &MainWindow::rpaProcessOutputAppended);
+    connect(m_rpaProcessController, &RpaProcessController::statusMessageRequested,
+            this, [this](const QString& text, int timeoutMs) {
+                if (statusBar())
+                    statusBar()->showMessage(text, timeoutMs);
+            });
     m_windowStateTimer = new QTimer(this);
     m_windowStateTimer->setInterval(250);
     connect(m_windowStateTimer, &QTimer::timeout,
@@ -1897,52 +1903,60 @@ QWidget* MainWindow::buildLeftSidebar()
 {
     auto* left = new QWidget(this);
     left->setObjectName("leftSidebar");
-    left->setMinimumWidth(200);
+    constexpr int kSidebarRailWidth = 72;
+    left->setFixedWidth(kSidebarRailWidth);
 
     auto* layout = new QVBoxLayout(left);
-    layout->setContentsMargins(12, 12, 12, 12);
-    layout->setSpacing(6);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(9);
     layout->setAlignment(Qt::AlignTop);
 
     m_userProfileBar = new ProfileBarWidget([this] { onUserProfileBarClicked(); }, left);
     m_userProfileBar->setObjectName(QStringLiteral("userProfileBar"));
-    m_userProfileBar->setFixedHeight(56);
+    m_userProfileBar->setFixedHeight(48);
     m_userProfileBar->setToolTip(QStringLiteral("查看并编辑个人信息"));
     auto* profileLay = new QHBoxLayout(m_userProfileBar);
-    profileLay->setContentsMargins(6, 4, 6, 4);
-    profileLay->setSpacing(10);
+    profileLay->setContentsMargins(4, 4, 4, 4);
+    profileLay->setSpacing(0);
     m_userProfileAvatar = new QLabel(m_userProfileBar);
     m_userProfileAvatar->setObjectName(QStringLiteral("sidebarAvatar"));
-    m_userProfileAvatar->setFixedSize(40, 40);
+    m_userProfileAvatar->setFixedSize(38, 38);
     m_userProfileAvatar->setAlignment(Qt::AlignCenter);
     m_userProfileAvatar->setScaledContents(false);
     m_userProfileNick = new QLabel(m_userProfileBar);
     m_userProfileNick->setObjectName(QStringLiteral("userProfileNick"));
     m_userProfileNick->setWordWrap(false);
     m_userProfileNick->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    profileLay->addWidget(m_userProfileAvatar, 0, Qt::AlignVCenter);
-    profileLay->addWidget(m_userProfileNick, 1, Qt::AlignVCenter);
+    m_userProfileNick->hide();
+    profileLay->addStretch(1);
+    profileLay->addWidget(m_userProfileAvatar, 0, Qt::AlignCenter);
+    profileLay->addStretch(1);
     layout->addWidget(m_userProfileBar);
 
     m_platformTreeModel = new QStandardItemModel(this);
 
     // -- 在线平台 --
-    m_onlineGroup = new QStandardItem(QStringLiteral("在线平台"));
+    const QIcon iconOnlineGroup = resourceIcon(QStringLiteral(":/online_platform_icon.svg"),
+                                               qApp->style()->standardIcon(QStyle::SP_ComputerIcon));
+    m_onlineGroup = new QStandardItem(iconOnlineGroup, QString());
+    m_onlineGroup->setToolTip(QStringLiteral("在线平台\n若有子项，可点击展开/折叠"));
     m_onlineGroup->setData(QStringLiteral("online"), PlatformIdRole);
     m_onlineGroup->setData(true, IsGroupRole);
-    m_onlineGroup->setData(QColor(0, 200, 120), DotColorRole);
     m_onlineGroup->setFlags(m_onlineGroup->flags() & ~Qt::ItemIsDropEnabled);
 
     // -- 管理后台（可折叠分组） --
-    m_manageGroup = new QStandardItem(QStringLiteral("管理后台"));
+    const QIcon iconManageGroup = resourceIcon(QStringLiteral(":/backend_manage_icon.svg"),
+                                               qApp->style()->standardIcon(QStyle::SP_DialogApplyButton));
+    m_manageGroup = new QStandardItem(iconManageGroup, QString());
+    m_manageGroup->setToolTip(QStringLiteral("管理后台\n可点击展开/折叠"));
     m_manageGroup->setData(QStringLiteral("manage"), PlatformIdRole);
     m_manageGroup->setData(true, IsGroupRole);
-    m_manageGroup->setData(QColor(24, 144, 255), DotColorRole);
     m_manageGroup->setFlags(m_manageGroup->flags() & ~Qt::ItemIsDropEnabled);
 
     const QIcon iconRobot = resourceIcon(QStringLiteral(":/platform_management_icon.svg"),
                                          qApp->style()->standardIcon(QStyle::SP_ComputerIcon));
-    auto* itemRobot = new QStandardItem(iconRobot, QStringLiteral("机器人管理"));
+    auto* itemRobot = new QStandardItem(iconRobot, QString());
+    itemRobot->setToolTip(QStringLiteral("AI助手"));
     itemRobot->setData(QStringLiteral("robot"), PlatformIdRole);
     itemRobot->setData(false, IsGroupRole);
     itemRobot->setData(false, IsCustomerServiceItemRole);
@@ -1950,27 +1964,41 @@ QWidget* MainWindow::buildLeftSidebar()
 
     const QIcon iconReception = resourceIcon(QStringLiteral(":/aggregate_reception_icons/message_icon.svg"),
                                              qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation));
-    auto* itemReception = new QStandardItem(iconReception, QStringLiteral("聚合接待"));
+    auto* itemReception = new QStandardItem(iconReception, QString());
+    itemReception->setToolTip(QStringLiteral("聚合接待"));
     itemReception->setData(QStringLiteral("aggregate"), PlatformIdRole);
     itemReception->setData(false, IsGroupRole);
     itemReception->setData(false, IsCustomerServiceItemRole);
     m_manageGroup->appendRow(itemReception);
 
+    const QIcon iconAiBackend = resourceIcon(QStringLiteral(":/ai_customer_service_backend.svg"),
+                                             qApp->style()->standardIcon(QStyle::SP_DesktopIcon));
+    auto* itemAiBackend = new QStandardItem(iconAiBackend, QString());
+    itemAiBackend->setToolTip(QStringLiteral("AI客服后台"));
+    itemAiBackend->setData(QStringLiteral("aiServiceBackend"), PlatformIdRole);
+    itemAiBackend->setData(false, IsGroupRole);
+    itemAiBackend->setData(false, IsCustomerServiceItemRole);
+    m_manageGroup->appendRow(itemAiBackend);
+
     // -- 客服平台 --
-    m_csGroup = new QStandardItem(QStringLiteral("客服平台"));
+    const QIcon iconCsGroup = resourceIcon(QStringLiteral(":/customer_service_platform_icon.svg"),
+                                           qApp->style()->standardIcon(QStyle::SP_DirIcon));
+    m_csGroup = new QStandardItem(iconCsGroup, QString());
+    m_csGroup->setToolTip(QStringLiteral("客服平台\n可点击展开/折叠"));
     m_csGroup->setData(QStringLiteral("cs"), PlatformIdRole);
     m_csGroup->setData(true, IsGroupRole);
-    m_csGroup->setData(QColor(160, 160, 160), DotColorRole);
     m_csGroup->setFlags(m_csGroup->flags() & ~Qt::ItemIsDropEnabled);
 
     struct CsItem { const char* name; const char* id; };
     CsItem csItems[] = {{"千牛", "qianniu"}, {"拼多多", "pinduoduo"}, {"抖店", "douyin"}};
     for (const auto& cs : csItems) {
         const QString platformId = QString::fromUtf8(cs.id);
+        const QString csName = QString::fromUtf8(cs.name);
         QIcon itemIcon = customerServiceIcon(platformId);
         if (itemIcon.isNull())
             itemIcon = qApp->style()->standardIcon(QStyle::SP_DialogApplyButton);
-        auto* item = new QStandardItem(itemIcon, QString::fromUtf8(cs.name));
+        auto* item = new QStandardItem(itemIcon, QString());
+        item->setToolTip(csName);
         item->setData(platformId, PlatformIdRole);
         item->setData(false, IsGroupRole);
         item->setData(true, IsCustomerServiceItemRole);
@@ -1986,9 +2014,9 @@ QWidget* MainWindow::buildLeftSidebar()
     m_platformTree = new QTreeView(left);
     m_platformTree->setObjectName("platformList");
     m_platformTree->setModel(m_platformTreeModel);
-    m_platformTree->setItemDelegate(new PlatformTreeDelegate(m_platformTree, m_platformTree));
+    m_platformTree->setItemDelegate(new PlatformTreeDelegate(m_platformTree));
     m_platformTree->setHeaderHidden(true);
-    m_platformTree->setIndentation(16);
+    m_platformTree->setIndentation(0);
     m_platformTree->setRootIsDecorated(false);
     m_platformTree->setExpandsOnDoubleClick(true);
     m_platformTree->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1999,7 +2027,9 @@ QWidget* MainWindow::buildLeftSidebar()
     m_platformTree->setUniformRowHeights(false);
     m_platformTree->setMouseTracking(true);
     m_platformTree->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_platformTree->expandAll();
+    m_platformTree->expand(m_onlineGroup->index());
+    m_platformTree->collapse(m_manageGroup->index());
+    m_platformTree->collapse(m_csGroup->index());
     layout->addWidget(m_platformTree);
 
     updateTreeViewHeight();
@@ -2025,14 +2055,31 @@ void MainWindow::refreshUserProfileBar()
     auto u = dao.findByUsername(m_username);
     if (!u) {
         m_userProfileNick->setText(m_username);
+        m_userProfileBar->setToolTip(QStringLiteral("%1\n%2")
+                                         .arg(m_username, QStringLiteral("查看并编辑个人信息")));
         m_userId = 0;
+        const int side = (m_userProfileNick && m_userProfileNick->isHidden()) ? 32 : 40;
+        QPixmap pm;
+        const qreal dpr = devicePixelRatioF();
+        QPixmap canvas(QSize(side, side) * dpr);
+        canvas.setDevicePixelRatio(dpr);
+        canvas.fill(Qt::transparent);
+        QSvgRenderer renderer(QStringLiteral(":/default_avatar_icon.svg"));
+        QPainter painter(&canvas);
+        renderer.render(&painter, QRectF(0, 0, canvas.width(), canvas.height()));
+        pm = canvas;
+        pm = roundedSidebarAvatarPixmap(pm, side, dpr, 8);
+        m_userProfileAvatar->setPixmap(pm);
         return;
     }
     m_userId = u->id;
     const QString shown = u->displayName.isEmpty() ? u->username : u->displayName;
     m_userProfileNick->setText(shown);
 
-    const int side = 40;
+    m_userProfileBar->setToolTip(QStringLiteral("%1\n%2")
+                                     .arg(shown, QStringLiteral("查看并编辑个人信息")));
+
+    const int side = (m_userProfileNick && m_userProfileNick->isHidden()) ? 32 : 40;
     const qreal dpr = devicePixelRatioF();
     QPixmap pm;
     if (!u->avatarPath.isEmpty()) {
@@ -2083,40 +2130,29 @@ QWidget* MainWindow::buildTopBar()
 {
     auto* bar = new QWidget(this);
     bar->setObjectName("topBar");
-    bar->setFixedHeight(52);
+    bar->setFixedHeight(56);
 
     auto* layout = new QHBoxLayout(bar);
-    layout->setContentsMargins(16, 0, 16, 0);
-    layout->setSpacing(10);
+    layout->setContentsMargins(20, 0, 18, 0);
+    layout->setSpacing(12);
 
-    auto* logo = new QLabel(bar);
-    logo->setObjectName("logo");
-    logo->setFixedSize(22, 22);
-    logo->setPixmap(resourcePixmap(QStringLiteral(":/app_icon.svg"), QSize(22, 22),
-                                   qApp->style()->standardIcon(QStyle::SP_DesktopIcon)));
-
-    auto* title = new QLabel(QStringLiteral("AI客服 - %1").arg(m_username), bar);
-    title->setObjectName("topTitle");
-
-    layout->addWidget(logo);
-    layout->addWidget(title);
-    layout->addSpacing(8);
-
-    m_btnAdd = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/add_new_window_icon.svg"),
-                                                   qApp->style()->standardIcon(QStyle::SP_FileDialogNewFolder)), QStringLiteral("添加新窗口"));
-    m_btnRefresh = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/home_icon.svg"),
-                                                       qApp->style()->standardIcon(QStyle::SP_DirHomeIcon)), QStringLiteral("返回就绪页"));
-    auto* bugBtn = makeTopIconButton(bar, QIcon(QStringLiteral(":/bug_log_icon.svg")),
-                                     QStringLiteral("查看 Bug 修复日志"));
     auto* helpBtn = makeTopIconButton(bar, QIcon(QStringLiteral(":/question_mark_icon.svg")),
-                                      QStringLiteral("查看软件使用说明"));
-    layout->addWidget(m_btnAdd);
-    layout->addWidget(m_btnRefresh);
+                                      QStringLiteral("帮助与更多"));
+
+    auto* titleWrap = new QWidget(bar);
+    titleWrap->setObjectName(QStringLiteral("topTitleWrap"));
+    auto* titleLayout = new QVBoxLayout(titleWrap);
+    titleLayout->setContentsMargins(0, 0, 0, 0);
+    titleLayout->setSpacing(1);
+    titleLayout->setAlignment(Qt::AlignVCenter);
+    auto* topTitle = new QLabel(QStringLiteral("AI 客服工作台"), titleWrap);
+    topTitle->setObjectName(QStringLiteral("topTitle"));
+    titleLayout->addWidget(topTitle);
 
     auto* readyWrap = new QWidget(bar);
     readyWrap->setObjectName("readyWrap");
     auto* readyLayout = new QHBoxLayout(readyWrap);
-    readyLayout->setContentsMargins(10, 6, 10, 6);
+    readyLayout->setContentsMargins(10, 5, 10, 5);
     readyLayout->setSpacing(6);
     auto* readyIcon = new QLabel(readyWrap);
     readyIcon->setPixmap(resourcePixmap(QStringLiteral(":/system_ready_icon.svg"), QSize(18, 18),
@@ -2125,23 +2161,32 @@ QWidget* MainWindow::buildTopBar()
     readyText->setObjectName("readyText");
     readyLayout->addWidget(readyIcon);
     readyLayout->addWidget(readyText);
+    layout->addWidget(titleWrap);
     layout->addWidget(readyWrap);
     layout->addStretch(1);
-    layout->addWidget(bugBtn);
+    m_btnPinTop = makeTopIconButton(bar, resourceIcon(QStringLiteral(":/before_pinning.svg")),
+                                    QStringLiteral("置顶"));
+    layout->addWidget(m_btnPinTop);
     layout->addWidget(helpBtn);
 
-    m_btnPinTop = makeTopIconButton(bar, QIcon(), QStringLiteral("置顶"));
-    m_btnPinTop->setObjectName(QStringLiteral("pinTopButton"));
-    updatePinTopButtonUi();
-    layout->addWidget(m_btnPinTop);
-    connect(m_btnPinTop, &QToolButton::clicked, this, [this] {
+    connect(m_btnPinTop, &QToolButton::clicked, this, [this]() {
         applyAlwaysOnTop(!m_alwaysOnTop);
     });
-
-    connect(m_btnAdd, &QToolButton::clicked, this, &MainWindow::openAddWindowDialog);
-    connect(m_btnRefresh, &QToolButton::clicked, this, &MainWindow::showSystemReadyPage);
-    connect(bugBtn, &QToolButton::clicked, this, &MainWindow::openBugLogDialog);
     connect(helpBtn, &QToolButton::clicked, this, &MainWindow::openAppHelpDialog);
+    helpBtn->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(helpBtn, &QToolButton::customContextMenuRequested, this, [this, helpBtn](const QPoint& pos) {
+        QMenu menu(helpBtn);
+        QAction* bugLog = menu.addAction(QStringLiteral("查看 Bug 修复日志"));
+        QAction* pinTop = menu.addAction(m_alwaysOnTop ? QStringLiteral("取消窗口置顶")
+                                                       : QStringLiteral("窗口置顶"));
+        QAction* triggered = menu.exec(helpBtn->mapToGlobal(pos));
+        if (triggered == bugLog) {
+            openBugLogDialog();
+        } else if (triggered == pinTop) {
+            applyAlwaysOnTop(!m_alwaysOnTop);
+        }
+    });
+    updatePinTopButtonUi();
     return bar;
 }
 
@@ -2175,13 +2220,13 @@ void MainWindow::updateTreeViewHeight()
     for (int i = 0; i < itemCount; ++i) {
         QModelIndex index = m_platformTreeModel->index(i, 0);
         bool isGroup = index.data(IsGroupRole).toBool();
-        totalHeight += isGroup ? 44 : 50;
+        totalHeight += isGroup ? 48 : 52;
         if (m_platformTree->isExpanded(index)) {
             int childCount = m_platformTreeModel->rowCount(index);
-            totalHeight += childCount * 50;
+            totalHeight += childCount * 52;
         }
     }
-    m_platformTree->setMinimumHeight(totalHeight + 20);
+    m_platformTree->setMinimumHeight(totalHeight + 12);
 }
 
 // ==================== Tree Navigation ====================
@@ -2208,7 +2253,15 @@ void MainWindow::onPlatformTreeSelectionChanged()
     if (id == QLatin1String("aggregate")) {
         hideCurrentFloatWindow();
         m_activeWindowId.clear();
+        showSystemReadyPage();
         openAggregateChatForm();
+        return;
+    }
+    if (id == QLatin1String("aiServiceBackend")) {
+        hideCurrentFloatWindow();
+        m_activeWindowId.clear();
+        showSystemReadyPage();
+        openAiCustomerServiceBackendWindow();
         return;
     }
     if (id == QLatin1String("robot")) {
@@ -2220,7 +2273,7 @@ void MainWindow::onPlatformTreeSelectionChanged()
     if (id == QLatin1String("manage")) {
         hideCurrentFloatWindow();
         m_activeWindowId.clear();
-        showPlaceholderPage(idx.data(Qt::DisplayRole).toString());
+        showPlaceholderPage(QStringLiteral("管理后台"));
         return;
     }
 
@@ -2230,7 +2283,7 @@ void MainWindow::onPlatformTreeSelectionChanged()
     if (isCS && !isActivated) {
         hideCurrentFloatWindow();
         m_activeWindowId.clear();
-        QString name = idx.data(Qt::DisplayRole).toString();
+        const QString name = platformTreeRowLabel(idx);
         showPlaceholderPage(QStringLiteral("请通过顶部「添加新窗口」按钮关联 %1 窗口").arg(name));
         return;
     }
@@ -2243,7 +2296,7 @@ void MainWindow::onPlatformTreeSelectionChanged()
 
     hideCurrentFloatWindow();
     m_activeWindowId.clear();
-    showPlaceholderPage(idx.data(Qt::DisplayRole).toString());
+    showPlaceholderPage(platformTreeRowLabel(idx));
 }
 
 void MainWindow::onPlatformTreeClicked(const QModelIndex& idx)
@@ -2270,21 +2323,22 @@ void MainWindow::showPlaceholderPage(const QString& title)
 
 void MainWindow::setupStyles()
 {
-    m_mainWindowTheme = ApplyStyle::loadSavedMainWindowTheme();
-    setStyleSheet(ApplyStyle::mainWindowStyle(m_mainWindowTheme));
+    applyMainWindowTheme(ApplyStyle::MainWindowTheme::Default);
 }
 
 void MainWindow::applyMainWindowTheme(ApplyStyle::MainWindowTheme theme)
 {
-    m_mainWindowTheme = theme;
-    ApplyStyle::saveMainWindowTheme(theme);
-    setStyleSheet(ApplyStyle::mainWindowStyle(theme));
+    Q_UNUSED(theme)
+    m_mainWindowTheme = ApplyStyle::MainWindowTheme::Default;
+    setStyleSheet(ApplyStyle::mainWindowStyle());
     if (m_platformTree && m_platformTree->viewport())
         m_platformTree->viewport()->update();
     if (m_aggregateChatForm)
-        m_aggregateChatForm->applyTheme(theme);
+        m_aggregateChatForm->applyTheme(m_mainWindowTheme);
     if (m_robotAssistantWidget)
-        m_robotAssistantWidget->applyTheme(theme);
+        m_robotAssistantWidget->applyTheme(m_mainWindowTheme);
+    if (m_wechatWorkbenchDialog)
+        m_wechatWorkbenchDialog->applyTheme(m_mainWindowTheme);
 }
 
 static constexpr int kOneClickMinOnline = 2;
@@ -2296,53 +2350,71 @@ QWidget* MainWindow::buildReadyPage()
     center->setObjectName("centerArea");
 
     auto* layout = new QVBoxLayout(center);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
+    layout->setContentsMargins(48, 42, 48, 32);
+    layout->setSpacing(18);
     layout->addStretch(1);
 
     m_readyCard = makeCard(center);
     m_readyCard->setObjectName("readyCard");
-    m_readyCard->setFixedWidth(560);
+    m_readyCard->setFixedWidth(640);
 
     auto* cardLayout = new QVBoxLayout(m_readyCard);
-    cardLayout->setContentsMargins(28, 26, 28, 26);
+    cardLayout->setContentsMargins(36, 30, 36, 30);
     cardLayout->setSpacing(10);
-    cardLayout->setAlignment(Qt::AlignHCenter);
 
-    auto* rocketWrap = new QFrame(m_readyCard);
+    auto* rocketRow = new QWidget(m_readyCard);
+    auto* rocketRowLayout = new QHBoxLayout(rocketRow);
+    rocketRowLayout->setContentsMargins(0, 0, 0, 0);
+    rocketRowLayout->setSpacing(0);
+    rocketRowLayout->addStretch(1);
+
+    auto* rocketWrap = new QFrame(rocketRow);
     rocketWrap->setObjectName("rocketWrap");
-    rocketWrap->setFixedSize(360, 94);
-    auto* rocketLayout = new QHBoxLayout(rocketWrap);
-    rocketLayout->setContentsMargins(16, 16, 16, 16);
-    rocketLayout->addStretch(1);
+    rocketWrap->setFixedSize(58, 58);
+    rocketWrap->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    auto* rocketLayout = new QGridLayout(rocketWrap);
+    rocketLayout->setContentsMargins(0, 0, 0, 0);
+    rocketLayout->setSpacing(0);
     auto* rocket = new QLabel(rocketWrap);
-    rocket->setPixmap(resourcePixmap(QStringLiteral(":/rocket_icon.svg"), QSize(60, 60),
-                                     qApp->style()->standardIcon(QStyle::SP_ArrowUp)));
-    rocketLayout->addWidget(rocket);
-    rocketLayout->addStretch(1);
+    constexpr int kRocketLogical = 30;
+    const QPixmap rocketPm = resourcePixmap(QStringLiteral(":/rocket_icon.svg"), QSize(kRocketLogical, kRocketLogical),
+                                             qApp->style()->standardIcon(QStyle::SP_ArrowUp));
+    rocket->setPixmap(rocketPm);
+    rocket->setAlignment(Qt::AlignCenter);
+    rocket->setScaledContents(false);
+    if (!rocketPm.isNull()) {
+        const qreal dpr = rocketPm.devicePixelRatioF() > 0 ? rocketPm.devicePixelRatioF() : 1.0;
+        rocket->setFixedSize(qMax(1, qRound(rocketPm.width() / dpr)), qMax(1, qRound(rocketPm.height() / dpr)));
+    } else {
+        rocket->setFixedSize(kRocketLogical, kRocketLogical);
+    }
+    rocketLayout->addWidget(rocket, 0, 0, Qt::AlignCenter);
 
-    m_readyTitle = new QLabel(QStringLiteral("系统就绪"), m_readyCard);
+    rocketRowLayout->addWidget(rocketWrap);
+    rocketRowLayout->addStretch(1);
+
+    m_readyTitle = new QLabel(QStringLiteral("开始今天的接待工作"), m_readyCard);
     m_readyTitle->setObjectName("readyTitle");
     m_readyTitle->setAlignment(Qt::AlignHCenter);
 
     auto* divider = new QFrame(m_readyCard);
     divider->setObjectName("divider");
     divider->setFixedHeight(1);
-    divider->setFixedWidth(220);
+    divider->setFixedWidth(160);
 
-    m_readySubtitle = new QLabel(QStringLiteral("选择左侧平台管理窗口"), m_readyCard);
+    m_readySubtitle = new QLabel(QStringLiteral("从左侧选择平台，或直接使用下方快捷入口"), m_readyCard);
     m_readySubtitle->setObjectName("readySubtitle");
     m_readySubtitle->setAlignment(Qt::AlignHCenter);
 
-    cardLayout->addWidget(rocketWrap);
+    cardLayout->addWidget(rocketRow);
     cardLayout->addWidget(m_readyTitle);
     cardLayout->addWidget(divider, 0, Qt::AlignHCenter);
     cardLayout->addWidget(m_readySubtitle);
 
     auto* quickRow = new QWidget(center);
     auto* quickLayout = new QHBoxLayout(quickRow);
-    quickLayout->setContentsMargins(0, 18, 0, 0);
-    quickLayout->setSpacing(18);
+    quickLayout->setContentsMargins(0, 2, 0, 0);
+    quickLayout->setSpacing(16);
     quickLayout->setAlignment(Qt::AlignHCenter);
 
     auto makeQuick = [&](const QIcon& icon, const QString& text) -> QToolButton* {
@@ -2350,11 +2422,11 @@ QWidget* MainWindow::buildReadyPage()
         btn->setObjectName("quickCard");
         btn->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
         btn->setIcon(icon);
-        btn->setIconSize(QSize(26, 26));
+        btn->setIconSize(QSize(32, 32));
         btn->setText(text);
         btn->setCursor(Qt::PointingHandCursor);
         btn->setAutoRaise(false);
-        btn->setFixedSize(150, 120);
+        btn->setFixedSize(156, 112);
         return btn;
     };
     auto* btnPick = makeQuick(resourceIcon(QStringLiteral(":/one_click_aggregation_icon.svg"),
@@ -2389,7 +2461,7 @@ QWidget* MainWindow::buildReadyPage()
     connect(btnPick, &QToolButton::clicked, this, &MainWindow::startOneClickAggregate);
     auto* btnEmbed = makeQuick(resourceIcon(QStringLiteral(":/start_or_stop_rpa_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_FileDialogListView)),
-                               QStringLiteral("管理启动/停止RPA"));
+                               QStringLiteral("RPA 管理"));
     m_btnRpaManage = btnEmbed;
     m_btnRpaManage->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_btnRpaManage, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
@@ -2400,6 +2472,11 @@ QWidget* MainWindow::buildReadyPage()
             openRpaConsoleWindow();
     });
     m_btnRpaManage->setToolTip(QStringLiteral("左键：管理启动/停止 RPA\n右键：查看控制台输出"));
+    auto* btnWechatWorkbench = makeQuick(
+        resourceIcon(QStringLiteral(":/start_or_stop_rpa_icon.svg"),
+                     qApp->style()->standardIcon(QStyle::SP_ComputerIcon)),
+        QStringLiteral("微信 RPA\n工作台"));
+    btnWechatWorkbench->setToolTip(QStringLiteral("打开微信独立工作台：查看会话、消息、AI 建议回复与人工发送"));
     auto* btnStart = makeQuick(resourceIcon(QStringLiteral(":/quick_launch_application_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_DialogOkButton)),
                                QStringLiteral("快速启动应用"));
@@ -2407,6 +2484,7 @@ QWidget* MainWindow::buildReadyPage()
     m_btnQuickStart->setToolTip(
         QStringLiteral("左键：按列表快速启动（受「数量上限」约束，默认前 10 项）\n右键：管理应用列表 / 设置数量上限"));
     connect(btnEmbed, &QToolButton::clicked, this, &MainWindow::openRpaManageDialog);
+    connect(btnWechatWorkbench, &QToolButton::clicked, this, &MainWindow::openWechatWorkbenchDialog);
     connect(btnStart, &QToolButton::clicked, this, &MainWindow::runQuickLaunchApps);
     btnStart->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(btnStart, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
@@ -2417,7 +2495,7 @@ QWidget* MainWindow::buildReadyPage()
         if (triggered == manage) {
             openQuickLaunchManager();
         } else if (triggered == setCap) {
-            QSettings settings;
+            QSettings settings = AppSettings::create();
             const int cur = qBound(1, settings.value(QStringLiteral("quickLaunch/maxLaunchCount"), 10).toInt(), 30);
             int v = cur;
             if (showStyledIntInputDialog(
@@ -2442,6 +2520,7 @@ QWidget* MainWindow::buildReadyPage()
     });
     quickLayout->addWidget(btnPick);
     quickLayout->addWidget(btnEmbed);
+    quickLayout->addWidget(btnWechatWorkbench);
     quickLayout->addWidget(btnStart);
     layout->addWidget(m_readyCard, 0, Qt::AlignHCenter);
     layout->addWidget(quickRow, 0, Qt::AlignHCenter);
@@ -2464,10 +2543,25 @@ void MainWindow::openRpaManageDialog()
     dlg.exec();
 }
 
+void MainWindow::openWechatWorkbenchDialog()
+{
+    if (!m_wechatWorkbenchDialog) {
+        m_wechatWorkbenchDialog = new WeChatWorkbenchDialog();
+        m_wechatWorkbenchDialog->applyTheme(m_mainWindowTheme);
+        connect(m_wechatWorkbenchDialog, &QObject::destroyed, this, [this]() {
+            m_wechatWorkbenchDialog = nullptr;
+        });
+    }
+    m_wechatWorkbenchDialog->show();
+    m_wechatWorkbenchDialog->raise();
+    m_wechatWorkbenchDialog->activateWindow();
+}
+
 void MainWindow::openRpaConsoleWindow()
 {
     if (!m_rpaConsoleWindow) {
-        m_rpaConsoleWindow = new RpaConsoleWindow(this, this);
+        // 勿用 this 作 QWidget 父级，否则 QDialog 会作为主窗口瞬态子窗体而长期叠在主窗之上。
+        m_rpaConsoleWindow = new RpaConsoleWindow(this, nullptr);
         connect(m_rpaConsoleWindow, &QObject::destroyed, this, [this]() {
             m_rpaConsoleWindow = nullptr;
         });
@@ -2479,193 +2573,41 @@ void MainWindow::openRpaConsoleWindow()
 
 QString MainWindow::rpaProcessLog(const QString& platformId) const
 {
-    return m_rpaProcessLogs.value(platformId);
+    return m_rpaProcessController ? m_rpaProcessController->processLog(platformId) : QString();
 }
 
 void MainWindow::clearRpaProcessLog(const QString& platformId)
 {
-    if (platformId.isEmpty())
-        return;
-    m_rpaProcessLogs.remove(platformId);
+    if (m_rpaProcessController)
+        m_rpaProcessController->clearProcessLog(platformId);
 }
 
 void MainWindow::appendRpaProcessLog(const QString& platformId, const QString& text)
 {
-    if (text.isEmpty())
-        return;
-    constexpr int kMaxRpaLogChars = 400000;
-    QString& buf = m_rpaProcessLogs[platformId];
-    buf.append(text);
-    if (buf.size() > kMaxRpaLogChars)
-        buf.remove(0, buf.size() - kMaxRpaLogChars);
-    emit rpaProcessOutputAppended(platformId, text);
+    Q_UNUSED(platformId)
+    Q_UNUSED(text)
 }
 
 QStringList MainWindow::runningRpaPlatformIds() const
 {
-    QStringList out;
-    for (auto it = m_rpaProcesses.constBegin(); it != m_rpaProcesses.constEnd(); ++it) {
-        QProcess* p = it.value();
-        if (p && p->state() == QProcess::Running)
-            out.append(it.key());
-    }
-    return out;
+    return m_rpaProcessController ? m_rpaProcessController->runningPlatformIds() : QStringList();
 }
 
 void MainWindow::startRpaPlatforms(const QStringList& platformIds)
 {
-    const QString pythonRoot = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python");
-    for (const QString& id : platformIds) {
-        if (id != QStringLiteral("wechat") && id != QStringLiteral("qianniu") && id != QStringLiteral("pdd"))
-            continue;
-
-        if (m_rpaProcesses.contains(id)) {
-            QProcess* existing = m_rpaProcesses.value(id);
-            if (existing && existing->state() == QProcess::Running)
-                continue;
-            if (existing) {
-                m_rpaProcesses.remove(id);
-                existing->disconnect();
-                existing->deleteLater();
-            }
-        }
-
-        auto* proc = new QProcess(this);
-        proc->setProgram(QStringLiteral("python"));
-        proc->setArguments(QStringList() << QStringLiteral("-m") << QStringLiteral("rpa.main")
-                                         << QStringLiteral("--platform") << id);
-        proc->setWorkingDirectory(pythonRoot);
-        {
-            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-            // Windows 下保证 stdout/stderr 以 UTF-8 模式输出（避免乱码）
-            env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
-            env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
-            proc->setProcessEnvironment(env);
-        }
-        m_rpaConsoleDecoders.insert(id, QSharedPointer<QStringDecoder>::create(QStringDecoder::Utf8));
-        proc->setProcessChannelMode(QProcess::MergedChannels);
-        connect(proc, &QProcess::readyReadStandardOutput, this, [this, id, proc]() {
-            if (m_rpaProcesses.value(id) != proc)
-                return;
-            const QByteArray chunk = proc->readAllStandardOutput();
-            if (chunk.isEmpty())
-                return;
-            auto it = m_rpaConsoleDecoders.find(id);
-            if (it == m_rpaConsoleDecoders.end())
-                return;
-            QString decoded = it.value()->decode(chunk);
-            // 如果 UTF-8 解码出现大量替换字符，说明实际输出可能是本地编码（常见 GBK/CP936）
-            if (decoded.contains(QChar::ReplacementCharacter)) {
-                const QString localDecoded = stripAnsiEscapes(QString::fromLocal8Bit(chunk));
-                if (!localDecoded.isEmpty()) {
-                    // reset 解码状态，避免后续分片继续受错误状态影响
-                    it.value() = QSharedPointer<QStringDecoder>::create(QStringDecoder::Utf8);
-                    appendRpaProcessLog(id, localDecoded);
-                    return;
-                }
-            }
-            const QString cleaned = stripAnsiEscapes(decoded);
-            if (!cleaned.isEmpty())
-                appendRpaProcessLog(id, cleaned);
-        });
-        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this, id, proc](int exitCode, QProcess::ExitStatus status) {
-                    Q_UNUSED(status)
-                    if (m_rpaProcesses.value(id) != proc)
-                        return;
-                    const QByteArray tail = proc->readAllStandardOutput();
-                    auto it = m_rpaConsoleDecoders.find(id);
-                    if (it != m_rpaConsoleDecoders.end()) {
-                        if (!tail.isEmpty()) {
-                            QString decoded = it.value()->decode(tail);
-                            if (decoded.contains(QChar::ReplacementCharacter)) {
-                                const QString localDecoded = stripAnsiEscapes(QString::fromLocal8Bit(tail));
-                                if (!localDecoded.isEmpty()) {
-                                    it.value() = QSharedPointer<QStringDecoder>::create(QStringDecoder::Utf8);
-                                    appendRpaProcessLog(id, localDecoded);
-                                } else {
-                                    const QString cleaned = stripAnsiEscapes(decoded);
-                                    if (!cleaned.isEmpty())
-                                        appendRpaProcessLog(id, cleaned);
-                                }
-                            } else {
-                                const QString cleaned = stripAnsiEscapes(decoded);
-                                if (!cleaned.isEmpty())
-                                    appendRpaProcessLog(id, cleaned);
-                            }
-                        }
-                        // flush any partial UTF-8 sequence
-                        const QString flushed = stripAnsiEscapes(it.value()->decode(QByteArray()));
-                        if (!flushed.isEmpty())
-                            appendRpaProcessLog(id, flushed);
-                    }
-                    appendRpaProcessLog(id, QStringLiteral("\n[进程已退出，退出码 %1]\n").arg(exitCode));
-                    m_rpaProcesses.remove(id);
-                    m_rpaConsoleDecoders.remove(id);
-                    proc->deleteLater();
-                });
-        connect(proc, &QProcess::errorOccurred, this, [this, id](QProcess::ProcessError e) {
-            qWarning() << "[RPA] process error" << id << static_cast<int>(e);
-            appendRpaProcessLog(id, QStringLiteral("\n[进程错误] code=%1\n").arg(static_cast<int>(e)));
-        });
-
-        proc->start();
-        if (!proc->waitForStarted(3000)) {
-            qWarning() << "[RPA] failed to start" << id;
-            appendRpaProcessLog(id, QStringLiteral("[启动失败] 无法在 PATH 中找到可用的 python，或 3 秒内未能启动。\n"));
-            statusBar()->showMessage(
-                QStringLiteral("启动失败：请确保已安装 Python 并在 PATH 中可用（python）。"), 5000);
-            proc->deleteLater();
-            continue;
-        }
-        appendRpaProcessLog(id, QStringLiteral("[RPA] 已启动: python -m rpa.main --platform %1\n").arg(id));
-        m_rpaProcesses.insert(id, proc);
-        statusBar()->showMessage(QStringLiteral("已启动 RPA：%1").arg(id), 3000);
-    }
+    if (m_rpaProcessController)
+        m_rpaProcessController->startPlatforms(platformIds);
 }
 
 void MainWindow::stopRpaPlatforms(const QStringList& platformIds)
 {
-    for (const QString& id : platformIds) {
-        QProcess* proc = m_rpaProcesses.take(id);
-        if (!proc)
-            continue;
-        proc->disconnect();
-        appendRpaProcessLog(id, QStringLiteral("\n[用户请求停止]\n"));
-        proc->kill();
-        proc->waitForFinished(3000);
-        const QByteArray tail = proc->readAllStandardOutput();
-        auto it = m_rpaConsoleDecoders.find(id);
-        if (it != m_rpaConsoleDecoders.end() && !tail.isEmpty()) {
-            QString decoded = it.value()->decode(tail);
-            if (decoded.contains(QChar::ReplacementCharacter)) {
-                const QString localDecoded = stripAnsiEscapes(QString::fromLocal8Bit(tail));
-                if (!localDecoded.isEmpty()) {
-                    it.value() = QSharedPointer<QStringDecoder>::create(QStringDecoder::Utf8);
-                    appendRpaProcessLog(id, localDecoded);
-                } else {
-                    const QString cleaned = stripAnsiEscapes(decoded);
-                    if (!cleaned.isEmpty())
-                        appendRpaProcessLog(id, cleaned);
-                }
-            } else {
-                const QString cleaned = stripAnsiEscapes(decoded);
-                if (!cleaned.isEmpty())
-                    appendRpaProcessLog(id, cleaned);
-            }
-            const QString flushed = stripAnsiEscapes(it.value()->decode(QByteArray()));
-            if (!flushed.isEmpty())
-                appendRpaProcessLog(id, flushed);
-        }
-        m_rpaConsoleDecoders.remove(id);
-        proc->deleteLater();
-        statusBar()->showMessage(QStringLiteral("已停止 RPA：%1").arg(id), 3000);
-    }
+    if (m_rpaProcessController)
+        m_rpaProcessController->stopPlatforms(platformIds);
 }
 
 int MainWindow::oneClickMaxOnlineLimit() const
 {
-    QSettings s(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    QSettings s = AppSettings::create();
     int v = s.value(QStringLiteral("oneClickAggregate/maxOnline"), 10).toInt();
     return qBound(kOneClickMinOnline, v, kOneClickMaxOnline);
 }
@@ -2673,7 +2615,7 @@ int MainWindow::oneClickMaxOnlineLimit() const
 void MainWindow::setOneClickMaxOnlineLimit(int n)
 {
     int v = qBound(kOneClickMinOnline, n, kOneClickMaxOnline);
-    QSettings s(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    QSettings s = AppSettings::create();
     s.setValue(QStringLiteral("oneClickAggregate/maxOnline"), v);
     updateOneClickAggregateTooltip();
 }
@@ -2706,7 +2648,7 @@ void MainWindow::applyAlwaysOnTop(bool on)
         return;
     m_alwaysOnTop = on;
     Win32WindowHelper::applyNativeTopMost(this, on);
-    QSettings pinSettings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+        QSettings pinSettings = AppSettings::create();
     pinSettings.setValue(QStringLiteral("mainWindow/alwaysOnTop"), m_alwaysOnTop);
     updatePinTopButtonUi();
 }
@@ -2762,7 +2704,7 @@ void MainWindow::startOneClickAggregate()
 static void loadQuickLaunchConfig(QVector<QuickLaunchApp>& apps,
                                   bool& onlyIfNotRunning)
 {
-    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    QSettings settings = AppSettings::create();
     const int size = settings.beginReadArray(QStringLiteral("quickLaunch/apps"));
     apps.clear();
     for (int i = 0; i < size; ++i) {
@@ -2781,7 +2723,7 @@ static void loadQuickLaunchConfig(QVector<QuickLaunchApp>& apps,
 static void saveQuickLaunchConfig(const QVector<QuickLaunchApp>& apps,
                                   bool onlyIfNotRunning)
 {
-    QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+    QSettings settings = AppSettings::create();
     settings.beginWriteArray(QStringLiteral("quickLaunch/apps"));
     for (int i = 0; i < apps.size(); ++i) {
         settings.setArrayIndex(i);
@@ -3311,7 +3253,7 @@ void MainWindow::runQuickLaunchApps()
         return;
     }
 
-    QSettings settings;
+    QSettings settings = AppSettings::create();
     const int maxLaunch = qBound(1, settings.value(QStringLiteral("quickLaunch/maxLaunchCount"), 10).toInt(), 30);
     const int totalItems = m_quickLaunchApps.size();
     const int sliceEnd = qMin(maxLaunch, totalItems);
@@ -3641,8 +3583,7 @@ void MainWindow::addWindowToPlatform(const WindowInfo& info)
         if (csItem) {
             csItem->setData(true, IsActivatedRole);
         }
-        // Update group dot to green if at least one is activated
-        m_csGroup->setData(QColor(82, 196, 26), DotColorRole);
+        m_platformTree->expand(m_csGroup->index());
         qInfo() << "[MainWindow] 客服平台关联:" << platformId << "<-" << info.platformName;
     } else {
         platformId = QStringLiteral("online_%1").arg(m_nextOnlineId++);
@@ -3654,6 +3595,7 @@ void MainWindow::addWindowToPlatform(const WindowInfo& info)
         if (icon.isNull())
             icon = qApp->style()->standardIcon(QStyle::SP_ComputerIcon);
         auto* item = new QStandardItem(icon, info.platformName);
+        item->setToolTip(info.platformName);
         item->setData(platformId, PlatformIdRole);
         item->setData(false, IsGroupRole);
         item->setData(false, IsCustomerServiceItemRole);
@@ -4085,13 +4027,17 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
                 }
             }
 
-            if (onlinePlatformIds.isEmpty())
-                return;
-
             QMenu menu(this);
-            QAction* actRemoveAll = menu.addAction(QStringLiteral("删除全部平台"));
+            QAction* actAddWindow = menu.addAction(QStringLiteral("添加新窗口"));
+            QAction* actRemoveAll = nullptr;
+            if (!onlinePlatformIds.isEmpty()) {
+                menu.addSeparator();
+                actRemoveAll = menu.addAction(QStringLiteral("删除全部平台"));
+            }
             QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
-            if (chosen == actRemoveAll) {
+            if (chosen == actAddWindow) {
+                openAddWindowDialog();
+            } else if (actRemoveAll && chosen == actRemoveAll) {
                 const QMessageBox::StandardButton btn = QMessageBox::question(
                     this,
                     QStringLiteral("确认"),
@@ -4156,14 +4102,10 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
     else
         actPrimary = menu.addAction(QStringLiteral("删除"));
 
-    QAction* actCalibrateWechat = nullptr;
     QAction* actCalibrateQianniu = nullptr;
     QAction* actCalibratePdd = nullptr;
     {
         const quintptr hwnd = m_managedWindows[id].handle;
-        if (managedWindowShowsWechatOcrCalibration(hwnd)) {
-            actCalibrateWechat = menu.addAction(QStringLiteral("微信OCR校准（备用方案）"));
-        }
         if (managedWindowShowsQianniuOcrCalibration(hwnd)) {
             actCalibrateQianniu = menu.addAction(QStringLiteral("千牛OCR区域校准"));
         }
@@ -4175,8 +4117,6 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
     QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
     if (chosen == actPrimary) {
         removeOnlinePlatformItem(id);
-    } else if (actCalibrateWechat && chosen == actCalibrateWechat) {
-        startWechatRpaCalibration(id);
     } else if (actCalibrateQianniu && chosen == actCalibrateQianniu) {
         startQianniuRpaCalibration(id);
     } else if (actCalibratePdd && chosen == actCalibratePdd) {
@@ -4822,6 +4762,100 @@ void MainWindow::startQianniuRpaCalibrationByHwnd(quintptr hwnd)
         qInfo() << "[MainWindow] 千牛 OCR 校准结果 region=" << spec->id
                 << "mapped(" << formatRect(mapped) << ")"
                 << "saved=" << saved;
+        if (!saved)
+            return;
+        if (spec->id != QLatin1String("unread_scan_band"))
+            return;
+
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        QProgressDialog qnBandProgress(
+            QStringLiteral("正在生成红点带预览图，请等待..."),
+            QString(),
+            0,
+            0,
+            this);
+        qnBandProgress.setWindowTitle(QStringLiteral("千牛红点带"));
+        qnBandProgress.setCancelButton(nullptr);
+        qnBandProgress.setWindowModality(Qt::ApplicationModal);
+        qnBandProgress.setMinimumDuration(0);
+        qnBandProgress.setAutoClose(false);
+        qnBandProgress.setAutoReset(false);
+        qnBandProgress.show();
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+        QProcess qnProc;
+        qnProc.setWorkingDirectory(QStringLiteral(PROJECT_ROOT_DIR));
+        qnProc.setProcessChannelMode(QProcess::MergedChannels);
+        QStringList qnArgs;
+        qnArgs << QStringLiteral("python/rpa/preview_qianniu_unread_band.py");
+        qnProc.start(QStringLiteral("python"), qnArgs);
+
+        if (!qnProc.waitForStarted(3000)) {
+            qnBandProgress.close();
+            QApplication::restoreOverrideCursor();
+            QMessageBox::warning(
+                this,
+                QStringLiteral("千牛红点带"),
+                QStringLiteral("已保存红点带校准，但无法启动预览脚本。\n请确认命令行中的 python 可用。"));
+            return;
+        }
+        if (!qnProc.waitForFinished(30000)) {
+            qnProc.kill();
+            qnProc.waitForFinished(1000);
+            qnBandProgress.close();
+            QApplication::restoreOverrideCursor();
+            QMessageBox::warning(
+                this,
+                QStringLiteral("千牛红点带"),
+                QStringLiteral("已保存红点带校准，但预览生成超时。"));
+            return;
+        }
+        qnBandProgress.close();
+        QApplication::restoreOverrideCursor();
+
+        const QString qnOut = QString::fromUtf8(qnProc.readAllStandardOutput());
+        const QString qnPrefix = QStringLiteral("QIANNIU_UNREAD_BAND_PREVIEW_JSON=");
+        const int qnPos = qnOut.lastIndexOf(qnPrefix);
+        if (qnPos < 0) {
+            QMessageBox::information(
+                this,
+                QStringLiteral("千牛红点带"),
+                QStringLiteral(
+                    "已保存红点带校准。\n"
+                    "后续运行 Reader 时，会按新的水平带检测红点；调试图见 python/rpa/_debug/qianniu。"));
+            return;
+        }
+
+        QJsonParseError qnErr{};
+        const QByteArray qnJsonBytes = qnOut.mid(qnPos + qnPrefix.size()).trimmed().toUtf8();
+        const QJsonDocument qnDoc = QJsonDocument::fromJson(qnJsonBytes, &qnErr);
+        if (!qnDoc.isObject()) {
+            QMessageBox::information(
+                this,
+                QStringLiteral("千牛红点带"),
+                QStringLiteral("已保存红点带校准。\n但预览解析失败：%1").arg(qnErr.errorString()));
+            return;
+        }
+
+        const QJsonObject qnPreview = qnDoc.object();
+        const bool qnOk = qnPreview.value(QStringLiteral("ok")).toBool();
+        const QString qnListPath = qnPreview.value(QStringLiteral("list_image_path")).toString();
+        const QString qnBandPath = qnPreview.value(QStringLiteral("band_image_path")).toString();
+        const QString qnOverlayHint = qnPreview.value(QStringLiteral("overlay_hint")).toString();
+        const QString qnErrorText = qnPreview.value(QStringLiteral("error")).toString();
+        const QString qnMsg = qnOk
+            ? QStringLiteral(
+                  "已保存红点带校准。\n\n"
+                  "水平带：%1\n"
+                  "会话列表截图：%2\n"
+                  "红点带截图：%3\n\n"
+                  "Reader 调试时还会在 python/rpa/_debug/qianniu 输出相关截图。")
+                  .arg(qnOverlayHint.isEmpty() ? QStringLiteral("（未提供）") : qnOverlayHint,
+                       qnListPath.isEmpty() ? QStringLiteral("（未保存）") : qnListPath,
+                       qnBandPath.isEmpty() ? QStringLiteral("（未保存）") : qnBandPath)
+            : QStringLiteral("已保存红点带校准，但即时预览失败：%1").arg(
+                  qnErrorText.isEmpty() ? QStringLiteral("未知错误") : qnErrorText);
+        QMessageBox::information(this, QStringLiteral("千牛红点带"), qnMsg);
     });
 }
 
@@ -4829,12 +4863,6 @@ bool MainWindow::mergeWriteQianniuRpaRegion(quintptr hwnd,
                                             const QString& regionId,
                                             const QRect& regionRectWindowPx) const
 {
-    if (regionId != QLatin1String("chat_region") && regionId != QLatin1String("contact_header_region")
-        && regionId != QLatin1String("conversation_list_region")) {
-        qWarning() << "[MainWindow] mergeWriteQianniuRpaRegion 未知 regionId:" << regionId;
-        return false;
-    }
-
     const QString path = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python/rpa/config/qianniu_config.json");
 
     QJsonObject root;
@@ -4856,6 +4884,49 @@ bool MainWindow::mergeWriteQianniuRpaRegion(quintptr hwnd,
     root.insert(QStringLiteral("hwnd_hex"),
                 QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(hwnd), 16)));
 
+    if (regionId == QLatin1String("unread_scan_band")) {
+        const QJsonObject listRegion = root.value(QStringLiteral("conversation_list_region")).toObject();
+        const int listX = listRegion.value(QStringLiteral("x")).toInt();
+        const int listW = listRegion.value(QStringLiteral("w")).toInt();
+        if (listW <= 0) {
+            qWarning() << "[MainWindow] 千牛红点带校准失败：请先校准「会话列表区域」并保证 w>0";
+            return false;
+        }
+        const int localLeft = qBound(0, regionRectWindowPx.x() - listX, listW - 1);
+        const int localRight = qBound(localLeft + 1, regionRectWindowPx.x() + regionRectWindowPx.width() - listX, listW);
+        const double startRatio = double(localLeft) / double(listW);
+        const double endRatio = double(localRight) / double(listW);
+
+        QJsonObject unread = root.value(QStringLiteral("unread_detection")).toObject();
+        unread.insert(QStringLiteral("scan_x_start_ratio"), startRatio);
+        unread.insert(QStringLiteral("scan_x_end_ratio"), endRatio);
+        unread.insert(QStringLiteral("scan_band_comment"),
+                      QStringLiteral("由千牛 OCR 校准的「红点带」生成；相对 conversation_list_region 宽度的比例"));
+        root.insert(QStringLiteral("unread_detection"), unread);
+
+        qInfo() << "[MainWindow] 千牛红点带已保存"
+                << "listX=" << listX
+                << "listW=" << listW
+                << "local=[" << localLeft << "," << localRight << ")"
+                << "ratio=[" << startRatio << "," << endRatio << ")";
+
+        QFile foutBand(path);
+        if (!foutBand.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            qWarning() << "[MainWindow] 写入 qianniu_config.json 失败:" << path << foutBand.errorString();
+            return false;
+        }
+        foutBand.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+        foutBand.close();
+        return true;
+    }
+
+    if (regionId != QLatin1String("chat_region") && regionId != QLatin1String("contact_header_region")
+        && regionId != QLatin1String("conversation_list_region") && regionId != QLatin1String("input_region")
+        && regionId != QLatin1String("send_button")) {
+        qWarning() << "[MainWindow] mergeWriteQianniuRpaRegion 未知 regionId:" << regionId;
+        return false;
+    }
+
     QJsonObject regionObj = root.value(regionId).toObject();
     regionObj.insert(QStringLiteral("mode"), QStringLiteral("relative_to_window"));
 
@@ -4864,7 +4935,9 @@ bool MainWindow::mergeWriteQianniuRpaRegion(quintptr hwnd,
             ? QStringLiteral("x,y,w,h 相对整窗 PrintWindow 左上角；存在时 Python 优先于比例字段")
             : (regionId == QLatin1String("contact_header_region"))
                   ? QStringLiteral("x,y,w,h 相对整窗 PrintWindow；存在时 Python 优先于比例")
-                  : QStringLiteral("x,y,w,h 相对整窗 PrintWindow；存在时 Python 优先于比例字段");
+                  : (regionId == QLatin1String("input_region") || regionId == QLatin1String("send_button"))
+                        ? QStringLiteral("x,y,w,h 相对整窗 PrintWindow；Writer 取中心点点击；存在时 Python 优先于比例")
+                        : QStringLiteral("x,y,w,h 相对整窗 PrintWindow；存在时 Python 优先于比例字段");
     regionObj.insert(QStringLiteral("xywh_comment"), xywhComment);
     regionObj.insert(QStringLiteral("x"), regionRectWindowPx.x());
     regionObj.insert(QStringLiteral("y"), regionRectWindowPx.y());
@@ -5054,11 +5127,30 @@ bool MainWindow::mergeWritePddRpaConfig(quintptr hwnd,
 
 void MainWindow::openAggregateChatForm()
 {
-    if (!m_aggregateChatForm) {
-        m_aggregateChatForm = new AggregateChatForm(m_username, this);
-        m_centerStack->addWidget(m_aggregateChatForm);
+    if (!m_aggregateReceptionWindow) {
+        auto* w = new QMainWindow(nullptr);
+        w->setAttribute(Qt::WA_DeleteOnClose, true);
+        w->setWindowTitle(QStringLiteral("聚合接待"));
+        w->setMinimumSize(1000, 650);
+        w->resize(1280, 820);
+        m_aggregateReceptionWindow = w;
+        m_aggregateChatForm = new AggregateChatForm(m_username, w);
+        w->setCentralWidget(m_aggregateChatForm);
+        m_aggregateChatForm->applyTheme(m_mainWindowTheme);
+        connect(m_aggregateReceptionWindow, &QObject::destroyed, this, [this] {
+            m_aggregateReceptionWindow = nullptr;
+            m_aggregateChatForm = nullptr;
+        });
     }
-    m_centerStack->setCurrentWidget(m_aggregateChatForm);
+    m_aggregateReceptionWindow->show();
+    m_aggregateReceptionWindow->raise();
+    m_aggregateReceptionWindow->activateWindow();
+    // 若保留「聚合接待」为当前项，关窗时焦点回主窗会再次触发 currentChanged 从而重复 open——打开后即清选中。
+    if (m_platformTree) {
+        const QModelIndex cur = m_platformTree->currentIndex();
+        if (cur.isValid() && cur.data(PlatformIdRole).toString() == QLatin1String("aggregate"))
+            m_platformTree->clearSelection();
+    }
 }
 
 void MainWindow::openRobotAssistantPage()
@@ -5069,6 +5161,33 @@ void MainWindow::openRobotAssistantPage()
         m_centerStack->addWidget(m_robotAssistantWidget);
     }
     m_centerStack->setCurrentWidget(m_robotAssistantWidget);
+}
+
+void MainWindow::openAiCustomerServiceBackendWindow(bool goToApiModelPage)
+{
+    if (!m_aiCustomerServiceBackendWindow) {
+        m_aiCustomerServiceBackendWindow = new AiCustomerServiceBackendWindow(nullptr);
+        connect(m_aiCustomerServiceBackendWindow, &QObject::destroyed, this, [this] {
+            m_aiCustomerServiceBackendWindow = nullptr;
+        });
+        connect(
+            m_aiCustomerServiceBackendWindow, &AiCustomerServiceBackendWindow::aiProviderConfigChanged, this,
+            [this] {
+                if (m_robotAssistantWidget)
+                    m_robotAssistantWidget->onExternalProviderConfigChanged();
+            });
+    }
+    m_aiCustomerServiceBackendWindow->show();
+    m_aiCustomerServiceBackendWindow->raise();
+    m_aiCustomerServiceBackendWindow->activateWindow();
+    if (goToApiModelPage)
+        m_aiCustomerServiceBackendWindow->focusApiModelPage();
+    // 与「聚合接待」独立窗一致：打开后清树选中，避免关窗时焦点回主窗再次触发 currentChanged 重复打开。
+    if (m_platformTree) {
+        const QModelIndex cur = m_platformTree->currentIndex();
+        if (cur.isValid() && cur.data(PlatformIdRole).toString() == QLatin1String("aiServiceBackend"))
+            m_platformTree->clearSelection();
+    }
 }
 
 // ==================== EmbeddedWindowContainer ====================
@@ -5113,17 +5232,15 @@ void MainWindow::showEvent(QShowEvent* event)
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     SwordCursor::restore();
-    detachAllWindows();
-    const QStringList keys = m_rpaProcesses.keys();
-    for (const QString& id : keys) {
-        QProcess* proc = m_rpaProcesses.take(id);
-        if (!proc)
-            continue;
-        proc->disconnect();
-        proc->kill();
-        proc->waitForFinished(1500);
-        proc->deleteLater();
+    if (m_aiCustomerServiceBackendWindow) {
+        m_aiCustomerServiceBackendWindow->close();
     }
+    if (m_aggregateReceptionWindow) {
+        m_aggregateReceptionWindow->close();
+    }
+    detachAllWindows();
+    if (m_rpaProcessController)
+        m_rpaProcessController->stopPlatforms(m_rpaProcessController->runningPlatformIds());
     QMainWindow::closeEvent(event);
 }
 
@@ -5345,30 +5462,11 @@ void MainWindow::openStatusMessageManager()
 void MainWindow::buildStatusBar()
 {
     m_customStatusMessages = loadCustomEncouragementMessages();
-    m_btnThemeSwitch = new QToolButton(this);
-    m_btnThemeSwitch->setObjectName(QStringLiteral("themeSwitchButton"));
-    m_btnThemeSwitch->setText(QStringLiteral("主题"));
-    m_btnThemeSwitch->setCursor(Qt::PointingHandCursor);
-    m_btnThemeSwitch->setPopupMode(QToolButton::InstantPopup);
-    m_btnThemeSwitch->setToolTip(QStringLiteral("默认 / 冷色 / 暖色"));
-    auto* themeMenu = new QMenu(m_btnThemeSwitch);
-    themeMenu->addAction(QStringLiteral("默认"), this, [this]() {
-        applyMainWindowTheme(ApplyStyle::MainWindowTheme::Default);
-    });
-    themeMenu->addAction(QStringLiteral("冷色"), this, [this]() {
-        applyMainWindowTheme(ApplyStyle::MainWindowTheme::Cool);
-    });
-    themeMenu->addAction(QStringLiteral("暖色"), this, [this]() {
-        applyMainWindowTheme(ApplyStyle::MainWindowTheme::Warm);
-    });
-    m_btnThemeSwitch->setMenu(themeMenu);
-    statusBar()->addWidget(m_btnThemeSwitch);
-
     auto* statusWrap = new QWidget(this);
     statusWrap->setObjectName("statusBarWrap");
     auto* statusLayout = new QHBoxLayout(statusWrap);
-    statusLayout->setContentsMargins(0, 0, 0, 0);
-    statusLayout->setSpacing(0);
+    statusLayout->setContentsMargins(2, 0, 2, 0);
+    statusLayout->setSpacing(6);
 
     m_statusMessage = new QLabel(statusWrap);
     m_statusSeparator = new QLabel(statusWrap);
@@ -5378,7 +5476,7 @@ void MainWindow::buildStatusBar()
     m_statusTime->setObjectName("statusTime");
     m_statusMessage->setCursor(Qt::PointingHandCursor);
     m_statusMessage->setToolTip(QStringLiteral("左键换一句，右键管理文案"));
-    m_statusSeparator->setText(QStringLiteral(" | "));
+    m_statusSeparator->setText(QStringLiteral("·"));
     m_statusMessage->installEventFilter(this);
     statusLayout->addWidget(m_statusMessage);
     statusLayout->addWidget(m_statusSeparator);

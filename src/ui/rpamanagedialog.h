@@ -27,6 +27,7 @@ private slots:
     void onSelectAllClicked();
     void onDeselectAllClicked();
     void onWechatCalibrateClicked();
+    void onWechatWorkbenchClicked();
     void onQianniuCalibrateClicked();
     void onStartClicked();
     void onStopClicked();
@@ -41,6 +42,7 @@ private:
     MainWindow* m_main = nullptr;
     QHash<QString, QCheckBox*> m_checks;
     QPushButton* m_btnWechatCalibrate = nullptr;
+    QPushButton* m_btnWechatWorkbench = nullptr;
     QPushButton* m_btnQianniuCalibrate = nullptr;
     QPushButton* m_btnStart = nullptr;
     QPushButton* m_btnStop = nullptr;

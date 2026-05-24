@@ -1,6 +1,7 @@
 #include "authmanager.h"
 #include "../data/database.h"
 #include "../data/userdao.h"
+#include "../utils/appsettings.h"
 #include "../utils/cryptoutil.h"
 #include <QRegularExpression>
 #include <QSettings>
@@ -75,7 +76,7 @@ bool AuthManager::login(const QString& username, const QString& password)
 
     m_currentUsername = user->username;
     {
-        QSettings settings(QStringLiteral("YangYangAI"), QStringLiteral("CustomerServiceDemo"));
+        QSettings settings = AppSettings::create();
         settings.setValue(QStringLiteral("auth/lastLoginUsername"), user->username);
     }
     emit loginSucceeded(m_currentUsername);

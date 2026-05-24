@@ -17,6 +17,7 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS
     Core
     Gui
+    Network
     Svg
     Widgets
     Sql
@@ -31,26 +32,46 @@ set(SOURCES
     src/data/conversationdao.cpp
     src/data/messagedao.cpp
     src/data/messagesendeventdao.cpp
+    src/data/aiassistantdao.cpp
     src/utils/logger.cpp
     src/utils/cryptoutil.cpp
     src/utils/applystyle.cpp
     src/utils/win32windowhelper.cpp
     src/utils/swordcursor.cpp
+    src/utils/imagedataurl.cpp
+    src/utils/svgresourcepixmap.cpp
     src/core/authmanager.cpp
     src/core/messagerouter.cpp
     src/core/conversationmanager.cpp
+    src/core/platformbootstrap.cpp
+    src/services/platforms/iplatformadapter.cpp
     src/services/platforms/simplatformadapter.cpp
     src/services/platforms/qianniurp_adapter.cpp
     src/services/platforms/wechatrp_adapter.cpp
     src/services/platforms/pddrp_adapter.cpp
+    src/services/app/conversationappservice.cpp
+    src/services/app/aichatappservice.cpp
+    src/services/ai/aiprovidercatalog.cpp
+    src/services/ai/airequestassembler.cpp
+    src/services/ai/aistreamingsession.cpp
+    src/services/ai/aiservicefacade.cpp
+    src/services/ai/openaicompatclient.cpp
+    src/services/ai/arkfilesresponses.cpp
+    src/services/wechat/wechatworkbenchservice.cpp
     src/ui/loginwindow.cpp
     src/ui/editprofiledialog.cpp
     src/ui/mainwindow.cpp
+    src/ui/rpaprocesscontroller.cpp
     src/ui/rpamanagedialog.cpp
     src/ui/rpa_console_window.cpp
     src/ui/addwindowdialog.cpp
     src/ui/aggregatechatform.cpp
     src/ui/helpcenterdialog.cpp
+    src/ui/sidebartocdelegate.cpp
+    src/ui/robotassistantwidget.cpp
+    src/ui/aicustomerservicebackendwindow.cpp
+    src/ui/aiproviderconfigpage.cpp
+    src/ui/wechatworkbenchdialog.cpp
 )
 
 set(HEADERS
@@ -59,29 +80,50 @@ set(HEADERS
     src/data/conversationdao.h
     src/data/messagedao.h
     src/data/messagesendeventdao.h
+    src/data/aiassistantdao.h
     src/utils/logger.h
     src/utils/cryptoutil.h
+    src/utils/appsettings.h
     src/utils/applystyle.h
     src/utils/win32windowhelper.h
     src/utils/swordcursor.h
+    src/utils/imagedataurl.h
+    src/utils/svgresourcepixmap.h
     src/core/types.h
     src/core/authmanager.h
     src/core/messagerouter.h
     src/core/conversationmanager.h
+    src/core/platformbootstrap.h
     src/services/platforms/iplatformadapter.h
     src/services/platforms/simplatformadapter.h
     src/services/platforms/qianniurp_adapter.h
     src/services/platforms/wechatrp_adapter.h
     src/services/platforms/pddrp_adapter.h
+    src/services/app/conversationappservice.h
+    src/services/app/aichatappservice.h
+    src/services/ai/aitypes.h
+    src/services/ai/aiprovidercatalog.h
+    src/services/ai/airequestassembler.h
+    src/services/ai/aistreamingsession.h
+    src/services/ai/aiservicefacade.h
+    src/services/ai/openaicompatclient.h
+    src/services/ai/arkfilesresponses.h
+    src/services/wechat/wechatworkbenchservice.h
     src/ui/loginwindow.h
     src/ui/editprofiledialog.h
     src/ui/mainwindow.h
+    src/ui/rpaprocesscontroller.h
     src/ui/rpamanagedialog.h
     src/ui/rpa_console_window.h
     src/ui/addwindowdialog.h
     src/ui/aggregatechatform.h
     src/ui/foldarrowcombobox.h
     src/ui/helpcenterdialog.h
+    src/ui/sidebartocdelegate.h
+    src/ui/robotassistantwidget.h
+    src/ui/aicustomerservicebackendwindow.h
+    src/ui/aiproviderconfigpage.h
+    src/ui/wechatworkbenchdialog.h
 )
 
 qt_add_executable(yy_ai_customer_service
@@ -105,6 +147,7 @@ target_compile_definitions(yy_ai_customer_service PRIVATE
 target_link_libraries(yy_ai_customer_service PRIVATE
     Qt6::Core
     Qt6::Gui
+    Qt6::Network
     Qt6::Svg
     Qt6::Widgets
     Qt6::Sql

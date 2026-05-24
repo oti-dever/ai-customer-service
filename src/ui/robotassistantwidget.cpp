@@ -1,21 +1,32 @@
 #include "robotassistantwidget.h"
+#include "mainwindow.h"
 #include "../data/aiassistantdao.h"
 #include "../data/userdao.h"
-#include "../services/ai/openaicompatclient.h"
+#include "../services/app/aichatappservice.h"
+#include "../services/app/conversationappservice.h"
+#include "../services/ai/aiprovidercatalog.h"
+#include "../services/ai/aistreamingsession.h"
+#include "../utils/appsettings.h"
 #include "../utils/applystyle.h"
+#include "../utils/svgresourcepixmap.h"
+#include "../utils/imagedataurl.h"
 #include <QApplication>
+#include <QImage>
 #include <QEventLoop>
 #include <QComboBox>
 #include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QToolButton>
 #include <QFrame>
 #include <QHBoxLayout>
-#include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
-#include <QLineEdit>
+#include <QMimeDatabase>
 #include <QMessageBox>
-#include <QNetworkAccessManager>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPlainTextEdit>
@@ -27,7 +38,6 @@
 #include <QShortcut>
 #include <QStyle>
 #include <QSvgRenderer>
-#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QtGlobal>
@@ -37,23 +47,7 @@ namespace {
 /** 与聚合会话一致：浅色弹窗底 + 深色字，避免继承父窗口深色 QSS 导致看不清。 */
 QString robotMessageBoxContrastStyle()
 {
-    return QStringLiteral(
-        "QMessageBox { background-color: #f4f4f5; }"
-        "QMessageBox QLabel { color: #18181b; font-size: 13px; }"
-        "QMessageBox QPushButton {"
-        "  background-color: #ffffff;"
-        "  color: #18181b;"
-        "  border: 1px solid #d4d4d8;"
-        "  border-radius: 6px;"
-        "  padding: 6px 16px;"
-        "  min-width: 72px;"
-        "}"
-        "QMessageBox QPushButton:hover { background-color: #e4e4e7; }"
-        "QMessageBox QPushButton:default {"
-        "  background-color: #2563eb;"
-        "  color: #ffffff;"
-        "  border-color: #1d4ed8;"
-        "}");
+    return ApplyStyle::messageBoxContrastStyle();
 }
 
 void showRobotMessageBox(QMessageBox::Icon icon, QWidget* parent, const QString& title, const QString& text)
@@ -100,32 +94,14 @@ QString robotAssistantQss(ApplyStyle::MainWindowTheme theme)
     return qss;
 }
 
-QPixmap pixmapFromSvgResource(const QString& resPath, int logicalSide)
+static QPixmap pixmapFromSvgResource(const QString& resPath, int logicalSide)
 {
-    QSvgRenderer renderer(resPath);
-    if (!renderer.isValid())
-        return {};
-    const qreal dpr = qApp->devicePixelRatio() > 0 ? qApp->devicePixelRatio() : 1.0;
-    const int px = qMax(1, qRound(logicalSide * dpr));
-    QPixmap pm(px, px);
-    pm.fill(Qt::transparent);
-    QPainter p(&pm);
-    renderer.render(&p, QRectF(0, 0, px, px));
-    p.end();
-    pm.setDevicePixelRatio(dpr);
-    return pm;
+    return svgResourcePixmapFittedInSquare(resPath, logicalSide);
 }
 
-QPixmap pixmapFromRasterResource(const QString& resPath, int logicalSide)
+static QPixmap pixmapFromRasterResource(const QString& resPath, int logicalSide)
 {
-    QPixmap pm;
-    if (!pm.load(resPath))
-        return {};
-    const qreal dpr = qApp->devicePixelRatio() > 0 ? qApp->devicePixelRatio() : 1.0;
-    const int px = qMax(1, qRound(logicalSide * dpr));
-    pm = pm.scaled(px, px, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    pm.setDevicePixelRatio(dpr);
-    return pm;
+    return rasterResourcePixmapFittedInSquare(resPath, logicalSide);
 }
 
 /** 请求侧最多 10 轮 user↔assistant（§10.2）；从首条 user 对齐截断，避免 orphan assistant。 */
@@ -142,11 +118,87 @@ static QList<RobotChatTurn> tailHistoryForApi(const QList<RobotChatTurn>& histor
     return history.mid(start);
 }
 
+static const QString kRobotMmKey = QStringLiteral("mm");
+static const QString kRobotPathKey = QStringLiteral("p");
+static const QString kRobotTxtKey = QStringLiteral("t");
+
+QString formatRobotMultimodalJson(const QString& absPath, const QString& text)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("v"), 1);
+    o.insert(kRobotMmKey, true);
+    o.insert(kRobotPathKey, absPath);
+    o.insert(kRobotTxtKey, text);
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
+bool parseRobotMultimodalJson(const QString& content, QString* outPath, QString* outText)
+{
+    if (!content.trimmed().startsWith(QLatin1Char('{')))
+        return false;
+    QJsonParseError err{};
+    const QJsonDocument d = QJsonDocument::fromJson(content.toUtf8(), &err);
+    if (err.error != QJsonParseError::NoError || !d.isObject())
+        return false;
+    const QJsonObject o = d.object();
+    if (!o.value(kRobotMmKey).toBool())
+        return false;
+    *outPath = o.value(kRobotPathKey).toString();
+    *outText = o.value(kRobotTxtKey).toString();
+    return true;
+}
+
+static const QString kRobotArkFileKey = QStringLiteral("arkFile");
+
+QString formatRobotArkFileJson(const QString& absPath, const QString& userText)
+{
+    const QFileInfo fi(absPath);
+    QJsonObject o;
+    o.insert(QStringLiteral("v"), 1);
+    o.insert(kRobotArkFileKey, true);
+    o.insert(kRobotPathKey, fi.absoluteFilePath());
+    o.insert(QStringLiteral("n"), fi.fileName());
+    o.insert(kRobotTxtKey, userText);
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
+bool parseRobotArkFileJson(const QString& content, QString* outPath, QString* outName, QString* outText)
+{
+    if (!content.trimmed().startsWith(QLatin1Char('{')))
+        return false;
+    QJsonParseError err{};
+    const QJsonDocument d = QJsonDocument::fromJson(content.toUtf8(), &err);
+    if (err.error != QJsonParseError::NoError || !d.isObject())
+        return false;
+    const QJsonObject o = d.object();
+    if (!o.value(kRobotArkFileKey).toBool())
+        return false;
+    *outPath = o.value(kRobotPathKey).toString();
+    *outName = o.value(QStringLiteral("n")).toString();
+    if (outName->isEmpty() && outPath && !outPath->isEmpty())
+        *outName = QFileInfo(*outPath).fileName();
+    *outText = o.value(kRobotTxtKey).toString();
+    return true;
+}
+
 } // namespace
 
-QString RobotAssistantWidget::defaultSystemPrompt()
+QString RobotAssistantWidget::assistantDisplayNameForSessionKey(const QString& sessionModelKey) const
 {
-    return QStringLiteral(
+    const QString label = aiPresetDefinition(sessionModelKey).assistantDisplayName;
+    return label.isEmpty() ? QStringLiteral("助手") : label;
+}
+
+QString RobotAssistantWidget::assistantAvatarResourceForSessionKey(const QString& sessionModelKey) const
+{
+    const QString res = aiPresetDefinition(sessionModelKey).assistantAvatarResource;
+    return res.isEmpty() ? QStringLiteral(":/aggregate_reception_icons/deepseek_logo_icon.svg")
+                         : res;
+}
+
+QString RobotAssistantWidget::systemPromptForRequest() const
+{
+    const QString base = QStringLiteral(
         "你是桌面应用「AI 客服」的内置帮助助手。回答与本软件相关的使用问题，例如登录、添加与管理各平台窗口、聚合会话、RPA 启动与控制台、主题与设置等。"
         "辅助设定：若用户询问其他话题，也可以陪伴聊天。"
         "性格：幽默、活泼、可爱，但不要显得太刻意。"
@@ -156,12 +208,41 @@ QString RobotAssistantWidget::defaultSystemPrompt()
         "- 提供聚合会话、RPA 启动/停止与管理、控制台日志查看。\n"
         "- 支持主题切换与个人账户相关设置。\n"
         "- 本助手仅用于解答本软件用法，不会自动向各平台客户发送消息。");
+
+    const QString modelParam = loadAiProviderConfig(m_activePresetSessionKey).model.trimmed();
+    const QString modelHint = modelParam.isEmpty() ? QStringLiteral("（由用户在「API 配置/模型」中填写）") : modelParam;
+
+    if (m_activePresetSessionKey == QLatin1String("doubao:ark")) {
+        const QString tail = QStringLiteral(
+            "\n\n【回答风格】"
+            "优先简洁：除非用户明确要求「详细说明」「一步步」等，否则控制篇幅，避免冗长铺垫与重复解释。\n\n"
+            "【关于你的身份与底层模型】"
+            "用户在「AI 助手」中当前选择的是火山引擎方舟·豆包线路；本软件请求里使用的 model 参数为「%1」。"
+            "若用户问你是什么模型、谁提供的、是不是 DeepSeek，请如实说明："
+            "你是本软件内置的帮助助手，当前对话由火山方舟接入的豆包大模型（Doubao）提供推理，界面展示名可用「doubao」；"
+            "不要自称 DeepSeek 或其它未在设置中选中的厂商。"
+            "若问版本或接入点细节，可说明以用户本地填写的模型名称/接入点 ID 为准。")
+            .arg(modelHint);
+        return base + tail;
+    }
+    if (m_activePresetSessionKey == QLatin1String("deepseek:deepseek-chat")) {
+        const QString tail = QStringLiteral(
+            "\n\n【关于你的身份与底层模型】"
+            "用户在「AI 助手」中当前选择的是 DeepSeek；请求中的 model 参数一般为「%1」。"
+            "若用户问你是什么模型，请说明你由 DeepSeek 提供能力，是本软件内置帮助助手，界面展示名可用「DeepSeek」。"
+            "不要自称豆包或其它未选中的厂商。")
+            .arg(modelHint);
+        return base + tail;
+    }
+    const QString tail = QStringLiteral(
+        "\n\n【关于你的身份】若用户询问所用模型或厂商，说明你是本软件内置帮助助手，具体后端以用户在「AI 客服后台 → API 配置/模型」中的选择为准。");
+    return base + tail;
 }
 
 RobotAssistantWidget::RobotAssistantWidget(const QString& loginUsername, QWidget* parent)
     : QWidget(parent)
-    , m_nam(new QNetworkAccessManager(this))
-    , m_client(new OpenAiCompatClient(m_nam, this))
+    , m_conversationService(new ConversationAppService())
+    , m_aiChatService(new AiChatAppService(this))
     , m_loginUsername(loginUsername)
 {
     setObjectName(QStringLiteral("robotAssistantRoot"));
@@ -169,24 +250,22 @@ RobotAssistantWidget::RobotAssistantWidget(const QString& loginUsername, QWidget
     rootLayout->setContentsMargins(0, 0, 0, 0);
     rootLayout->setSpacing(0);
 
-    m_tabs = new QTabWidget(this);
-    m_tabs->setDocumentMode(true);
-    rootLayout->addWidget(m_tabs, 1);
-
-    // —— 对话 Tab（布局对齐聚合会话中心：aggregateCenterPanel + chatArea + messageScroll + bubble 样式）——
-    auto* chatPage = new QWidget(m_tabs);
+    // —— 单页对话（布局对齐聚合会话中心：aggregateCenterPanel + chatArea + messageScroll + bubble 样式）——
+    auto* chatPage = new QWidget(this);
     auto* chatOuter = new QVBoxLayout(chatPage);
     chatOuter->setContentsMargins(0, 0, 0, 0);
     chatOuter->setSpacing(0);
 
     auto* centerPanel = new QWidget(chatPage);
     centerPanel->setObjectName(QStringLiteral("aggregateCenterPanel"));
+    centerPanel->setAutoFillBackground(true);
     auto* centerLay = new QVBoxLayout(centerPanel);
     centerLay->setContentsMargins(0, 0, 0, 0);
     centerLay->setSpacing(0);
 
     auto* chatArea = new QWidget(centerPanel);
     chatArea->setObjectName(QStringLiteral("chatArea"));
+    chatArea->setAutoFillBackground(true);
     auto* chatAreaLay = new QVBoxLayout(chatArea);
     chatAreaLay->setContentsMargins(0, 0, 0, 0);
     chatAreaLay->setSpacing(0);
@@ -205,7 +284,6 @@ RobotAssistantWidget::RobotAssistantWidget(const QString& loginUsername, QWidget
     m_modelPresetCombo->setObjectName(QStringLiteral("robotAssistantModelCombo"));
     m_modelPresetCombo->setCursor(Qt::PointingHandCursor);
     m_modelPresetCombo->setFocusPolicy(Qt::StrongFocus);
-    populateModelPresetCombo();
     headerLay->addWidget(m_modelPresetCombo, 0, Qt::AlignVCenter);
     chatAreaLay->addWidget(headerRow);
 
@@ -214,6 +292,8 @@ RobotAssistantWidget::RobotAssistantWidget(const QString& loginUsername, QWidget
     m_scroll->setWidgetResizable(true);
     m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_scroll->setFrameShape(QFrame::NoFrame);
+    if (QWidget* vp = m_scroll->viewport())
+        vp->setObjectName(QStringLiteral("messageScrollViewport"));
 
     m_chatInner = new QWidget(m_scroll);
     m_chatLayout = new QVBoxLayout(m_chatInner);
@@ -232,6 +312,57 @@ RobotAssistantWidget::RobotAssistantWidget(const QString& loginUsername, QWidget
     auto* inputAreaLay = new QVBoxLayout(inputArea);
     inputAreaLay->setContentsMargins(16, 8, 16, 12);
     inputAreaLay->setSpacing(8);
+
+    auto* inputToolbar = new QHBoxLayout();
+    inputToolbar->setSpacing(8);
+    m_pictureBtn = new QToolButton(inputArea);
+    m_pictureBtn->setObjectName(QStringLiteral("robotAssistantAttachBtn"));
+    m_pictureBtn->setToolTip(QStringLiteral("添加图片（豆包多模态）"));
+    m_pictureBtn->setCursor(Qt::PointingHandCursor);
+    m_pictureBtn->setAutoRaise(true);
+    {
+        const QPixmap pic = pixmapFromSvgResource(QStringLiteral(":/picture_icon.svg"), 22);
+        if (!pic.isNull())
+            m_pictureBtn->setIcon(QIcon(pic));
+    }
+    m_pictureBtn->setIconSize(QSize(22, 22));
+    m_pictureBtn->setFixedSize(32, 32);
+    m_fileBtn = new QToolButton(inputArea);
+    m_fileBtn->setObjectName(QStringLiteral("robotAssistantAttachBtn"));
+    m_fileBtn->setToolTip(QStringLiteral("添加文件（火山方舟 Files API，仅豆包线路）"));
+    m_fileBtn->setCursor(Qt::PointingHandCursor);
+    m_fileBtn->setAutoRaise(true);
+    {
+        const QPixmap fi = pixmapFromSvgResource(QStringLiteral(":/file_icon.svg"), 22);
+        if (!fi.isNull())
+            m_fileBtn->setIcon(QIcon(fi));
+    }
+    m_fileBtn->setIconSize(QSize(22, 22));
+    m_fileBtn->setFixedSize(32, 32);
+    inputToolbar->addWidget(m_pictureBtn);
+    inputToolbar->addWidget(m_fileBtn);
+    inputToolbar->addStretch(1);
+    inputAreaLay->addLayout(inputToolbar);
+
+    m_pendingAttachmentRow = new QWidget(inputArea);
+    m_pendingAttachmentRow->setVisible(false);
+    auto* pendingLay = new QHBoxLayout(m_pendingAttachmentRow);
+    pendingLay->setContentsMargins(0, 0, 0, 0);
+    pendingLay->setSpacing(8);
+    m_pendingThumbLabel = new QLabel(m_pendingAttachmentRow);
+    m_pendingThumbLabel->setFixedSize(48, 48);
+    m_pendingThumbLabel->setObjectName(QStringLiteral("robotPendingThumb"));
+    m_pendingNameLabel = new QLabel(m_pendingAttachmentRow);
+    m_pendingNameLabel->setObjectName(QStringLiteral("robotPendingName"));
+    m_pendingNameLabel->setWordWrap(true);
+    m_pendingClearBtn = new QPushButton(QStringLiteral("移除"), m_pendingAttachmentRow);
+    m_pendingClearBtn->setObjectName(QStringLiteral("simulateButton"));
+    m_pendingClearBtn->setCursor(Qt::PointingHandCursor);
+    pendingLay->addWidget(m_pendingThumbLabel);
+    pendingLay->addWidget(m_pendingNameLabel, 1);
+    pendingLay->addWidget(m_pendingClearBtn, 0, Qt::AlignTop);
+    inputAreaLay->addWidget(m_pendingAttachmentRow);
+
     m_input = new QPlainTextEdit(inputArea);
     m_input->setObjectName(QStringLiteral("messageInput"));
     m_input->setPlaceholderText(QStringLiteral("输入问题，Ctrl+Enter 发送"));
@@ -243,7 +374,7 @@ RobotAssistantWidget::RobotAssistantWidget(const QString& loginUsername, QWidget
     m_sendBtn->setObjectName(QStringLiteral("sendButton"));
     m_sendBtn->setCursor(Qt::PointingHandCursor);
     m_clearBtn = new QPushButton(QStringLiteral("清空会话"), inputArea);
-    m_clearBtn->setObjectName(QStringLiteral("sendButton"));
+    m_clearBtn->setObjectName(QStringLiteral("simulateButton"));
     m_clearBtn->setCursor(Qt::PointingHandCursor);
     inputBtnRow->addWidget(m_sendBtn);
     inputBtnRow->addWidget(m_clearBtn);
@@ -255,100 +386,45 @@ RobotAssistantWidget::RobotAssistantWidget(const QString& loginUsername, QWidget
     m_statusLabel = new QLabel(centerPanel);
     m_statusLabel->setObjectName(QStringLiteral("robotAssistantStatus"));
     m_statusLabel->setWordWrap(true);
+    m_statusLabel->setVisible(false);
     m_statusLabel->setContentsMargins(12, 4, 12, 8);
     centerLay->addWidget(m_statusLabel);
 
     chatOuter->addWidget(centerPanel, 1);
-    m_tabs->addTab(chatPage, QStringLiteral("对话"));
+    rootLayout->addWidget(chatPage, 1);
 
-    // —— 设置 Tab ——
-    auto* settingsPage = new QWidget(m_tabs);
-    settingsPage->setObjectName(QStringLiteral("robotAssistantSettingsPage"));
-    auto* setLay = new QVBoxLayout(settingsPage);
-    setLay->setContentsMargins(16, 16, 16, 16);
-    setLay->setSpacing(12);
-
-    auto addLabeledRow = [&](const QString& label, QLineEdit* edit) {
-        auto* row = new QWidget(settingsPage);
-        auto* v = new QVBoxLayout(row);
-        v->setContentsMargins(0, 0, 0, 0);
-        v->setSpacing(4);
-        auto* lab = new QLabel(label, row);
-        lab->setObjectName(QStringLiteral("robotSettingsFieldLabel"));
-        v->addWidget(lab);
-        edit->setObjectName(QStringLiteral("robotSettingsField"));
-        v->addWidget(edit);
-        setLay->addWidget(row);
-    };
-
-    m_baseUrlEdit = new QLineEdit(settingsPage);
-    m_baseUrlEdit->setPlaceholderText(QStringLiteral("https://api.deepseek.com"));
-    addLabeledRow(QStringLiteral("API Base URL"), m_baseUrlEdit);
-
-    m_modelEdit = new QLineEdit(settingsPage);
-    m_modelEdit->setPlaceholderText(QStringLiteral("deepseek-chat"));
-    addLabeledRow(QStringLiteral("模型名称"), m_modelEdit);
-
-    m_apiKeyEdit = new QLineEdit(settingsPage);
-    m_apiKeyEdit->setEchoMode(QLineEdit::Password);
-    m_apiKeyEdit->setPlaceholderText(QStringLiteral("在 DeepSeek 开放平台创建的 API Key"));
-    addLabeledRow(QStringLiteral("API Key"), m_apiKeyEdit);
-
-    auto* settingsBtnRow = new QWidget(settingsPage);
-    auto* settingsBtnLay = new QHBoxLayout(settingsBtnRow);
-    settingsBtnLay->setContentsMargins(0, 0, 0, 0);
-    settingsBtnLay->setSpacing(8);
-    m_saveBtn = new QPushButton(QStringLiteral("保存设置"), settingsBtnRow);
-    m_saveBtn->setObjectName(QStringLiteral("sendButton"));
-    m_saveBtn->setCursor(Qt::PointingHandCursor);
-    m_testBtn = new QPushButton(QStringLiteral("测试连接"), settingsBtnRow);
-    m_testBtn->setObjectName(QStringLiteral("simulateButton"));
-    m_testBtn->setCursor(Qt::PointingHandCursor);
-    settingsBtnLay->addWidget(m_saveBtn);
-    settingsBtnLay->addWidget(m_testBtn);
-    settingsBtnLay->addStretch(1);
-    setLay->addWidget(settingsBtnRow);
-
-    m_privacyLabel = new QLabel(
-        QStringLiteral(
-            "说明：为获得回答，您输入的内容会发送至所配置的 API 服务商（如 DeepSeek）。\n"
-            "请勿将 API Key 告知他人或提交到公开代码库。\n"
-            "本助手与微信、千牛等平台内的客户聊天无关，也不会自动向客户发送消息。"),
-        settingsPage);
-    m_privacyLabel->setWordWrap(true);
-    m_privacyLabel->setObjectName(QStringLiteral("robotAssistantPrivacy"));
-    setLay->addWidget(m_privacyLabel);
-    setLay->addStretch(1);
-
-    m_tabs->addTab(settingsPage, QStringLiteral("设置"));
-
-    connect(m_saveBtn, &QPushButton::clicked, this, &RobotAssistantWidget::onSaveSettings);
-    connect(m_testBtn, &QPushButton::clicked, this, &RobotAssistantWidget::onTestConnection);
     connect(m_sendBtn, &QPushButton::clicked, this, &RobotAssistantWidget::onSendMessage);
     connect(m_clearBtn, &QPushButton::clicked, this, &RobotAssistantWidget::onClearChat);
-
-    connect(m_client, &OpenAiCompatClient::streamDelta, this, &RobotAssistantWidget::onClientDelta);
-    connect(m_client, &OpenAiCompatClient::completed, this, &RobotAssistantWidget::onClientCompleted);
-    connect(m_client, &OpenAiCompatClient::failed, this, &RobotAssistantWidget::onClientFailed);
+    connect(m_pictureBtn, &QToolButton::clicked, this, &RobotAssistantWidget::onPickPicture);
+    connect(m_fileBtn, &QToolButton::clicked, this, &RobotAssistantWidget::onPickFile);
+    connect(m_pendingClearBtn, &QPushButton::clicked, this, [this]() {
+        clearPendingAttachment();
+        applySendButtonPolicy();
+    });
+    connect(m_input, &QPlainTextEdit::textChanged, this, &RobotAssistantWidget::applySendButtonPolicy);
 
     auto* sc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), m_input);
     connect(sc, &QShortcut::activated, this, &RobotAssistantWidget::onSendMessage);
 
-    m_theme = ApplyStyle::loadSavedMainWindowTheme();
+    m_theme = ApplyStyle::MainWindowTheme::Default;
     applyTheme(m_theme);
-    loadSettings();
-    loadSelfBubbleIdentity();
-    rebindSessionFromCurrentConfig();
 
-    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int index) {
-        if (index == 0)
-            rebindSessionFromCurrentConfig();
-    });
+    migrateLegacyAiSettingsToPresets();
+    fillPresetCombo(m_modelPresetCombo);
+    if (m_modelPresetCombo->count() > 0)
+        m_activePresetSessionKey = sessionModelKeyAtComboIndex(0);
 
     connect(m_modelPresetCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this](int) {
-                rebindSessionFromCurrentConfig();
-            });
+            &RobotAssistantWidget::onPresetComboIndexChanged);
+
+    loadSelfBubbleIdentity();
+    rebindSessionFromCurrentConfig();
+}
+
+void RobotAssistantWidget::onExternalProviderConfigChanged()
+{
+    rebindSessionFromCurrentConfig();
+    applySendButtonPolicy();
 }
 
 void RobotAssistantWidget::refreshLocalUserProfile()
@@ -356,22 +432,57 @@ void RobotAssistantWidget::refreshLocalUserProfile()
     loadSelfBubbleIdentity();
 }
 
-void RobotAssistantWidget::populateModelPresetCombo()
+void RobotAssistantWidget::fillPresetCombo(QComboBox* combo)
 {
-    if (!m_modelPresetCombo)
+    if (!combo)
         return;
-    m_modelPresetCombo->clear();
-    auto add = [this](const QString& label, const QString& sessionKey, bool avail) {
+    combo->clear();
+    auto add = [combo](const AiPresetDefinition& def) {
         QVariantMap m;
-        m.insert(QStringLiteral("sessionModelKey"), sessionKey);
-        m.insert(QStringLiteral("available"), avail);
-        const int idx = m_modelPresetCombo->count();
-        m_modelPresetCombo->addItem(label);
-        m_modelPresetCombo->setItemData(idx, m, Qt::UserRole);
+        m.insert(QStringLiteral("sessionModelKey"), def.sessionModelKey);
+        m.insert(QStringLiteral("available"), def.available);
+        const int idx = combo->count();
+        combo->addItem(def.label);
+        combo->setItemData(idx, m, Qt::UserRole);
     };
-    add(QStringLiteral("DeepSeek"), QStringLiteral("deepseek:deepseek-chat"), true);
-    add(QStringLiteral("通义千问（即将支持）"), QStringLiteral("qwen:placeholder"), false);
-    add(QStringLiteral("豆包（即将支持）"), QStringLiteral("doubao:placeholder"), false);
+    for (const AiPresetDefinition& def : aiPresetDefinitions())
+        add(def);
+}
+
+void RobotAssistantWidget::migrateLegacyAiSettingsToPresets()
+{
+    migrateLegacyAiSettingsToPreset(QStringLiteral("deepseek:deepseek-chat"));
+}
+
+QString RobotAssistantWidget::sessionModelKeyAtComboIndex(int index) const
+{
+    if (!m_modelPresetCombo || index < 0 || index >= m_modelPresetCombo->count())
+        return {};
+    return m_modelPresetCombo->itemData(index, Qt::UserRole)
+        .toMap()
+        .value(QStringLiteral("sessionModelKey"))
+        .toString();
+}
+
+void RobotAssistantWidget::onPresetComboIndexChanged(int index)
+{
+    if (index < 0 || !m_modelPresetCombo || index >= m_modelPresetCombo->count())
+        return;
+
+    m_activePresetSessionKey = sessionModelKeyAtComboIndex(index);
+
+    if (m_activePresetSessionKey != QLatin1String("doubao:ark"))
+        clearPendingAttachment();
+    else
+        updatePendingAttachmentUi();
+
+    rebindSessionFromCurrentConfig();
+    applySendButtonPolicy();
+}
+
+RobotAssistantWidget::~RobotAssistantWidget()
+{
+    delete m_conversationService;
 }
 
 QVariantMap RobotAssistantWidget::currentPresetData() const
@@ -390,26 +501,52 @@ void RobotAssistantWidget::applySendButtonPolicy()
 {
     if (!m_sendBtn)
         return;
-    m_sendBtn->setEnabled(currentPresetAvailable() && !m_busy);
+    const bool base = currentPresetAvailable() && !m_busy;
+    bool canSend = base;
+    if (base) {
+        const AiProviderCapabilities capabilities = aiPresetDefinition(m_activePresetSessionKey).capabilities;
+        const QString t = m_input ? m_input->toPlainText().trimmed() : QString();
+        const bool hasText = !t.isEmpty();
+        const bool hasPendingImg = capabilities.supportsVisionDataUrl && !m_pendingImagePath.isEmpty();
+        const bool hasPendingFile = capabilities.supportsFileAttachment && !m_pendingFilePath.isEmpty();
+        canSend = hasText || hasPendingImg || hasPendingFile;
+    }
+    m_sendBtn->setEnabled(canSend);
+    applyAttachmentButtonsPolicy();
+}
+
+void RobotAssistantWidget::applyAttachmentButtonsPolicy()
+{
+    const AiPresetDefinition def = aiPresetDefinition(m_activePresetSessionKey);
+    if (m_pictureBtn) {
+        const bool supported = def.capabilities.supportsVisionDataUrl;
+        m_pictureBtn->setVisible(supported);
+        m_pictureBtn->setEnabled(supported && !m_busy);
+    }
+    if (m_fileBtn) {
+        const bool supported = def.capabilities.supportsFileAttachment;
+        m_fileBtn->setVisible(supported);
+        m_fileBtn->setEnabled(supported && !m_busy);
+        m_fileBtn->setToolTip(def.capabilities.supportsFileAttachment
+                                  ? QStringLiteral("添加文件（当前模型支持附件推理）")
+                                  : QStringLiteral("当前模型不支持文件附件"));
+    }
 }
 
 void RobotAssistantWidget::loadSelfBubbleIdentity()
 {
-    m_selfDisplayName = m_loginUsername;
+    const LocalUserProfile profile = m_conversationService
+                                         ? m_conversationService->loadLocalUserProfile(m_loginUsername)
+                                         : LocalUserProfile{m_loginUsername, m_loginUsername, QString()};
+    m_selfDisplayName = profile.displayName;
 
     constexpr int kAvatarLogical = 36;
     const qreal dpr = devicePixelRatioF() > 0 ? devicePixelRatioF() : 1.0;
 
-    UserDao dao;
-    const auto u = dao.findByUsername(m_loginUsername);
-    if (u && !u->displayName.isEmpty())
-        m_selfDisplayName = u->displayName;
-
     QPixmap pm;
-    if (u && !u->avatarPath.isEmpty()) {
-        const QString abs = UserDao::absolutePathFromProjectRelative(u->avatarPath);
-        if (QFile::exists(abs)) {
-            const QImage img(abs);
+    if (!profile.avatarAbsolutePath.isEmpty()) {
+        if (QFile::exists(profile.avatarAbsolutePath)) {
+            const QImage img(profile.avatarAbsolutePath);
             if (!img.isNull()) {
                 pm = QPixmap::fromImage(
                     img.scaled(QSize(kAvatarLogical, kAvatarLogical) * dpr, Qt::KeepAspectRatio,
@@ -432,77 +569,19 @@ void RobotAssistantWidget::loadSelfBubbleIdentity()
 
 void RobotAssistantWidget::applyTheme(ApplyStyle::MainWindowTheme theme)
 {
-    m_theme = theme;
-    setStyleSheet(robotAssistantQss(theme));
+    Q_UNUSED(theme)
+    m_theme = ApplyStyle::MainWindowTheme::Default;
+    setStyleSheet(robotAssistantQss(m_theme));
     applySendButtonPolicy();
 }
 
-void RobotAssistantWidget::loadSettings()
+void RobotAssistantWidget::setStatusText(const QString& text)
 {
-    QSettings s;
-    m_baseUrlEdit->setText(
-        s.value(QStringLiteral("ai/baseUrl"), QStringLiteral("https://api.deepseek.com")).toString());
-    m_modelEdit->setText(s.value(QStringLiteral("ai/model"), QStringLiteral("deepseek-chat")).toString());
-    m_apiKeyEdit->setText(s.value(QStringLiteral("ai/apiKey")).toString());
-}
-
-void RobotAssistantWidget::saveSettings()
-{
-    QSettings s;
-    s.setValue(QStringLiteral("ai/baseUrl"), m_baseUrlEdit->text().trimmed());
-    s.setValue(QStringLiteral("ai/model"), m_modelEdit->text().trimmed());
-    s.setValue(QStringLiteral("ai/apiKey"), m_apiKeyEdit->text());
-    m_statusLabel->setText(QStringLiteral("设置已保存。"));
-}
-
-void RobotAssistantWidget::onSaveSettings()
-{
-    saveSettings();
-    rebindSessionFromCurrentConfig();
-}
-
-void RobotAssistantWidget::onTestConnection()
-{
-    const QString key = m_apiKeyEdit->text().trimmed();
-    if (key.isEmpty()) {
-        showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("测试连接"),
-                            QStringLiteral("请先填写 API Key。"));
+    if (!m_statusLabel)
         return;
-    }
-    const QString url = OpenAiCompatClient::buildCompletionsUrl(m_baseUrlEdit->text().trimmed());
-    const QString model = m_modelEdit->text().trimmed().isEmpty()
-                              ? QStringLiteral("deepseek-chat")
-                              : m_modelEdit->text().trimmed();
-
-    QJsonArray msgs;
-    msgs.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("user")},
-                            {QStringLiteral("content"), QStringLiteral("ping")}});
-
-    m_testBtn->setEnabled(false);
-    m_statusLabel->setText(QStringLiteral("正在测试连接…"));
-
-    // 独立 client，避免与对话请求的 completed/failed 串线
-    auto* testClient = new OpenAiCompatClient(m_nam, this);
-    const QPointer<RobotAssistantWidget> self(this);
-    connect(testClient, &OpenAiCompatClient::completed, this, [this, self, testClient]() {
-        testClient->deleteLater();
-        if (!self)
-            return;
-        m_testBtn->setEnabled(true);
-        m_statusLabel->setText(QStringLiteral("连接成功。"));
-        showRobotMessageBox(QMessageBox::Information, self.get(), QStringLiteral("测试连接"),
-                            QStringLiteral("连接成功。"));
-    });
-    connect(testClient, &OpenAiCompatClient::failed, this, [this, self, testClient](const QString& reason) {
-        testClient->deleteLater();
-        if (!self)
-            return;
-        m_testBtn->setEnabled(true);
-        m_statusLabel->setText(QStringLiteral("连接失败：%1").arg(reason));
-        showRobotMessageBox(QMessageBox::Warning, self.get(), QStringLiteral("测试连接"),
-                            QStringLiteral("连接失败：\n%1").arg(reason));
-    });
-    testClient->requestChatCompletion(url, key, model, msgs, false);
+    const QString trimmed = text.trimmed();
+    m_statusLabel->setText(trimmed);
+    m_statusLabel->setVisible(!trimmed.isEmpty());
 }
 
 void RobotAssistantWidget::clearChatLayout()
@@ -519,15 +598,167 @@ void RobotAssistantWidget::clearChatLayout()
 
 void RobotAssistantWidget::onClearChat()
 {
+    clearStreamingSession(m_activeSession);
     if (m_sessionId > 0) {
         AiAssistantDao dao;
         dao.clearMessages(m_sessionId);
     }
     m_history.clear();
     clearChatLayout();
-    m_statusLabel->clear();
+    clearPendingAttachment();
+    setStatusText(QString());
     if (!currentPresetAvailable())
-        m_statusLabel->setText(QStringLiteral("该模型即将接入，请先用 DeepSeek。"));
+        setStatusText(QStringLiteral("该模型即将接入，请选用 DeepSeek 或豆包。"));
+    applySendButtonPolicy();
+}
+
+void RobotAssistantWidget::clearPendingAttachment()
+{
+    m_pendingImagePath.clear();
+    m_pendingFilePath.clear();
+    updatePendingAttachmentUi();
+}
+
+void RobotAssistantWidget::clearStreamingSession(IAiStreamingSession*& session)
+{
+    if (!session)
+        return;
+    session->disconnect(this);
+    session->abort();
+    session->deleteLater();
+    session = nullptr;
+}
+
+void RobotAssistantWidget::updatePendingAttachmentUi()
+{
+    if (!m_pendingAttachmentRow || !m_pendingThumbLabel || !m_pendingNameLabel)
+        return;
+    const AiProviderCapabilities capabilities = aiPresetDefinition(m_activePresetSessionKey).capabilities;
+    const bool hasImg = capabilities.supportsVisionDataUrl && !m_pendingImagePath.isEmpty();
+    const bool hasFile = capabilities.supportsFileAttachment && !m_pendingFilePath.isEmpty();
+    const bool on = hasImg || hasFile;
+    m_pendingAttachmentRow->setVisible(on);
+    if (!on) {
+        m_pendingThumbLabel->clear();
+        m_pendingNameLabel->clear();
+        return;
+    }
+    if (hasImg) {
+        const QFileInfo fi(m_pendingImagePath);
+        m_pendingNameLabel->setText(fi.fileName());
+        QImage img(m_pendingImagePath);
+        if (!img.isNull()) {
+            const QPixmap pm = QPixmap::fromImage(
+                img.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            m_pendingThumbLabel->setPixmap(pm);
+        } else {
+            m_pendingThumbLabel->setText(QStringLiteral("图"));
+        }
+    } else {
+        const QFileInfo fi(m_pendingFilePath);
+        m_pendingNameLabel->setText(fi.fileName());
+        const QPixmap ic = pixmapFromSvgResource(QStringLiteral(":/file_icon.svg"), 40);
+        if (!ic.isNull())
+            m_pendingThumbLabel->setPixmap(
+                ic.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        else
+            m_pendingThumbLabel->setText(QStringLiteral("文"));
+    }
+}
+
+void RobotAssistantWidget::onPickPicture()
+{
+    if (m_activePresetSessionKey != QLatin1String("doubao:ark")) {
+        showRobotMessageBox(QMessageBox::Information, this, QStringLiteral("图片"),
+                            QStringLiteral("发送图片仅支持「豆包」线路，请先在下拉框中选择豆包。"));
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("选择图片"), QString(),
+        QStringLiteral("图片 (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;所有文件 (*.*)"));
+    if (path.isEmpty())
+        return;
+    const QFileInfo fi(path);
+    if (!fi.exists() || !fi.isReadable()) {
+        showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("图片"),
+                            QStringLiteral("无法读取所选文件。"));
+        return;
+    }
+    constexpr qint64 kMaxBytes = 5 * 1024 * 1024;
+    if (fi.size() > kMaxBytes) {
+        showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("图片"),
+                            QStringLiteral("单张图片请小于约 5MB。"));
+        return;
+    }
+    m_pendingFilePath.clear();
+    m_pendingImagePath = fi.absoluteFilePath();
+    updatePendingAttachmentUi();
+    applySendButtonPolicy();
+}
+
+void RobotAssistantWidget::onPickFile()
+{
+    if (m_activePresetSessionKey != QLatin1String("doubao:ark")) {
+        showRobotMessageBox(QMessageBox::Information, this, QStringLiteral("文件"),
+                            QStringLiteral("文件上传仅支持「豆包」线路，请先在下拉框中选择豆包。"));
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("选择文件"), QString(),
+        QStringLiteral("文档与媒体 (*.pdf *.png *.jpg *.jpeg *.webp *.bmp *.gif *.mp4 *.mov *.avi);;"
+                       "PDF (*.pdf);;图片 (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;视频 (*.mp4 *.mov *.avi);;"
+                       "所有文件 (*.*)"));
+    if (path.isEmpty())
+        return;
+    const QFileInfo fi(path);
+    if (!fi.exists() || !fi.isReadable()) {
+        showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("文件"),
+                            QStringLiteral("无法读取所选文件。"));
+        return;
+    }
+    constexpr qint64 kMaxBytes = 10LL * 1024 * 1024;
+    if (fi.size() > kMaxBytes) {
+        showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("文件"),
+                            QStringLiteral("单文件请不超过 10MB。"));
+        return;
+    }
+
+    QMimeDatabase db;
+    const QString mime = db.mimeTypeForFile(fi.absoluteFilePath()).name();
+    if (mime.startsWith(QLatin1String("text/"))) {
+        QFile f(fi.absoluteFilePath());
+        if (!f.open(QIODevice::ReadOnly)) {
+            showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("文件"),
+                                QStringLiteral("无法读取该文本文件。"));
+            return;
+        }
+        constexpr int kMaxInlineChars = 512 * 1024;
+        const QByteArray raw = f.readAll();
+        if (raw.size() > kMaxInlineChars) {
+            showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("文件"),
+                                QStringLiteral("文本过大，请拆小文件或改用 PDF 上传。"));
+            return;
+        }
+        const QString content = QString::fromUtf8(raw);
+        if (m_input) {
+            QString cur = m_input->toPlainText();
+            if (!cur.isEmpty() && !cur.endsWith(QChar('\n')))
+                cur += QChar('\n');
+            m_input->setPlainText(cur + content);
+        }
+        showRobotMessageBox(
+            QMessageBox::Information,
+            this,
+            QStringLiteral("纯文本文件"),
+            QStringLiteral(
+                "火山方舟 Files API 不支持上传纯文本（text/plain），已将文件内容填入下方输入框。\n"
+                "请直接点「发送」，将走对话 API；若需要「文档理解」能力，请使用 PDF 或图片后再试「添加文件」。"));
+        return;
+    }
+
+    m_pendingImagePath.clear();
+    m_pendingFilePath = fi.absoluteFilePath();
+    updatePendingAttachmentUi();
     applySendButtonPolicy();
 }
 
@@ -594,8 +825,177 @@ void RobotAssistantWidget::appendUserBubble(const QString& text)
     m_chatLayout->insertWidget(m_chatLayout->count() - 1, row);
 }
 
+void RobotAssistantWidget::appendUserImageBubble(const QString& absolutePath)
+{
+    auto* row = new QWidget(m_chatInner);
+    auto* rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(0, 2, 0, 2);
+    rowLayout->setSpacing(8);
+    rowLayout->addStretch(1);
+
+    auto* rightCol = new QWidget(row);
+    auto* rightColLayout = new QVBoxLayout(rightCol);
+    rightColLayout->setContentsMargins(0, 0, 0, 0);
+    rightColLayout->setSpacing(4);
+
+    auto* metaRow = new QWidget(rightCol);
+    auto* metaRowLayout = new QHBoxLayout(metaRow);
+    metaRowLayout->setContentsMargins(0, 0, 0, 0);
+    metaRowLayout->setSpacing(8);
+    metaRowLayout->addStretch(1);
+    const QString nick = m_selfDisplayName.trimmed().isEmpty() ? QStringLiteral("我") : m_selfDisplayName;
+    auto* nickLab = new QLabel(nick, metaRow);
+    nickLab->setObjectName(QStringLiteral("bubbleOutSenderNick"));
+    metaRowLayout->addWidget(nickLab);
+    rightColLayout->addWidget(metaRow);
+
+    auto* bubbleRow = new QWidget(rightCol);
+    auto* bubbleRowLayout = new QHBoxLayout(bubbleRow);
+    bubbleRowLayout->setContentsMargins(0, 0, 0, 0);
+    bubbleRowLayout->setSpacing(0);
+    bubbleRowLayout->addStretch(1);
+    auto* bubble = new QFrame(bubbleRow);
+    bubble->setObjectName(QStringLiteral("bubbleOut"));
+    auto* bubbleLayout = new QVBoxLayout(bubble);
+    bubbleLayout->setContentsMargins(12, 8, 12, 8);
+    bubbleLayout->setSpacing(0);
+    auto* contentLabel = new QLabel(bubble);
+    contentLabel->setObjectName(QStringLiteral("bubbleTextOut"));
+    contentLabel->setAlignment(Qt::AlignCenter);
+    QPixmap pm;
+    if (!absolutePath.isEmpty() && QFile::exists(absolutePath)) {
+        QImage img(absolutePath);
+        if (!img.isNull())
+            pm = QPixmap::fromImage(
+                img.scaled(280, 360, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    if (!pm.isNull())
+        contentLabel->setPixmap(pm);
+    else
+        contentLabel->setText(QStringLiteral("（图片不可用或已移动）"));
+    bubbleLayout->addWidget(contentLabel);
+    bubble->setMaximumWidth(420);
+    bubbleRowLayout->addWidget(bubble, 0, Qt::AlignTop);
+    rightColLayout->addWidget(bubbleRow);
+
+    rowLayout->addWidget(rightCol, 0, Qt::AlignTop);
+
+    auto* avatar = new QLabel(row);
+    avatar->setObjectName(QStringLiteral("bubbleOutAvatar"));
+    avatar->setFixedSize(36, 36);
+    if (!m_selfAvatarPixmap.isNull())
+        avatar->setPixmap(m_selfAvatarPixmap);
+    else {
+        QPixmap av = pixmapFromSvgResource(QStringLiteral(":/default_avatar_icon.svg"), 36);
+        if (!av.isNull())
+            avatar->setPixmap(av);
+        else
+            avatar->setPixmap(
+                qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation).pixmap(36, 36));
+    }
+    rowLayout->addWidget(avatar, 0, Qt::AlignTop);
+
+    m_chatLayout->insertWidget(m_chatLayout->count() - 1, row);
+}
+
+void RobotAssistantWidget::appendUserFileBubble(const QString& absolutePath, const QString& displayName,
+                                                const QString& text)
+{
+    auto* row = new QWidget(m_chatInner);
+    auto* rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(0, 2, 0, 2);
+    rowLayout->setSpacing(8);
+    rowLayout->addStretch(1);
+
+    auto* rightCol = new QWidget(row);
+    auto* rightColLayout = new QVBoxLayout(rightCol);
+    rightColLayout->setContentsMargins(0, 0, 0, 0);
+    rightColLayout->setSpacing(4);
+
+    auto* metaRow = new QWidget(rightCol);
+    auto* metaRowLayout = new QHBoxLayout(metaRow);
+    metaRowLayout->setContentsMargins(0, 0, 0, 0);
+    metaRowLayout->setSpacing(8);
+    metaRowLayout->addStretch(1);
+    const QString nick = m_selfDisplayName.trimmed().isEmpty() ? QStringLiteral("我") : m_selfDisplayName;
+    auto* nickLab = new QLabel(nick, metaRow);
+    nickLab->setObjectName(QStringLiteral("bubbleOutSenderNick"));
+    metaRowLayout->addWidget(nickLab);
+    rightColLayout->addWidget(metaRow);
+
+    auto* bubbleRow = new QWidget(rightCol);
+    auto* bubbleRowLayout = new QHBoxLayout(bubbleRow);
+    bubbleRowLayout->setContentsMargins(0, 0, 0, 0);
+    bubbleRowLayout->setSpacing(8);
+    bubbleRowLayout->addStretch(1);
+    auto* bubble = new QFrame(bubbleRow);
+    bubble->setObjectName(QStringLiteral("bubbleOut"));
+    auto* bubbleLayout = new QHBoxLayout(bubble);
+    bubbleLayout->setContentsMargins(12, 8, 12, 8);
+    bubbleLayout->setSpacing(8);
+    auto* iconLab = new QLabel(bubble);
+    iconLab->setFixedSize(40, 40);
+    const QPixmap ic = pixmapFromSvgResource(QStringLiteral(":/file_icon.svg"), 36);
+    if (!ic.isNull())
+        iconLab->setPixmap(ic.scaled(40, 40, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    else
+        iconLab->setText(QStringLiteral("文"));
+    auto* textCol = new QVBoxLayout();
+    textCol->setSpacing(4);
+    auto* nameLab = new QLabel(QStringLiteral("附件：%1").arg(displayName.isEmpty()
+                                                                   ? QFileInfo(absolutePath).fileName()
+                                                                   : displayName),
+                               bubble);
+    nameLab->setObjectName(QStringLiteral("bubbleTextOut"));
+    nameLab->setWordWrap(true);
+    textCol->addWidget(nameLab);
+    if (!text.trimmed().isEmpty()) {
+        auto* tlab = new QLabel(text, bubble);
+        tlab->setObjectName(QStringLiteral("bubbleTextOut"));
+        tlab->setWordWrap(true);
+        tlab->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        textCol->addWidget(tlab);
+    }
+    bubbleLayout->addWidget(iconLab);
+    bubbleLayout->addLayout(textCol, 1);
+    bubble->setMaximumWidth(420);
+    bubbleRowLayout->addWidget(bubble, 0, Qt::AlignTop);
+    rightColLayout->addWidget(bubbleRow);
+
+    rowLayout->addWidget(rightCol, 0, Qt::AlignTop);
+
+    auto* avatar = new QLabel(row);
+    avatar->setObjectName(QStringLiteral("bubbleOutAvatar"));
+    avatar->setFixedSize(36, 36);
+    if (!m_selfAvatarPixmap.isNull())
+        avatar->setPixmap(m_selfAvatarPixmap);
+    else {
+        QPixmap av = pixmapFromSvgResource(QStringLiteral(":/default_avatar_icon.svg"), 36);
+        if (!av.isNull())
+            avatar->setPixmap(av);
+        else
+            avatar->setPixmap(
+                qApp->style()->standardIcon(QStyle::SP_MessageBoxInformation).pixmap(36, 36));
+    }
+    rowLayout->addWidget(avatar, 0, Qt::AlignTop);
+
+    m_chatLayout->insertWidget(m_chatLayout->count() - 1, row);
+}
+
+void RobotAssistantWidget::appendUserMultimodalDisplay(const QString& absolutePath, const QString& text)
+{
+    appendUserImageBubble(absolutePath);
+    if (!text.trimmed().isEmpty())
+        appendUserBubble(text);
+}
+
 QLabel* RobotAssistantWidget::appendAssistantBubble()
 {
+    const QString sessionKey =
+        m_boundModelKey.isEmpty() ? m_activePresetSessionKey : m_boundModelKey;
+    const QString metaName = assistantDisplayNameForSessionKey(sessionKey);
+    const QString avatarRes = assistantAvatarResourceForSessionKey(sessionKey);
+
     auto* row = new QWidget(m_chatInner);
     auto* rowLayout = new QHBoxLayout(row);
     rowLayout->setContentsMargins(0, 2, 0, 2);
@@ -604,16 +1004,20 @@ QLabel* RobotAssistantWidget::appendAssistantBubble()
     auto* avatar = new QLabel(row);
     avatar->setObjectName(QStringLiteral("robotAssistantAvatarIn"));
     avatar->setFixedSize(36, 36);
-    QPixmap ds = pixmapFromRasterResource(QStringLiteral(":/deepseek_icon.png"), 36);
-    if (!ds.isNull())
-        avatar->setPixmap(ds);
+    QPixmap ap;
+    if (avatarRes.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive))
+        ap = pixmapFromSvgResource(avatarRes, 36);
+    else
+        ap = pixmapFromRasterResource(avatarRes, 36);
+    if (!ap.isNull())
+        avatar->setPixmap(ap);
     rowLayout->addWidget(avatar, 0, Qt::AlignTop);
 
     auto* col = new QWidget(row);
     auto* colLayout = new QVBoxLayout(col);
     colLayout->setContentsMargins(0, 0, 0, 0);
     colLayout->setSpacing(4);
-    auto* meta = new QLabel(QStringLiteral("DeepSeek"), col);
+    auto* meta = new QLabel(metaName, col);
     meta->setObjectName(QStringLiteral("bubbleMetaIn"));
     colLayout->addWidget(meta);
 
@@ -668,24 +1072,49 @@ void RobotAssistantWidget::nudgeScrollAfterContentChange()
     QTimer::singleShot(0, this, [this]() { scrollToBottom(); });
 }
 
-QJsonArray RobotAssistantWidget::buildMessagesForRequest() const
+AiProviderConfig RobotAssistantWidget::currentAiProviderConfig() const
 {
-    QJsonArray arr;
-    arr.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("system")},
-                            {QStringLiteral("content"), defaultSystemPrompt()}});
+    return m_aiChatService
+               ? m_aiChatService->resolveProviderConfig(m_activePresetSessionKey, QString(), QString(), QString())
+               : AiProviderConfig{};
+}
+
+AiRequest RobotAssistantWidget::buildAiRequestForConversation() const
+{
+    AiRequest request;
+    request.systemPrompt = systemPromptForRequest();
     const QList<RobotChatTurn> tail = tailHistoryForApi(m_history);
     for (const RobotChatTurn& t : tail) {
-        arr.append(
-            QJsonObject{{QStringLiteral("role"), t.role}, {QStringLiteral("content"), t.content}});
+        AiConversationTurn turn;
+        turn.role = t.role;
+        if (t.role == QLatin1String("user")) {
+            QString pth, txt;
+            if (parseRobotMultimodalJson(t.content, &pth, &txt)) {
+                turn.parts.append(makeAiImageFilePart(pth));
+                if (!txt.trimmed().isEmpty())
+                    turn.parts.append(makeAiTextPart(txt));
+            } else {
+                QString fp, fn, ftx;
+                if (parseRobotArkFileJson(t.content, &fp, &fn, &ftx)) {
+                    turn.parts.append(makeAiLocalFilePart(fp, fn));
+                    if (!ftx.trimmed().isEmpty())
+                        turn.parts.append(makeAiTextPart(ftx));
+                } else {
+                    turn.parts.append(makeAiTextPart(t.content));
+                }
+            }
+        } else {
+            turn.parts.append(makeAiTextPart(t.content));
+        }
+        request.turns.append(turn);
     }
-    return arr;
+    return request;
 }
 
 void RobotAssistantWidget::setBusy(bool busy)
 {
     m_busy = busy;
     m_input->setReadOnly(busy);
-    m_testBtn->setEnabled(!busy);
     applySendButtonPolicy();
 }
 
@@ -711,7 +1140,7 @@ void RobotAssistantWidget::rebindSessionFromCurrentConfig()
         m_sessionId = -1;
         m_history.clear();
         clearChatLayout();
-        m_statusLabel->setText(QStringLiteral("该模型即将接入，请先用 DeepSeek。"));
+        setStatusText(QStringLiteral("该模型即将接入，请选用 DeepSeek 或豆包。"));
         applySendButtonPolicy();
         return;
     }
@@ -725,7 +1154,7 @@ void RobotAssistantWidget::rebindSessionFromCurrentConfig()
 
     m_history.clear();
     clearChatLayout();
-    m_statusLabel->clear();
+    setStatusText(QString());
 
     if (m_sessionId <= 0) {
         applySendButtonPolicy();
@@ -735,8 +1164,18 @@ void RobotAssistantWidget::rebindSessionFromCurrentConfig()
     const QVector<AiAssistantChatTurn> rows = adao.listMessages(m_sessionId);
     for (const AiAssistantChatTurn& row : rows) {
         m_history.append({row.role, row.content});
-        if (row.role == QLatin1String("user"))
-            appendUserBubble(row.content);
+        if (row.role == QLatin1String("user")) {
+            QString imgPath, imgText;
+            if (parseRobotMultimodalJson(row.content, &imgPath, &imgText)) {
+                appendUserMultimodalDisplay(imgPath, imgText);
+            } else {
+                QString fp, fn, ftx;
+                if (parseRobotArkFileJson(row.content, &fp, &fn, &ftx))
+                    appendUserFileBubble(fp, fn, ftx);
+                else
+                    appendUserBubble(row.content);
+            }
+        }
         else if (row.role == QLatin1String("assistant")) {
             QLabel* lab = appendAssistantBubble();
             lab->setText(row.content);
@@ -752,19 +1191,35 @@ void RobotAssistantWidget::onSendMessage()
         return;
     if (!currentPresetAvailable()) {
         showRobotMessageBox(QMessageBox::Information, this, QStringLiteral("模型"),
-                            QStringLiteral("该模型即将支持。请先选择 DeepSeek，并在「设置」中配置 API Key。"));
+                            QStringLiteral("该模型即将支持。请先选择 DeepSeek 或豆包，并在"
+                                          "左栏「管理后台」→「AI 客服后台」→「API 配置/模型」中填写并保存。"));
         return;
     }
-    m_client->abortActive();
+    clearStreamingSession(m_activeSession);
+    m_acceptAssistantStreamDeltas = true;
     const QString text = m_input->toPlainText().trimmed();
-    if (text.isEmpty())
+    const AiProviderConfig config = currentAiProviderConfig();
+    const bool hasImg = !m_pendingImagePath.isEmpty();
+    const bool hasFile = !m_pendingFilePath.isEmpty();
+    if (text.isEmpty() && !hasImg && !hasFile)
         return;
+    if (hasImg && !config.capabilities.supportsVisionDataUrl) {
+        showRobotMessageBox(QMessageBox::Information, this, QStringLiteral("图片"),
+                            QStringLiteral("当前模型不支持图片输入。"));
+        return;
+    }
+    if (hasFile && !config.capabilities.supportsFileAttachment) {
+        showRobotMessageBox(QMessageBox::Information, this, QStringLiteral("文件"),
+                            QStringLiteral("当前模型不支持文件附件。"));
+        return;
+    }
 
-    const QString key = m_apiKeyEdit->text().trimmed();
-    if (key.isEmpty()) {
-        showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("发送"),
-                            QStringLiteral("请先在「设置」中填写并保存 API Key。"));
-        m_tabs->setCurrentIndex(1);
+    if (config.apiKey.isEmpty()) {
+        showRobotMessageBox(
+            QMessageBox::Warning, this, QStringLiteral("发送"),
+            QStringLiteral("请先在左栏「管理后台」→「AI 客服后台」→「API 配置/模型」中填写并保存 API Key。"));
+        if (auto* mw = qobject_cast<MainWindow*>(parentWidget()))
+            mw->openAiCustomerServiceBackendWindow(true);
         return;
     }
 
@@ -775,35 +1230,83 @@ void RobotAssistantWidget::onSendMessage()
         return;
     }
 
-    m_input->clear();
-    m_history.append({QStringLiteral("user"), text});
-    appendUserBubble(text);
-    AiAssistantDao().appendMessage(m_sessionId, QStringLiteral("user"), text);
+    if (config.model.isEmpty()) {
+        showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("发送"),
+                            QStringLiteral("请先在左栏「管理后台」→「AI 客服后台」→「API 配置/模型」中填写模型或接入点。"));
+        if (auto* mw = qobject_cast<MainWindow*>(parentWidget()))
+            mw->openAiCustomerServiceBackendWindow(true);
+        return;
+    }
+
+    if (hasImg) {
+        QString dummy, err;
+        if (!imageFileToDataUrl(m_pendingImagePath, &dummy, &err)) {
+            showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("图片"), err);
+            return;
+        }
+    }
+
+    if (hasFile) {
+        const QString abs = QFileInfo(m_pendingFilePath).absoluteFilePath();
+        if (!QFile::exists(abs)) {
+            showRobotMessageBox(QMessageBox::Warning, this, QStringLiteral("文件"),
+                                QStringLiteral("文件已不存在或无法访问。"));
+            return;
+        }
+        m_input->clear();
+        const QString stored = formatRobotArkFileJson(abs, text);
+        appendUserFileBubble(abs, QFileInfo(abs).fileName(), text);
+        m_history.append({QStringLiteral("user"), stored});
+        AiAssistantDao().appendMessage(m_sessionId, QStringLiteral("user"), stored);
+        clearPendingAttachment();
+
+        m_accumulatedAssistant.clear();
+        m_streamingLabel = appendAssistantBubble();
+        m_streamingLabel->clear();
+
+        setBusy(true);
+        setStatusText(QStringLiteral("正在上传并分析附件…"));
+        AiRequest request = buildAiRequestForConversation();
+        m_activeSession = m_aiChatService->createSession(config, request, this);
+        connect(m_activeSession, &IAiStreamingSession::delta, this, &RobotAssistantWidget::onClientDelta);
+        connect(m_activeSession, &IAiStreamingSession::completed, this, &RobotAssistantWidget::onClientCompleted);
+        connect(m_activeSession, &IAiStreamingSession::failed, this, &RobotAssistantWidget::onClientFailed);
+        m_activeSession->start();
+        scheduleScrollChatToBottom();
+        return;
+    }
+
+    if (hasImg) {
+        const QString abs = QFileInfo(m_pendingImagePath).absoluteFilePath();
+        const QString stored = formatRobotMultimodalJson(abs, text);
+        m_input->clear();
+        appendUserMultimodalDisplay(abs, text);
+        m_history.append({QStringLiteral("user"), stored});
+        AiAssistantDao().appendMessage(m_sessionId, QStringLiteral("user"), stored);
+        clearPendingAttachment();
+    } else {
+        m_input->clear();
+        m_history.append({QStringLiteral("user"), text});
+        appendUserBubble(text);
+        AiAssistantDao().appendMessage(m_sessionId, QStringLiteral("user"), text);
+    }
 
     m_accumulatedAssistant.clear();
     m_streamingLabel = appendAssistantBubble();
     m_streamingLabel->clear();
 
-    const QString url = OpenAiCompatClient::buildCompletionsUrl(m_baseUrlEdit->text().trimmed());
-    const QString model = m_modelEdit->text().trimmed().isEmpty()
-                              ? QStringLiteral("deepseek-chat")
-                              : m_modelEdit->text().trimmed();
-
     setBusy(true);
-    m_statusLabel->setText(QStringLiteral("正在生成…"));
-    m_client->requestChatCompletion(url, key, model, buildMessagesForRequest(), true);
+    setStatusText(QStringLiteral("正在生成…"));
+    AiRequest request = buildAiRequestForConversation();
+    m_activeSession = m_aiChatService->createSession(config, request, this);
+    connect(m_activeSession, &IAiStreamingSession::delta, this, &RobotAssistantWidget::onClientDelta);
+    connect(m_activeSession, &IAiStreamingSession::completed, this, &RobotAssistantWidget::onClientCompleted);
+    connect(m_activeSession, &IAiStreamingSession::failed, this, &RobotAssistantWidget::onClientFailed);
+    m_activeSession->start();
     scheduleScrollChatToBottom();
 }
 
-void RobotAssistantWidget::onClientDelta(const QString& delta)
-{
-    m_accumulatedAssistant += delta;
-    if (m_streamingLabel)
-        m_streamingLabel->setText(m_accumulatedAssistant);
-    nudgeScrollAfterContentChange();
-}
-
-void RobotAssistantWidget::onClientCompleted()
+void RobotAssistantWidget::finishAssistantStreamSuccess(const QString& statusText)
 {
     setBusy(false);
     if (!m_accumulatedAssistant.isEmpty()) {
@@ -814,11 +1317,55 @@ void RobotAssistantWidget::onClientCompleted()
     }
     m_streamingLabel = nullptr;
     m_accumulatedAssistant.clear();
-    m_statusLabel->setText(QStringLiteral("完成。"));
+    m_acceptAssistantStreamDeltas = true;
+    setStatusText(statusText);
+}
+
+void RobotAssistantWidget::onClientDelta(const QString& delta)
+{
+    if (!m_acceptAssistantStreamDeltas)
+        return;
+    if (delta.isEmpty())
+        return;
+
+    constexpr int kMaxAssistantReplyChars = 400000;
+    QString toAdd = delta;
+    if (m_accumulatedAssistant.size() >= kMaxAssistantReplyChars)
+        return;
+    if (m_accumulatedAssistant.size() + toAdd.size() > kMaxAssistantReplyChars)
+        toAdd = toAdd.left(kMaxAssistantReplyChars - m_accumulatedAssistant.size());
+
+    m_accumulatedAssistant += toAdd;
+    if (m_streamingLabel)
+        m_streamingLabel->setText(m_accumulatedAssistant);
+    nudgeScrollAfterContentChange();
+
+    if (m_accumulatedAssistant.size() >= kMaxAssistantReplyChars) {
+        m_acceptAssistantStreamDeltas = false;
+        clearStreamingSession(m_activeSession);
+        const QString tail =
+            QStringLiteral("\n\n（单条回复过长，已在此停止接收后续内容，以上为已生成部分。）");
+        m_accumulatedAssistant += tail;
+        if (m_streamingLabel)
+            m_streamingLabel->setText(m_accumulatedAssistant);
+        nudgeScrollAfterContentChange();
+        finishAssistantStreamSuccess(QStringLiteral("已完成（已达本机单条长度上限）。"));
+    }
+}
+
+void RobotAssistantWidget::onClientCompleted()
+{
+    if (!m_busy)
+        return;
+    clearStreamingSession(m_activeSession);
+    finishAssistantStreamSuccess(QStringLiteral("完成。"));
 }
 
 void RobotAssistantWidget::onClientFailed(const QString& reason)
 {
+    if (!m_busy)
+        return;
+    clearStreamingSession(m_activeSession);
     setBusy(false);
     if (m_streamingLabel) {
         QString body = m_accumulatedAssistant;
@@ -828,7 +1375,7 @@ void RobotAssistantWidget::onClientFailed(const QString& reason)
             body + QStringLiteral("\n\n（后续内容未能生成：%1）").arg(reason));
         nudgeScrollAfterContentChange();
     } else {
-        m_statusLabel->setText(QStringLiteral("错误：%1").arg(reason));
+        setStatusText(QStringLiteral("错误：%1").arg(reason));
     }
     if (!m_accumulatedAssistant.isEmpty()) {
         if (m_sessionId > 0)
@@ -838,4 +1385,6 @@ void RobotAssistantWidget::onClientFailed(const QString& reason)
     }
     m_streamingLabel = nullptr;
     m_accumulatedAssistant.clear();
+    m_acceptAssistantStreamDeltas = true;
 }
+

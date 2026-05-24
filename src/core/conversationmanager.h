@@ -6,10 +6,6 @@
 #include "types.h"
 
 class MessageRouter;
-class SimPlatformAdapter;
-class QianniuRPAAdapter;
-class WechatRPAAdapter;
-class PddRPAAdapter;
 
 class ConversationManager : public QObject
 {
@@ -17,13 +13,9 @@ class ConversationManager : public QObject
 public:
     static ConversationManager& instance();
 
-    void initialize();
+    void initialize(MessageRouter* router);
 
     MessageRouter* router() const { return m_router; }
-    SimPlatformAdapter* simulator() const { return m_simulator; }
-    QianniuRPAAdapter* qianniu() const { return m_qianniu; }
-    WechatRPAAdapter* wechat() const { return m_wechat; }
-    PddRPAAdapter* pdd() const { return m_pdd; }
 
     /** 全部会话（聚合左侧列表在界面层按最后一条 direction 再分栏）。 */
     QVector<ConversationInfo> allConversations() const;
@@ -48,10 +40,6 @@ private:
     explicit ConversationManager(QObject* parent = nullptr);
 
     MessageRouter* m_router = nullptr;
-    SimPlatformAdapter* m_simulator = nullptr;
-    QianniuRPAAdapter* m_qianniu = nullptr;
-    WechatRPAAdapter* m_wechat = nullptr;
-    PddRPAAdapter* m_pdd = nullptr;
     int m_currentConvId = -1;
 };
 
