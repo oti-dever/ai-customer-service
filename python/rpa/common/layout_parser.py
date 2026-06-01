@@ -5,12 +5,43 @@ Extract structured info (sender_name, timestamp) for left-side messages.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from typing import List, Tuple, Optional
 
 # (text, bbox, confidence) from ocr_engine
 OCRBlock = Tuple[str, List[List[float]], float]
+
+
+@dataclass
+class LayoutParserConfig:
+    """平台布局解析配置，平台差异应优先放在适配层配置中。"""
+
+    platform: str = "generic"
+    system_text_patterns: list[re.Pattern] = field(default_factory=list)
+    header_pattern: re.Pattern | None = None
+    left_threshold: float = 0.4
+    right_threshold: float = 0.6
+    merge_y_gap: float = 15.0
+    classify_system_text: bool = False
+
+    def with_overrides(
+        self,
+        *,
+        left_threshold: float | None = None,
+        right_threshold: float | None = None,
+        merge_y_gap: float | None = None,
+    ) -> "LayoutParserConfig":
+        """Return a copy with runtime thresholds from platform JSON config applied."""
+        return LayoutParserConfig(
+            platform=self.platform,
+            system_text_patterns=list(self.system_text_patterns),
+            header_pattern=self.header_pattern,
+            left_threshold=self.left_threshold if left_threshold is None else left_threshold,
+            right_threshold=self.right_threshold if right_threshold is None else right_threshold,
+            merge_y_gap=self.merge_y_gap if merge_y_gap is None else merge_y_gap,
+            classify_system_text=self.classify_system_text,
+        )
 
 _SYSTEM_SPLIT_RE = re.compile(
     r"^\d{1,2}:\d{2}$|^\d{4}[年/\-]\d{1,2}[月/\-]\d{1,2}|^今天$|^昨天$|^星期[一二三四五六日天]$|^(昨天|前天|星期[一二三四五六日天])\s*\d{1,2}:\d{2}$"
@@ -37,6 +68,38 @@ _QN_HEADER_PATTERN = re.compile(
 _TIMESTAMP_PATTERN = re.compile(
     r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}[\s\u3000]*\d{1,2}[:：]\d{2}(?:[:：]\d{2})?)"
 )
+
+GENERIC_LAYOUT_CONFIG = LayoutParserConfig(
+    platform="generic",
+    left_threshold=0.4,
+    right_threshold=0.6,
+    merge_y_gap=15.0,
+)
+WECHAT_LAYOUT_CONFIG = LayoutParserConfig(
+    platform="wechat",
+    system_text_patterns=[_SYSTEM_SPLIT_RE, _WECHAT_SYSTEM_TEXT_RE],
+    left_threshold=0.4,
+    right_threshold=0.6,
+    merge_y_gap=20.0,
+    classify_system_text=True,
+)
+QIANNIU_LAYOUT_CONFIG = LayoutParserConfig(
+    platform="qianniu",
+    header_pattern=_QN_HEADER_PATTERN,
+    left_threshold=0.4,
+    right_threshold=0.6,
+    merge_y_gap=40.0,
+)
+
+
+def default_layout_config(platform: str = "generic") -> LayoutParserConfig:
+    """Return the built-in layout config for a platform."""
+    name = (platform or "generic").strip().lower()
+    if name == "wechat":
+        return WECHAT_LAYOUT_CONFIG
+    if name == "qianniu":
+        return QIANNIU_LAYOUT_CONFIG
+    return GENERIC_LAYOUT_CONFIG
 
 
 @dataclass
@@ -81,7 +144,12 @@ def _is_hard_split_system_text(text: str) -> bool:
 
 def _is_wechat_system_text(text: str) -> bool:
     s = text.strip()
-    return bool(_is_hard_split_system_text(s) or _WECHAT_SYSTEM_TEXT_RE.match(s))
+    return _matches_system_text(s, WECHAT_LAYOUT_CONFIG)
+
+
+def _matches_system_text(text: str, config: LayoutParserConfig) -> bool:
+    s = text.strip()
+    return any(pattern.match(s) for pattern in config.system_text_patterns)
 
 
 def _extract_system_timestamp_text(text: str) -> str:
@@ -103,10 +171,11 @@ def parse_chat_layout(
     blocks: List[OCRBlock],
     region_width: float,
     platform: str = "generic",
-    left_threshold: float = 0.4,
-    right_threshold: float = 0.6,
-    merge_y_gap: float = 15,
+    left_threshold: float | None = None,
+    right_threshold: float | None = None,
+    merge_y_gap: float | None = None,
     debug: bool = False,
+    config: LayoutParserConfig | None = None,
 ) -> List[ParsedMessage]:
     """
     Parse OCR blocks into messages by layout.
@@ -117,6 +186,17 @@ def parse_chat_layout(
     """
     if not blocks or region_width <= 0:
         return []
+
+    parser_config = config or default_layout_config(platform)
+    if config is not None and platform == "generic":
+        platform = parser_config.platform
+    left_threshold = (
+        parser_config.left_threshold if left_threshold is None else left_threshold
+    )
+    right_threshold = (
+        parser_config.right_threshold if right_threshold is None else right_threshold
+    )
+    merge_y_gap = parser_config.merge_y_gap if merge_y_gap is None else merge_y_gap
 
     # Sort by y
     sorted_blocks = sorted(blocks, key=lambda b: _bbox_center_y(b[1]))
@@ -130,7 +210,13 @@ def parse_chat_layout(
         nonlocal current, current_side, pending_system_timestamp
         if not current or not current_side:
             return
-        merged = _merge_blocks(current, current_side, platform=platform, debug=debug)
+        merged = _merge_blocks(
+            current,
+            current_side,
+            platform=platform,
+            debug=debug,
+            config=parser_config,
+        )
         if pending_system_timestamp and not merged.original_timestamp:
             merged.original_timestamp = pending_system_timestamp
             pending_system_timestamp = ""
@@ -146,7 +232,7 @@ def parse_chat_layout(
         right_ratio = rx / region_width
         center_ratio = cx / region_width
 
-        if platform == "wechat" and _is_wechat_system_text(text):
+        if parser_config.classify_system_text and _matches_system_text(text, parser_config):
             return "system"
 
         # 千牛：己方长气泡会大幅向左延伸，整块 OCR 的左缘可能落在左侧比例区内；
@@ -253,7 +339,11 @@ def parse_chat_layout(
     return messages
 
 
-def _extract_header_info(text: str, debug: bool = False) -> Tuple[str, str, str]:
+def _extract_header_info(
+    text: str,
+    debug: bool = False,
+    header_pattern: re.Pattern | None = None,
+) -> Tuple[str, str, str]:
     """
     从文本中提取发送者名称、时间戳和剩余内容。
     
@@ -267,7 +357,8 @@ def _extract_header_info(text: str, debug: bool = False) -> Tuple[str, str, str]
     text = text.strip()
     
     # 尝试完整匹配头部模式
-    m = _QN_HEADER_PATTERN.match(text)
+    pattern = header_pattern or _QN_HEADER_PATTERN
+    m = pattern.match(text)
     if m:
         sender = m.group(1).strip()
         ts = m.group(2).strip()
@@ -413,6 +504,7 @@ def _merge_blocks(
     side: str,
     platform: str = "generic",
     debug: bool = False,
+    config: LayoutParserConfig | None = None,
 ) -> ParsedMessage:
     """
     合并同侧的 OCR 块为一条消息。
@@ -459,7 +551,11 @@ def _merge_blocks(
 
         if content_start_idx == 0:
             # 尝试方式1：第一个 block 包含名称+时间戳
-            sender, ts, remaining = _extract_header_info(first_text, debug=debug)
+            sender, ts, remaining = _extract_header_info(
+                first_text,
+                debug=debug,
+                header_pattern=config.header_pattern if config else None,
+            )
 
             if sender or ts:
                 sender_name = sender

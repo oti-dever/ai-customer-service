@@ -1,0 +1,15 @@
+"""Recommended entrypoint for Qianniu unread-band preview."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+PYTHON_DIR = Path(__file__).resolve().parents[3]
+if str(PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(PYTHON_DIR))
+
+from rpa.tools._entrypoint import run_legacy_script
+
+
+if __name__ == "__main__":
+    run_legacy_script("preview_qianniu_unread_band.py")

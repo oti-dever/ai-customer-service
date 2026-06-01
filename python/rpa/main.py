@@ -41,25 +41,24 @@ PYTHON_DIR = Path(__file__).resolve().parents[1]
 if str(PYTHON_DIR) not in sys.path:
     sys.path.insert(0, str(PYTHON_DIR))
 
-from rpa.common.rpa_console_log import rpa_log, rpa_phase
+from rpa.core.rpa_console_log import rpa_log, rpa_phase
 
 
 def run_wechat_reader():
-    from rpa.readers.wechat_reader import run_reader
-    run_reader()
+    raise RuntimeError("legacy_wechat_reader_disabled_use_python_service_sidecar")
 
 
 def run_wechat_writer():
-    from rpa.writers.wechat_writer import run_writer
-    run_writer()
+    raise RuntimeError("legacy_wechat_writer_disabled_use_python_service_sidecar")
 
-def run_pdd_reader():
-    from rpa.readers.pdd_reader import run_reader
+
+def run_qianniu_reader():
+    from rpa.platforms.qianniu import run_reader
     run_reader()
 
 
-def run_pdd_writer():
-    from rpa.writers.pdd_writer import run_writer
+def run_qianniu_writer():
+    from rpa.platforms.qianniu import run_writer
     run_writer()
 
 
@@ -67,7 +66,7 @@ def main():
     parser = argparse.ArgumentParser(description="RPA Reader + Writer")
     parser.add_argument("--reader-only", action="store_true", help="Only run reader(s)")
     parser.add_argument("--writer-only", action="store_true", help="Only run writer(s)")
-    parser.add_argument("--platform", choices=["wechat", "qianniu", "pdd", "all"], default="wechat",
+    parser.add_argument("--platform", choices=["wechat", "qianniu", "all"], default="wechat",
                         help="Platform to run (default: wechat)")
     args = parser.parse_args()
 
@@ -76,41 +75,22 @@ def main():
 
     rpa_phase("main", "process_start", f"platform={args.platform} reader={run_reader} writer={run_writer}")
 
-    from rpa.common.db_helper import resolved_default_db_path
+    from rpa.db import resolved_default_db_path
 
     rpa_log(f"[RPA] SQLite 路径={resolved_default_db_path()}（未设置 AI_CUSTOMER_SERVICE_DB 时与 Qt AppData 下 app.db 自动对齐）")
 
-    if args.platform in ("wechat", "all") and run_reader:
-        t = threading.Thread(target=run_wechat_reader, daemon=True, name="wechat_reader")
-        t.start()
-        rpa_log("[RPA] WeChat reader thread started")
-
-    if args.platform in ("wechat", "all") and run_writer:
-        t = threading.Thread(target=run_wechat_writer, daemon=True, name="wechat_writer")
-        t.start()
-        rpa_log("[RPA] WeChat writer thread started")
+    if args.platform in ("wechat", "all") and (run_reader or run_writer):
+        raise RuntimeError("wechat_legacy_reader_writer_disabled_use_python_service_sidecar")
 
     if args.platform in ("qianniu", "all"):
         if run_reader:
-            from rpa.readers.qianniu_reader import run_reader as run_qn_reader
-            t = threading.Thread(target=run_qn_reader, daemon=True, name="qianniu_reader")
+            t = threading.Thread(target=run_qianniu_reader, daemon=True, name="qianniu_reader")
             t.start()
             rpa_log("[RPA] 千牛 reader thread started（OCR 首次加载可能较慢，请看 reader PHASE 日志）")
         if run_writer:
-            from rpa.writers.qianniu_writer import run_writer as run_qn_writer
-            t = threading.Thread(target=run_qn_writer, daemon=True, name="qianniu_writer")
+            t = threading.Thread(target=run_qianniu_writer, daemon=True, name="qianniu_writer")
             t.start()
             rpa_log("[RPA] 千牛 writer thread started")
-
-    if args.platform in ("pdd", "all"):
-        if run_reader:
-            t = threading.Thread(target=run_pdd_reader, daemon=True, name="pdd_reader")
-            t.start()
-            rpa_log("[RPA] 拼多多 reader thread started")
-        if run_writer:
-            t = threading.Thread(target=run_pdd_writer, daemon=True, name="pdd_writer")
-            t.start()
-            rpa_log("[RPA] 拼多多 writer thread started")
 
     rpa_phase("main", "threads_spawned", "主线程进入保活循环；若长时间无 reader PHASE=ocr_init_done，多半卡在模型加载")
 
