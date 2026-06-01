@@ -43,7 +43,6 @@ void RpaConsoleWindow::setupUi()
     m_combo = new FoldArrowComboBox(this);
     m_combo->addItem(QStringLiteral("微信 PC"), QStringLiteral("wechat"));
     m_combo->addItem(QStringLiteral("千牛 PC"), QStringLiteral("qianniu"));
-    m_combo->addItem(QStringLiteral("拼多多网页"), QStringLiteral("pdd"));
     row->addWidget(m_combo, 1);
     auto* clearBtn = new QPushButton(QStringLiteral("清空"), this);
     clearBtn->setToolTip(QStringLiteral("清空当前平台已缓存的控制台输出"));

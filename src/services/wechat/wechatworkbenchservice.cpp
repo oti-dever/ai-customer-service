@@ -237,49 +237,15 @@ bool WeChatWorkbenchService::ensurePythonServiceRunning(QString* error)
 
 bool WeChatWorkbenchService::spawnPythonProcess(QString* error)
 {
-    if (m_process && m_process->state() != QProcess::NotRunning)
-        return true;
-
     if (m_process) {
         m_process->deleteLater();
         m_process = nullptr;
     }
-
-    auto* proc = new QProcess(this);
-    proc->setProgram(QStringLiteral("python"));
-    proc->setArguments(QStringList()
-                       << QStringLiteral("-u")
-                       << QStringLiteral("rpa/tools/wechat_workbench_service.py"));
-    proc->setWorkingDirectory(QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python"));
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
-    env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
-    proc->setProcessEnvironment(env);
-    proc->setProcessChannelMode(QProcess::SeparateChannels);
-
-    connect(proc, &QProcess::readyReadStandardOutput, this, &WeChatWorkbenchService::onProcessStdoutReady);
-    connect(proc, &QProcess::readyReadStandardError, this, &WeChatWorkbenchService::onProcessStderrReady);
-    connect(proc,
-            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this,
-            &WeChatWorkbenchService::onProcessFinished);
-    connect(proc, &QProcess::errorOccurred, this, &WeChatWorkbenchService::onProcessError);
-
-    proc->start();
-    if (!proc->waitForStarted(3000)) {
-        const QString reason = QStringLiteral("无法启动 Python 服务，请确认 python 命令可用。");
-        if (error)
-            *error = reason;
-        proc->deleteLater();
-        return false;
-    }
-
-    m_process = proc;
-    m_stdoutBuffer.clear();
-    m_stderrBuffer.clear();
-    emit processLogAppended(QStringLiteral("[微信工作台] 已启动 Python 服务"));
+    if (error)
+        *error = QStringLiteral("微信独立工作台旧 Python 服务已下线，请使用聚合界面与 Python sidecar。");
+    emit processLogAppended(QStringLiteral("[微信工作台] 旧 Python 服务已下线，请使用聚合界面与 Python sidecar。"));
     notifyPythonServiceActiveChanged();
-    return true;
+    return false;
 }
 
 int WeChatWorkbenchService::sendCommand(const QString& cmd, const QJsonObject& args)

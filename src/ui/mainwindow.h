@@ -21,7 +21,6 @@ class AiCustomerServiceBackendWindow;
 class RpaConsoleWindow;
 class RpaManageDialog;
 class RpaProcessController;
-class WeChatWorkbenchDialog;
 class QShowEvent;
 
 struct QuickLaunchApp {
@@ -122,7 +121,6 @@ public:
     void startBatchAddWindows(const QVector<WindowInfo>& list);
     QSet<quintptr> managedWindowHandles() const;
     ApplyStyle::MainWindowTheme mainWindowTheme() const { return m_mainWindowTheme; }
-    void openWechatWorkbenchDialog();
     void openAiCustomerServiceBackendWindow(bool goToApiModelPage = false);
 
 private:
@@ -143,22 +141,7 @@ private:
     QStandardItem* findGroupItem(const QString& groupId) const;
     QStandardItem* findChildItem(QStandardItem* parent, const QString& platformId) const;
     void showPlatformContextMenu(const QPoint& pos);
-    void startWechatRpaCalibration(const QString& platformId);
-    void startWechatRpaCalibrationStandalone();
-    void startWechatRpaCalibrationByHwnd(quintptr hwnd);
-    void startQianniuRpaCalibration(const QString& platformId);
-    void startQianniuRpaCalibrationStandalone();
-    void startQianniuRpaCalibrationByHwnd(quintptr hwnd);
     void startPddRpaCalibration(const QString& platformId);
-    quintptr findWechatCalibrationWindow() const;
-    quintptr findQianniuCalibrationWindow() const;
-    static bool isQianniuCalibrationWindowInfo(const WindowInfo& info);
-    bool mergeWriteWechatRpaConfig(quintptr hwnd,
-                                   const QString& regionId,
-                                   const QRect& regionRectWindowPx) const;
-    bool mergeWriteQianniuRpaRegion(quintptr hwnd,
-                                    const QString& regionId,
-                                    const QRect& regionRectWindowPx) const;
     bool mergeWritePddRpaConfig(quintptr hwnd,
                                  const QRect& chatRectWindowPx,
                                  const QRect& inputRectWindowPx) const;
@@ -228,7 +211,6 @@ private:
 
     RpaProcessController* m_rpaProcessController = nullptr;
     RpaConsoleWindow* m_rpaConsoleWindow = nullptr;
-    WeChatWorkbenchDialog* m_wechatWorkbenchDialog = nullptr;
     QToolButton* m_btnRpaManage = nullptr;
     QToolButton* m_btnPinTop = nullptr;
     bool m_alwaysOnTop = false;

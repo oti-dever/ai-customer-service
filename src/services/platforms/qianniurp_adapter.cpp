@@ -44,10 +44,11 @@ void QianniuRPAAdapter::stopListening()
     qInfo() << "[QianniuRPAAdapter] stopListening";
 }
 
-void QianniuRPAAdapter::sendMessage(const QString& conversationId, const QString& text)
+void QianniuRPAAdapter::sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId)
 {
     Q_UNUSED(conversationId)
     Q_UNUSED(text)
+    Q_UNUSED(clientMessageId)
     // 真正的发送逻辑由 Python Writer 负责，这里只起到“占位”作用。
     qInfo() << "[QianniuRPAAdapter] sendMessage 被调用 — 当前实现不直接操作千牛窗口，消息会通过 SQLite 交给 Python 处理";
 }
@@ -64,7 +65,7 @@ void QianniuRPAAdapter::pollInboxOnce()
     QSqlQuery q(db);
     q.prepare(
         "SELECT id, platform_conversation_id, customer_name, content, created_at, platform_msg_id, "
-        "       sender_name, original_timestamp, content_image_path "
+        "       direction, sender_role, sender_name, original_timestamp, content_image_path "
         "FROM rpa_inbox_messages "
         "WHERE platform = :platform "
         "  AND consume_status = 0 "
@@ -86,22 +87,34 @@ void QianniuRPAAdapter::pollInboxOnce()
         const QString content = q.value(3).toString();
         const QDateTime createdAt = q.value(4).toDateTime();
         const QString platformMsgId = q.value(5).toString();
-        const QString senderName = q.value(6).toString();
-        const QString originalTimestamp = q.value(7).toString();
-        const QString contentImagePath = q.value(8).toString();
+        const QString direction = q.value(6).toString();
+        const QString senderRole = q.value(7).toString();
+        const QString senderName = q.value(8).toString();
+        const QString originalTimestamp = q.value(9).toString();
+        const QString contentImagePath = q.value(10).toString();
 
         PlatformMessage msg;
         msg.platform = platformName();
         msg.platformConversationId = platformConvId;
         msg.customerName = customerName;
         msg.content = content;
-        msg.direction = QStringLiteral("in");
-        msg.sender = senderName.isEmpty() ? QStringLiteral("customer") : senderName;
+        msg.direction = direction.isEmpty()
+            ? QStringLiteral("in")
+            : direction;
+        msg.sender = msg.direction == QLatin1String("in")
+            ? QStringLiteral("customer")
+            : (msg.direction == QLatin1String("system") ? QStringLiteral("system") : QStringLiteral("agent"));
         msg.createdAt = createdAt.isValid() ? createdAt : QDateTime::currentDateTime();
         msg.platformMsgId = platformMsgId;
         msg.senderName = senderName;
         msg.originalTimestamp = originalTimestamp;
         msg.contentImagePath = contentImagePath;
+        msg.sourceType = contentImagePath.isEmpty() ? QStringLiteral("ui_observed") : QStringLiteral("ocr_extracted");
+        msg.confidence = contentImagePath.isEmpty() ? 70 : 55;
+        msg.verificationStatus = QStringLiteral("unverified");
+        msg.contentType = contentImagePath.isEmpty() ? QStringLiteral("text") : QStringLiteral("image");
+        msg.metadata.insert(QStringLiteral("direction"), direction);
+        msg.metadata.insert(QStringLiteral("sender_role"), senderRole);
 
         emit incomingMessage(msg);
 

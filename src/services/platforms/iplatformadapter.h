@@ -17,13 +17,15 @@ public:
     virtual void disconnectPlatform() = 0;
     virtual void startListening() = 0;
     virtual void stopListening() = 0;
-    virtual void sendMessage(const QString& conversationId, const QString& text) = 0;
+    virtual void sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId = QString()) = 0;
     virtual bool isConnected() const = 0;
+    virtual QString accountId() const { return platformName(); }
 
 signals:
+    void conversationObserved(const ConversationInfo& conversation);
     void incomingMessage(const PlatformMessage& msg);
-    void messageSent(const QString& conversationId, const QString& text);
-    void sendFailed(const QString& conversationId, const QString& reason);
+    void messageSent(const QString& conversationId, const QString& text, const QString& clientMessageId = QString());
+    void sendFailed(const QString& conversationId, const QString& reason, const QString& clientMessageId = QString());
     void connectionStateChanged(bool connected);
 };
 

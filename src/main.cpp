@@ -3,6 +3,7 @@
 #include "data/database.h"
 #include "core/conversationmanager.h"
 #include "core/platformbootstrap.h"
+#include "ipc/ipcservice.h"
 #include "utils/appsettings.h"
 #include "utils/logger.h"
 #include "utils/swordcursor.h"
@@ -22,6 +23,9 @@ int main(int argc, char* argv[])
     qRegisterMetaType<PlatformMessage>("PlatformMessage");
     qRegisterMetaType<ConversationInfo>("ConversationInfo");
     qRegisterMetaType<MessageRecord>("MessageRecord");
+    qRegisterMetaType<Models::Message>("Models::Message");
+    qRegisterMetaType<Models::Conversation>("Models::Conversation");
+    qRegisterMetaType<Ipc::AiSuggestionResponse>("Ipc::AiSuggestionResponse");
 
     Logger::init();
 
@@ -31,17 +35,26 @@ int main(int argc, char* argv[])
     }
     qInfo() << "数据库初始化成功";
 
-    PlatformBootstrap::initializeDefaultPlatforms(ConversationManager::instance());
+    QString serviceError;
+    if (!Ipc::IpcService::instance().connectToConfiguredService(&serviceError)) {
+        qWarning() << "[Main] Python 服务端连接失败:" << serviceError;
+    }
 
-    QObject::connect(&a, &QCoreApplication::aboutToQuit, [] { SwordCursor::restore(); });
+    QObject::connect(&a, &QCoreApplication::aboutToQuit, [] {
+        Ipc::IpcService::instance().shutdown();
+        SwordCursor::restore();
+    });
 
     qInfo() << "加载登录界面...";
     LoginWindow login;
     if (login.exec() != QDialog::Accepted) {
+        Ipc::IpcService::instance().shutdown();
         SwordCursor::restore();
         Logger::shutdown();
         return 0;
     }
+
+    PlatformBootstrap::initializeDefaultPlatforms(ConversationManager::instance());
 
     MainWindow w(login.loggedInUsername());
     w.show();

@@ -7,6 +7,7 @@
 #include <QShowEvent>
 
 class QCheckBox;
+class QLineEdit;
 class QPushButton;
 class MainWindow;
 
@@ -26,12 +27,11 @@ protected:
 private slots:
     void onSelectAllClicked();
     void onDeselectAllClicked();
-    void onWechatCalibrateClicked();
-    void onWechatWorkbenchClicked();
-    void onQianniuCalibrateClicked();
     void onStartClicked();
     void onStopClicked();
     void onCheckboxChanged();
+    void onSaveServiceClicked();
+    void onTestServiceClicked();
 
 private:
     void setupUI();
@@ -41,9 +41,10 @@ private:
 
     MainWindow* m_main = nullptr;
     QHash<QString, QCheckBox*> m_checks;
-    QPushButton* m_btnWechatCalibrate = nullptr;
-    QPushButton* m_btnWechatWorkbench = nullptr;
-    QPushButton* m_btnQianniuCalibrate = nullptr;
+    QCheckBox* m_manageLifecycleCheck = nullptr;
+    QLineEdit* m_serviceEndpointEdit = nullptr;
+    QPushButton* m_btnSaveService = nullptr;
+    QPushButton* m_btnTestService = nullptr;
     QPushButton* m_btnStart = nullptr;
     QPushButton* m_btnStop = nullptr;
     QPushButton* m_btnClose = nullptr;

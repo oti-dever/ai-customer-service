@@ -1493,14 +1493,14 @@ struct AggregateChatTokens {
 
 /* 默认聚合：整体浅灰蓝工作区（参考 IM 工作台），天蓝 outgoing / 白底 incoming 气泡 */
 const AggregateChatTokens kAggDefault = {
-    "#EEF1F6",
+    "#EEF6FC",
     "#0F172A",
     "#FFFFFF",
-    "#F5F6F7",
+    "#F4F6FA",
     "#E5E7EB",
-    "#00B2FF",
-    "#33C4FF",
-    "#0090DD",
+    "#20B8E8",
+    "#35C5F3",
+    "#149DCA",
     "#64748B",
     "rgba(0,178,255,0.10)",
     "#D1D5DB",
@@ -1509,29 +1509,29 @@ const AggregateChatTokens kAggDefault = {
     "#7DD3FC",
     "rgba(15,23,42,0.05)",
     "rgba(0,178,255,0.14)",
-    "#E0F2FE",
+    "#DFF2FC",
     "#111827",
     "#64748B",
     "#FFFFFF",
     "#111827",
     "#E5E7EB",
-    "#F5F6F7",
+    "#F4F6FA",
     "#E5E7EB",
     "#FFFFFF",
     "#E5E7EB",
     "#111827",
-    "#00B2FF",
+    "#20B8E8",
     "#FFFFFF",
     "#E8EAED",
-    "#00B2FF",
+    "#20B8E8",
     "#111827",
     "#FFFFFF",
     "#64748B",
     "rgba(255,255,255,0.88)",
     "#E5E7EB",
     "#64748B",
-    "#E0F2FE",
-    "#BAE6FD",
+    "#E5E7EB",
+    "#F4F6FA",
     "#64748B",
     "rgba(255,255,255,0.82)",
     "rgba(255,255,255,0.94)",
@@ -1760,11 +1760,11 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             padding: 2px;
         }
         QWidget#aggregateLeftPanel {
-            background: %17;
+            background: #F0F6FC;
             border-right: 1px solid %5;
         }
         QWidget#aggregateLeftToolBar {
-            background: %17;
+            background: #DCE9F6;
             border-right: 1px solid %5;
         }
         QToolButton#aggregateToolBarButton {
@@ -1895,8 +1895,8 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             outline: none;
         }
         QListWidget#aggregateConversationList::item {
-            padding: 3px 2px;
-            border-radius: 10px;
+            padding: 2px 0;
+            border-radius: 4px;
             outline: none;
             border: none;
         }
@@ -1904,7 +1904,7 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             outline: none;
         }
         QListWidget#aggregateConversationList::item:hover {
-            background: %15;
+            background: rgba(32, 184, 232, 0.08);
         }
         QListWidget#aggregateConversationList::item:selected {
             background: transparent;
@@ -1912,11 +1912,11 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
         QWidget#convItemWidget {
             background: transparent;
             border: 1px solid transparent;
-            border-radius: 10px;
+            border-radius: 4px;
             outline: none;
         }
         QWidget#convItemWidget[selected="true"] {
-            background: %16;
+            background: #DFF2FC;
             border: 1px solid transparent;
         }
         QLabel#convItemName {
@@ -1929,11 +1929,11 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             font-size: 11px;
         }
         QLabel#convItemPreview {
-            color: %2;
+            color: #6B7280;
             font-size: 12px;
         }
         QWidget#convItemWidget[selected="true"] QLabel#convItemPreview {
-            color: %13;
+            color: #3F4B5A;
         }
         QLabel#unreadBadge {
             background: %6;
@@ -1945,10 +1945,10 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
 
     )QSS" R"QSS(
         QWidget#aggregateCenterPanel {
-            background: %17;
+            background: #F4F6FA;
         }
         QWidget#chatArea {
-            background: %17;
+            background: #F4F6FA;
         }
         /* 与 syncSolidBackgrounds 中左栏/窗体底色 %1 一致，避免 handle 用 %17 出现竖向「假缝」 */
         QSplitter {
@@ -1985,7 +1985,7 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
         }
 
         QLabel#chatHeader {
-            background: %21;
+            background: #FFFFFF;
             font-size: 14px;
             font-weight: bold;
             color: %22;
@@ -1994,7 +1994,7 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             padding: 0 16px;
         }
         QScrollArea#messageScroll {
-            background: %17;
+            background: #F4F6FA;
             border: none;
         }
         QScrollArea#messageScroll QWidget {
@@ -2004,17 +2004,17 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             color: %24;
         }
         QWidget#aggregateChatInputOverlayHost {
-            background: %17;
+            background: #F4F6FA;
         }
         QWidget#aggregateChatInputPanel {
-            background: %43;
+            background: #FFFFFF;
             border-top: 1px solid %26;
         }
         QPlainTextEdit#messageInput {
-            background: %44;
+            background: #FFFFFF;
             border: 1px solid %26;
-            border-radius: 8px;
-            padding: 10px;
+            border-radius: 6px;
+            padding: 12px;
             font-size: 13px;
             color: %27;
         }
@@ -2063,7 +2063,7 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             background: %6;
             color: white;
             border: none;
-            border-radius: 8px;
+            border-radius: 6px;
             padding: 8px 20px;
             font-size: 13px;
             font-weight: bold;
@@ -2080,30 +2080,30 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
         }
 
         QWidget#chatArea QFrame#bubbleIn {
-            background: %29;
-            border: 1px solid %30;
-            border-radius: 10px;
+            background: #FFFFFF;
+            border: 1px solid #E5E7EB;
+            border-radius: 12px;
         }
         QWidget#chatArea QFrame#bubbleOut {
-            background: %31;
+            background: #20B8E8;
             border: none;
-            border-radius: 10px;
+            border-radius: 12px;
         }
         QLabel#bubbleTextIn {
             font-size: 13px;
-            color: %32;
+            color: #111827;
         }
         QLabel#bubbleTextOut {
             font-size: 13px;
-            color: %33;
+            color: #FFFFFF;
         }
         QLabel#bubbleMetaIn {
             font-size: 10px;
-            color: %34;
+            color: #9CA3AF;
         }
         QLabel#bubbleMetaOut {
             font-size: 10px;
-            color: %35;
+            color: #E0F2FE;
         }
         QLabel#bubbleOutSenderTime {
             font-size: 10px;
@@ -2309,10 +2309,11 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             border-color: %28;
         }
         QLabel#aggregateInlineStatus {
-            min-height: 18px;
+            min-height: 16px;
             color: %20;
-            font-size: 12px;
-            padding-top: 2px;
+            font-size: 11px;
+            padding: 0 4px;
+            background: transparent;
         }
         QToolButton#sendTimelineClearBtn {
             background: transparent;

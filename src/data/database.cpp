@@ -123,13 +123,30 @@ bool Database::runMigrations()
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  platform TEXT NOT NULL,"
         "  platform_conversation_id TEXT,"
+        "  account_id TEXT DEFAULT '',"
         "  customer_name TEXT NOT NULL,"
         "  last_message TEXT DEFAULT '',"
         "  last_time DATETIME,"
         "  unread_count INTEGER DEFAULT 0,"
-        "  status TEXT DEFAULT 'open',"
+        "  status TEXT DEFAULT 'new',"
+        "  source_type TEXT NOT NULL DEFAULT 'mock',"
+        "  confidence INTEGER NOT NULL DEFAULT 100,"
+        "  updated_at DATETIME,"
         "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
         "  UNIQUE(platform, platform_conversation_id)"
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS conversation_drafts ("
+        "  conversation_id INTEGER PRIMARY KEY,"
+        "  content TEXT NOT NULL DEFAULT '',"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS app_state ("
+        "  key TEXT PRIMARY KEY,"
+        "  value TEXT DEFAULT '',"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
         ")",
 
         "CREATE TABLE IF NOT EXISTS messages ("
@@ -144,6 +161,12 @@ bool Database::runMigrations()
         "  sync_status INTEGER NOT NULL DEFAULT 1,"
         "  error_reason TEXT DEFAULT '',"
         "  original_timestamp TEXT DEFAULT '',"
+        "  source_type TEXT NOT NULL DEFAULT 'mock',"
+        "  confidence INTEGER NOT NULL DEFAULT 100,"
+        "  verification_status TEXT NOT NULL DEFAULT 'unverified',"
+        "  content_type TEXT NOT NULL DEFAULT 'text',"
+        "  observed_at DATETIME,"
+        "  client_message_id TEXT DEFAULT '',"
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
         ")",
 
@@ -157,8 +180,14 @@ bool Database::runMigrations()
         "  platform_msg_id TEXT NOT NULL,"
         "  consume_status INTEGER NOT NULL DEFAULT 0,"
         "  error_reason TEXT DEFAULT '',"
+        "  direction TEXT DEFAULT '',"
+        "  sender_role TEXT DEFAULT '',"
         "  sender_name TEXT DEFAULT '',"
-        "  original_timestamp TEXT DEFAULT ''"
+        "  original_timestamp TEXT DEFAULT '',"
+        "  source_type TEXT NOT NULL DEFAULT 'ui_observed',"
+        "  confidence INTEGER NOT NULL DEFAULT 70,"
+        "  verification_status TEXT NOT NULL DEFAULT 'unverified',"
+        "  content_type TEXT NOT NULL DEFAULT 'text'"
         ")",
 
         "CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)",
@@ -180,6 +209,50 @@ bool Database::runMigrations()
         ")",
         "CREATE INDEX IF NOT EXISTS idx_send_events_conv_id ON message_send_events(conversation_id)",
         "CREATE INDEX IF NOT EXISTS idx_send_events_message_id ON message_send_events(message_id)",
+
+        "CREATE TABLE IF NOT EXISTS wechat_conversations ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  conversation_id INTEGER NOT NULL UNIQUE,"
+        "  wechat_account_id TEXT DEFAULT '',"
+        "  wechat_conversation_key TEXT DEFAULT '',"
+        "  display_name TEXT DEFAULT '',"
+        "  session_control_hash TEXT DEFAULT '',"
+        "  last_unread_badge INTEGER DEFAULT 0,"
+        "  last_observed_at DATETIME,"
+        "  last_health_status TEXT DEFAULT '',"
+        "  raw_payload_json TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_wechat_conversations_key "
+        "  ON wechat_conversations(wechat_account_id, wechat_conversation_key)",
+
+        "CREATE TABLE IF NOT EXISTS wechat_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  message_id INTEGER NOT NULL UNIQUE,"
+        "  conversation_id INTEGER NOT NULL,"
+        "  wechat_account_id TEXT DEFAULT '',"
+        "  wechat_conversation_key TEXT DEFAULT '',"
+        "  wechat_display_name TEXT DEFAULT '',"
+        "  platform_msg_id TEXT DEFAULT '',"
+        "  direction TEXT DEFAULT '',"
+        "  sender_role TEXT DEFAULT '',"
+        "  raw_control_name TEXT DEFAULT '',"
+        "  raw_control_type TEXT DEFAULT '',"
+        "  role_method TEXT DEFAULT '',"
+        "  role_confidence REAL DEFAULT 0,"
+        "  bubble_rect TEXT DEFAULT '',"
+        "  message_list_rect TEXT DEFAULT '',"
+        "  observation_method TEXT DEFAULT '',"
+        "  evidence_ref TEXT DEFAULT '',"
+        "  raw_payload_json TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_wechat_messages_conv_id ON wechat_messages(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_wechat_messages_platform_msg_id ON wechat_messages(platform_msg_id)",
 
         "CREATE TABLE IF NOT EXISTS ai_assistant_sessions ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -214,6 +287,44 @@ bool Database::runMigrations()
         "ALTER TABLE users ADD COLUMN avatar_path TEXT DEFAULT ''",
         "ALTER TABLE rpa_inbox_messages ADD COLUMN content_image_path TEXT DEFAULT ''",
         "ALTER TABLE messages ADD COLUMN content_image_path TEXT DEFAULT ''",
+        "ALTER TABLE conversations ADD COLUMN account_id TEXT DEFAULT ''",
+        "ALTER TABLE conversations ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
+        "ALTER TABLE conversations ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
+        "ALTER TABLE conversations ADD COLUMN updated_at DATETIME",
+        "ALTER TABLE messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
+        "ALTER TABLE messages ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
+        "ALTER TABLE messages ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
+        "ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
+        "ALTER TABLE messages ADD COLUMN observed_at DATETIME",
+        "ALTER TABLE messages ADD COLUMN client_message_id TEXT DEFAULT ''",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'ui_observed'",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN confidence INTEGER NOT NULL DEFAULT 70",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN direction TEXT DEFAULT ''",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN sender_role TEXT DEFAULT ''",
+        "ALTER TABLE wechat_conversations ADD COLUMN session_control_hash TEXT DEFAULT ''",
+        "ALTER TABLE wechat_conversations ADD COLUMN last_unread_badge INTEGER DEFAULT 0",
+        "ALTER TABLE wechat_conversations ADD COLUMN last_observed_at DATETIME",
+        "ALTER TABLE wechat_conversations ADD COLUMN last_health_status TEXT DEFAULT ''",
+        "ALTER TABLE wechat_conversations ADD COLUMN raw_payload_json TEXT DEFAULT ''",
+        "ALTER TABLE wechat_conversations ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE wechat_conversations ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE wechat_messages ADD COLUMN wechat_account_id TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN wechat_conversation_key TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN wechat_display_name TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN direction TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN sender_role TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN raw_control_name TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN raw_control_type TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN role_method TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN role_confidence REAL DEFAULT 0",
+        "ALTER TABLE wechat_messages ADD COLUMN bubble_rect TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN message_list_rect TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN observation_method TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN evidence_ref TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN raw_payload_json TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
     };
 
     for (const char* sql : requiredMigrations) {

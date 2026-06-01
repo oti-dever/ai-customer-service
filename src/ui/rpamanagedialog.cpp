@@ -1,15 +1,16 @@
 #include "rpamanagedialog.h"
 #include "mainwindow.h"
+#include "../ipc/ipcservice.h"
 #include "../utils/applystyle.h"
 
 #include <QCheckBox>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QShowEvent>
-#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
@@ -72,6 +73,20 @@ void RpaManageDialog::setupUI()
     hint->setWordWrap(true);
     mainLayout->addWidget(hint);
 
+    auto* serviceRow = new QHBoxLayout();
+    serviceRow->setSpacing(8);
+    m_manageLifecycleCheck = new QCheckBox(QStringLiteral("C++ 管理 Python 服务端"), this);
+    m_manageLifecycleCheck->setChecked(Ipc::IpcService::instance().managesServiceLifecycle());
+    m_serviceEndpointEdit = new QLineEdit(Ipc::IpcService::instance().serviceEndpoint(), this);
+    m_serviceEndpointEdit->setPlaceholderText(QStringLiteral("http://127.0.0.1:8765"));
+    m_btnSaveService = new QPushButton(QStringLiteral("保存连接"), this);
+    m_btnTestService = new QPushButton(QStringLiteral("测试连接"), this);
+    serviceRow->addWidget(m_manageLifecycleCheck);
+    serviceRow->addWidget(m_serviceEndpointEdit, 1);
+    serviceRow->addWidget(m_btnSaveService);
+    serviceRow->addWidget(m_btnTestService);
+    mainLayout->addLayout(serviceRow);
+
     auto* rowBtns = new QHBoxLayout();
     rowBtns->setSpacing(8);
     auto* btnAll = new QPushButton(QStringLiteral("全选"), this);
@@ -107,30 +122,6 @@ void RpaManageDialog::setupUI()
         rowLayout->addWidget(cb);
         connect(cb, &QCheckBox::stateChanged, this, &RpaManageDialog::onCheckboxChanged);
 
-        if (QString::fromLatin1(it.id) == QLatin1String("wechat")) {
-            m_btnWechatCalibrate = new QPushButton(QStringLiteral("微信OCR校准"), row);
-            m_btnWechatCalibrate->setToolTip(
-                QStringLiteral("多区域手动校准（消息区、未读条带等），写入 wechat_config.json"));
-            rowLayout->addWidget(m_btnWechatCalibrate);
-            connect(m_btnWechatCalibrate, &QPushButton::clicked, this,
-                    &RpaManageDialog::onWechatCalibrateClicked);
-
-            m_btnWechatWorkbench = new QPushButton(QStringLiteral("打开微信工作台"), row);
-            m_btnWechatWorkbench->setToolTip(
-                QStringLiteral("打开微信独立工作台：查看会话、消息、AI 建议回复与人工发送"));
-            rowLayout->addWidget(m_btnWechatWorkbench);
-            connect(m_btnWechatWorkbench, &QPushButton::clicked, this,
-                    &RpaManageDialog::onWechatWorkbenchClicked);
-        } else if (QString::fromLatin1(it.id) == QLatin1String("qianniu")) {
-            m_btnQianniuCalibrate = new QPushButton(QStringLiteral("千牛OCR校准"), row);
-            m_btnQianniuCalibrate->setToolTip(
-                QStringLiteral(
-                    "多区域框选（消息区、标题、会话列表、红点带等），写入 qianniu_config.json；无需先嵌入千牛"));
-            rowLayout->addWidget(m_btnQianniuCalibrate);
-            connect(m_btnQianniuCalibrate, &QPushButton::clicked, this,
-                    &RpaManageDialog::onQianniuCalibrateClicked);
-        }
-
         rowLayout->addStretch(1);
         listLayout->addWidget(row);
     }
@@ -154,6 +145,8 @@ void RpaManageDialog::setupUI()
     connect(btnNone, &QPushButton::clicked, this, &RpaManageDialog::onDeselectAllClicked);
     connect(m_btnStart, &QPushButton::clicked, this, &RpaManageDialog::onStartClicked);
     connect(m_btnStop, &QPushButton::clicked, this, &RpaManageDialog::onStopClicked);
+    connect(m_btnSaveService, &QPushButton::clicked, this, &RpaManageDialog::onSaveServiceClicked);
+    connect(m_btnTestService, &QPushButton::clicked, this, &RpaManageDialog::onTestServiceClicked);
     connect(m_btnClose, &QPushButton::clicked, this, &QDialog::reject);
 }
 
@@ -240,41 +233,26 @@ void RpaManageDialog::onCheckboxChanged()
     updateButtonStates();
 }
 
-void RpaManageDialog::onWechatCalibrateClicked()
+void RpaManageDialog::onSaveServiceClicked()
 {
-    MainWindow* main = m_main;
-    hide();
-    accept();
-    if (!main)
-        return;
-    QTimer::singleShot(0, main, [main]() {
-        main->startWechatRpaCalibrationStandalone();
-    });
+    auto& ipc = Ipc::IpcService::instance();
+    ipc.setServiceEndpoint(m_serviceEndpointEdit ? m_serviceEndpointEdit->text() : QString());
+    ipc.setManageServiceLifecycle(m_manageLifecycleCheck ? m_manageLifecycleCheck->isChecked() : true);
+    ipc.saveConnectionSettings();
+    QMessageBox::information(this, QStringLiteral("Python 服务端"), QStringLiteral("服务端配置已保存。"));
 }
 
-void RpaManageDialog::onWechatWorkbenchClicked()
+void RpaManageDialog::onTestServiceClicked()
 {
-    MainWindow* main = m_main;
-    hide();
-    accept();
-    if (!main)
-        return;
-    QTimer::singleShot(0, main, [main]() {
-        main->openWechatWorkbenchDialog();
-    });
+    onSaveServiceClicked();
+    QString error;
+    const bool ok = Ipc::IpcService::instance().connectToConfiguredService(&error);
+    QMessageBox::information(
+        this,
+        QStringLiteral("Python 服务端"),
+        ok ? QStringLiteral("连接成功。") : QStringLiteral("连接失败：%1").arg(error));
 }
 
-void RpaManageDialog::onQianniuCalibrateClicked()
-{
-    MainWindow* main = m_main;
-    hide();
-    accept();
-    if (!main)
-        return;
-    QTimer::singleShot(0, main, [main]() {
-        main->startQianniuRpaCalibrationStandalone();
-    });
-}
 
 void RpaManageDialog::onStartClicked()
 {

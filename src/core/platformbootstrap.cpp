@@ -2,7 +2,6 @@
 
 #include "conversationmanager.h"
 #include "messagerouter.h"
-#include "../services/platforms/pddrp_adapter.h"
 #include "../services/platforms/qianniurp_adapter.h"
 #include "../services/platforms/simplatformadapter.h"
 #include "../services/platforms/wechatrp_adapter.h"
@@ -28,5 +27,4 @@ void PlatformBootstrap::initializeDefaultPlatforms(ConversationManager& manager)
     registerAndStartAdapter(router, new SimPlatformAdapter(&manager));
     registerAndStartAdapter(router, new QianniuRPAAdapter(&manager));
     registerAndStartAdapter(router, new WechatRPAAdapter(&manager));
-    registerAndStartAdapter(router, new PddRPAAdapter(&manager));
 }

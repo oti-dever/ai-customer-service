@@ -1,6 +1,10 @@
 #include "aggregatechatform.h"
 #include "foldarrowcombobox.h"
 #include "../core/conversationmanager.h"
+#include "../core/messagerouter.h"
+#include "../ipc/ipcservice.h"
+#include "conversationlistmodel.h"
+#include "messagelistmodel.h"
 #include <QButtonGroup>
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
@@ -19,6 +23,7 @@
 #include <QSettings>
 #include <algorithm>
 #include <QAbstractItemView>
+#include <QStyledItemDelegate>
 #include <QApplication>
 #include <QCursor>
 #include <QDateTime>
@@ -45,6 +50,7 @@
 #include <QPixmap>
 #include <QScrollBar>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStringList>
 #include <QStyle>
@@ -60,7 +66,6 @@
 #include <QGraphicsDropShadowEffect>
 #include <QListWidget>
 #include <QListWidgetItem>
-#include <QScrollArea>
 #include <QVariantAnimation>
 #include <QEasingCurve>
 
@@ -120,6 +125,53 @@ QString formatSendEventLine(const MessageSendEventRecord& e)
         .arg(detail.isEmpty() ? QStringLiteral("-") : detail);
 }
 
+MessageRecord messageRecordFromUnified(const Models::Message& msg)
+{
+    MessageRecord record;
+    record.id = msg.id;
+    record.conversationId = msg.conversationId;
+    record.direction = Models::legacyDirectionFromMessageDirection(msg.direction);
+    record.content = msg.content;
+    record.sender = msg.direction == Models::MessageDirection::Outbound
+        ? QStringLiteral("agent")
+        : (msg.direction == Models::MessageDirection::System
+               ? QStringLiteral("system")
+               : QStringLiteral("customer"));
+    record.senderName = msg.metadata.value(QStringLiteral("senderName")).toString();
+    record.createdAt = msg.platformDisplayedAt.isValid() ? msg.platformDisplayedAt : msg.observedAt;
+    record.platformMsgId = msg.platformMessageId;
+    record.syncStatus = Models::legacySyncStatusFromMessageStatus(msg.status);
+    record.errorReason = msg.metadata.value(QStringLiteral("errorReason")).toString();
+    record.originalTimestamp = msg.metadata.value(QStringLiteral("originalTimestamp")).toString();
+    record.contentImagePath = msg.evidenceRef;
+    record.status = Models::toString(msg.status);
+    record.sourceType = Models::toString(msg.sourceType);
+    record.confidence = msg.confidence;
+    record.verificationStatus = Models::toString(msg.verificationStatus);
+    record.contentType = Models::toString(msg.contentType);
+    record.observedAt = msg.observedAt;
+    return record;
+}
+
+ConversationInfo conversationInfoFromUnified(const Models::Conversation& conv)
+{
+    ConversationInfo info;
+    info.id = conv.id;
+    info.platform = Models::toString(conv.platformType);
+    info.platformConversationId = conv.platformConversationId;
+    info.customerName = conv.title;
+    info.lastMessage = conv.lastMessage;
+    info.lastTime = conv.lastMessageAt;
+    info.unreadCount = conv.unreadCount;
+    info.status = Models::toString(conv.status);
+    info.createdAt = conv.createdAt;
+    info.accountId = conv.accountId;
+    info.sourceType = Models::toString(conv.sourceType);
+    info.confidence = conv.confidence;
+    info.updatedAt = conv.updatedAt;
+    return info;
+}
+
 /** 右栏性能指标卡：高度随列宽变化，与宽度一致，接近正方形。 */
 class AggregateRightMetricCardFrame final : public QFrame
 {
@@ -152,6 +204,710 @@ protected:
             return { side, side };
         }
         return { 80, 80 };
+    }
+};
+
+class ConversationItemDelegate final : public QStyledItemDelegate
+{
+public:
+    explicit ConversationItemDelegate(QObject* parent = nullptr)
+        : QStyledItemDelegate(parent)
+    {
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        Q_UNUSED(option)
+        Q_UNUSED(index)
+        return { 240, 76 };
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        const ConversationInfo conv = index.data(ConversationListModel::ConversationRole).value<ConversationInfo>();
+        const QString lastDirection = index.data(ConversationListModel::LastDirectionRole).toString();
+        const bool selected = option.state.testFlag(QStyle::State_Selected);
+        const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        const QRect r = option.rect.adjusted(4, 3, -4, -3);
+        QColor fill = Qt::transparent;
+        if (selected)
+            fill = QColor(QStringLiteral("#DFF2FC"));
+        else if (hovered)
+            fill = QColor(QStringLiteral("#F5FBFE"));
+        if (fill.alpha() > 0) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(fill);
+            painter->drawRoundedRect(r, 6, 6);
+        }
+
+        const QColor avatarColor =
+            conv.platform == QLatin1String("wechat_pc") ? QColor(QStringLiteral("#57C17A"))
+            : conv.platform == QLatin1String("pdd_web")  ? QColor(QStringLiteral("#F2A93B"))
+            : conv.platform == QLatin1String("douyin")   ? QColor(QStringLiteral("#EE4D5A"))
+                                                         : QColor(QStringLiteral("#20B8E8"));
+        const int avatarSide = 44;
+        const QRect avatarRect(r.left() + 8, r.top() + (r.height() - avatarSide) / 2, avatarSide, avatarSide);
+        painter->setBrush(avatarColor.lighter(172));
+        painter->setPen(Qt::NoPen);
+        painter->drawEllipse(avatarRect);
+        painter->setBrush(avatarColor);
+        painter->drawEllipse(avatarRect.adjusted(4, 4, -4, -4));
+        painter->setPen(Qt::white);
+        QFont avatarFont(option.font);
+        avatarFont.setBold(true);
+        painter->setFont(avatarFont);
+        const QString avatarText = conv.customerName.trimmed().isEmpty()
+                                        ? QStringLiteral("?")
+                                        : conv.customerName.left(1);
+        painter->drawText(avatarRect, Qt::AlignCenter, avatarText);
+
+        const QRect textRect(avatarRect.right() + 8, r.top() + 8,
+                             qMax(1, r.right() - avatarRect.right() - 14), r.height() - 16);
+        QFont titleFont(option.font);
+        titleFont.setBold(true);
+        const QFontMetrics titleFm(titleFont);
+        QString preview = conv.lastMessage;
+        if (!lastDirection.isEmpty())
+            preview = preview.isEmpty() ? lastDirection : preview;
+        const bool hasPreview = !preview.trimmed().isEmpty();
+        const int titleY = hasPreview
+                               ? textRect.top()
+                               : textRect.top() + qMax(0, (textRect.height() - titleFm.height()) / 2);
+        QString timeStr;
+        if (conv.lastTime.isValid()) {
+            timeStr = conv.lastTime.date() == QDate::currentDate()
+                          ? conv.lastTime.toString(QStringLiteral("HH:mm"))
+                          : conv.lastTime.toString(QStringLiteral("M-dd"));
+        }
+        QFont smallFont(option.font);
+        const QFontMetrics timeFm(smallFont);
+        const int titleTimeGap = 8;
+        const int timeWidth = timeStr.isEmpty() ? 0 : qMin(46, qMax(30, timeFm.horizontalAdvance(timeStr) + 2));
+        const int titleMaxWidth = qMax(1, textRect.width() - (timeWidth > 0 ? timeWidth + titleTimeGap : 0));
+        const int titleNaturalWidth = titleFm.horizontalAdvance(conv.customerName);
+        const bool titleFits = titleNaturalWidth <= titleMaxWidth;
+        const int titleDrawWidth = titleFits ? titleNaturalWidth + 2 : titleMaxWidth;
+
+        painter->setFont(titleFont);
+        painter->setPen(QColor(QStringLiteral("#111827")));
+        const QString title = titleFm.elidedText(conv.customerName, Qt::ElideRight, titleMaxWidth);
+        painter->drawText(QRect(textRect.left(), titleY, titleDrawWidth, titleFm.height()),
+                          Qt::AlignLeft | Qt::AlignVCenter, title);
+
+        painter->setFont(smallFont);
+        painter->setPen(QColor(QStringLiteral("#9CA3AF")));
+        if (timeWidth > 0) {
+            const int timeX = titleFits
+                                  ? qMin(textRect.right() - timeWidth, textRect.left() + titleDrawWidth + titleTimeGap)
+                                  : textRect.right() - timeWidth;
+            painter->drawText(QRect(timeX, titleY, timeWidth, titleFm.height()),
+                              Qt::AlignLeft | Qt::AlignVCenter, timeStr);
+        }
+
+        QFont previewFont(option.font);
+        if (previewFont.pointSizeF() > 0)
+            previewFont.setPointSizeF(previewFont.pointSizeF() + 0.5);
+        else if (previewFont.pixelSize() > 0)
+            previewFont.setPixelSize(previewFont.pixelSize() + 1);
+        const QFontMetrics bodyFm(previewFont);
+        if (hasPreview) {
+            painter->setFont(previewFont);
+            painter->setPen(QColor(QStringLiteral("#4B5563")));
+            preview = bodyFm.elidedText(preview, Qt::ElideRight, textRect.width() - (conv.unreadCount > 0 ? 22 : 0));
+            painter->drawText(QRect(textRect.left(), titleY + titleFm.height() + 8,
+                                    textRect.width() - (conv.unreadCount > 0 ? 22 : 0), bodyFm.height() + 4),
+                              Qt::AlignLeft | Qt::AlignTop, preview);
+        }
+
+        if (conv.unreadCount > 0) {
+            const QString badge = conv.unreadCount > 99 ? QStringLiteral("99+") : QString::number(conv.unreadCount);
+            const QSize badgeSize(qMax(18, bodyFm.horizontalAdvance(badge) + 10), 18);
+            const int badgeY = hasPreview
+                                   ? titleY + titleFm.height() + 7
+                                   : textRect.top() + qMax(0, (textRect.height() - badgeSize.height()) / 2);
+            const QRect badgeRect(textRect.right() - badgeSize.width(), badgeY,
+                                  badgeSize.width(), badgeSize.height());
+            painter->setBrush(QColor(QStringLiteral("#20B8E8")));
+            painter->drawRoundedRect(badgeRect, 9, 9);
+            painter->setPen(Qt::white);
+            painter->drawText(badgeRect, Qt::AlignCenter, badge);
+        }
+
+        painter->restore();
+    }
+};
+
+class MessageItemDelegate final : public QStyledItemDelegate
+{
+public:
+    explicit MessageItemDelegate(QObject* parent = nullptr)
+        : QStyledItemDelegate(parent)
+    {
+    }
+
+    void setSelfProfile(const QString& displayName, const QPixmap& avatar)
+    {
+        m_selfDisplayName = displayName;
+        m_selfAvatarPixmap = avatar;
+    }
+
+    void setCustomerAvatar(const QPixmap& avatar)
+    {
+        m_customerAvatarPixmap = avatar;
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        const bool separator = index.data(MessageListModel::IsSeparatorRole).toBool();
+        if (separator)
+            return { qMax(320, option.rect.width()), 34 };
+
+        const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
+        const int avail = qMax(280, option.rect.width() > 0 ? option.rect.width() - 132 : 420);
+        const int bubbleWidth = qMin(420, avail);
+        const QString displayText = msg.content.trimmed().isEmpty() ? QStringLiteral(" ") : msg.content;
+        QTextDocument doc;
+        doc.setDefaultFont(option.font);
+        doc.setTextWidth(qMax(1, bubbleWidth - 24));
+        doc.setPlainText(displayText);
+        const int textH = qMax(QFontMetrics(option.font).height(), qCeil(doc.size().height()));
+        const int imageH = messageImageHeight(msg, bubbleWidth);
+        const int metaH = messageMetaHeight(msg);
+        int h = 2 + qMax(36, imageH > 0 ? imageH + textH + 32 : textH + 28) + metaH;
+        if (msg.syncStatus == 12 && !msg.errorReason.isEmpty())
+            h += 18;
+        return { qMax(320, option.rect.width()), qMax(64, h) };
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        const bool separator = index.data(MessageListModel::IsSeparatorRole).toBool();
+        if (separator) {
+            const QDate date = index.data(MessageListModel::SeparatorDateRole).toDate();
+            const QRect r = option.rect.adjusted(16, 4, -16, -4);
+            painter->setPen(QColor(QStringLiteral("#CBD5E1")));
+            painter->drawLine(r.left(), r.center().y(), r.left() + r.width() / 2 - 28, r.center().y());
+            painter->drawLine(r.left() + r.width() / 2 + 28, r.center().y(), r.right(), r.center().y());
+            painter->setPen(QColor(QStringLiteral("#64748B")));
+            const QString text = date == QDate::currentDate()
+                                     ? QStringLiteral("今天")
+                                     : date.toString(QStringLiteral("yyyy-MM-dd"));
+            painter->drawText(r, Qt::AlignCenter, text);
+            painter->restore();
+            return;
+        }
+
+        const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
+        const bool outgoing = msg.direction == QLatin1String("out");
+        const QRect rowRect = option.rect.adjusted(16, 2, -16, -2);
+        const int avatarSide = 36;
+        const int gap = 8;
+        const int bubbleMax = qMin(420, qMax(220, rowRect.width() - avatarSide - gap - 72));
+        const QString displayText = msg.content.trimmed().isEmpty() ? QStringLiteral(" ") : msg.content;
+
+        QTextDocument doc;
+        doc.setDefaultFont(option.font);
+        doc.setTextWidth(qMax(1, bubbleMax - 24));
+        doc.setPlainText(displayText);
+        const QSizeF docSize = doc.size();
+        const int imageH = messageImageHeight(msg, bubbleMax);
+        QFontMetrics fm(option.font);
+        const QRect textBounds = fm.boundingRect(QRect(0, 0, bubbleMax - 24, 10000),
+                                                 Qt::TextWordWrap,
+                                                 displayText);
+        const int naturalTextW = displayText.trimmed().isEmpty() ? 28 : qBound(28, textBounds.width() + 2, bubbleMax - 24);
+        const int naturalImageW = imageH > 0 ? qMin(bubbleMax - 24, 360) : 0;
+        const int minBubbleW = displayText.trimmed().isEmpty() && imageH == 0 ? 72 : 96;
+        const int bubbleW = qMin(bubbleMax, qMax(minBubbleW, qMax(naturalTextW, naturalImageW) + 24));
+        const int metaH = messageMetaHeight(msg);
+        const int bubbleH = messageBubbleHeight(msg, bubbleW, option.font);
+        const int totalBubbleH = bubbleH + metaH;
+        const int avatarX = outgoing ? rowRect.right() - avatarSide : rowRect.left();
+        const int bubbleX = outgoing ? avatarX - gap - bubbleW : avatarX + avatarSide + gap;
+        const int topY = rowRect.top() + qMax(0, (rowRect.height() - totalBubbleH) / 2);
+
+        const QRect avatarRect(avatarX, topY + metaH, avatarSide, avatarSide);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(outgoing ? QColor(QStringLiteral("#5C8DF6")) : QColor(QStringLiteral("#E5E7EB")));
+        painter->drawRoundedRect(avatarRect, avatarSide / 2, avatarSide / 2);
+        const QPixmap& avatarPixmap = outgoing ? m_selfAvatarPixmap : m_customerAvatarPixmap;
+        if (!avatarPixmap.isNull())
+            painter->drawPixmap(avatarRect, avatarPixmap);
+        painter->setPen(outgoing ? Qt::white : QColor(QStringLiteral("#64748B")));
+        painter->drawText(avatarRect, Qt::AlignCenter, outgoing ? QStringLiteral("我") : QStringLiteral("客"));
+
+        if (outgoing) {
+            const QRect metaRect(rowRect.left(), topY, bubbleX + bubbleW - rowRect.left(), metaH);
+            if (metaH > 0) {
+                const QString timeStr = msg.createdAt.isValid() ? msg.createdAt.toString(QStringLiteral("HH:mm")) : QString();
+                const QString nick = m_selfDisplayName.trimmed().isEmpty() ? QStringLiteral("我") : m_selfDisplayName.trimmed();
+                const int nickWidth = qMin(160, fm.horizontalAdvance(nick) + 4);
+                const int timeWidth = timeStr.isEmpty() ? 0 : qMin(92, fm.horizontalAdvance(timeStr) + 4);
+                if (!timeStr.isEmpty()) {
+                    painter->setPen(QColor(QStringLiteral("#6B7280")));
+                    painter->drawText(QRect(metaRect.right() - nickWidth - timeWidth - 8, metaRect.top(),
+                                            timeWidth, metaRect.height()),
+                                      Qt::AlignRight | Qt::AlignVCenter, timeStr);
+                }
+                painter->setPen(QColor(QStringLiteral("#374151")));
+                painter->drawText(QRect(metaRect.right() - nickWidth, metaRect.top(), nickWidth, metaRect.height()),
+                                  Qt::AlignRight | Qt::AlignVCenter, nick);
+            }
+        } else if (metaH > 0) {
+            painter->setPen(QColor(QStringLiteral("#6B7280")));
+            QString meta;
+            if (!msg.senderName.isEmpty())
+                meta = msg.senderName;
+            if (msg.createdAt.isValid()) {
+                const QString t = msg.createdAt.toString(QStringLiteral("HH:mm"));
+                meta = meta.isEmpty() ? t : meta + QStringLiteral("  ") + t;
+            } else if (!msg.originalTimestamp.isEmpty()) {
+                meta = msg.senderName.isEmpty() ? msg.originalTimestamp : msg.senderName + QStringLiteral("  ") + msg.originalTimestamp;
+            }
+            painter->drawText(QRect(bubbleX, topY, bubbleW + 120, metaH),
+                              Qt::AlignLeft | Qt::AlignVCenter, meta);
+        }
+
+        QRect bubbleRect(bubbleX, topY + metaH, bubbleW, bubbleH);
+        QColor bubbleColor = outgoing ? QColor(QStringLiteral("#D9E9FF")) : QColor(QStringLiteral("#FFFFFF"));
+        painter->setPen(QColor(QStringLiteral("#D1D5DB")));
+        painter->setBrush(bubbleColor);
+        painter->drawRoundedRect(bubbleRect, 12, 12);
+
+        int contentY = bubbleRect.top() + 10;
+        if (!msg.contentImagePath.isEmpty() && QFile::exists(msg.contentImagePath)) {
+            QPixmap pm(msg.contentImagePath);
+            if (!pm.isNull()) {
+                pm = pm.scaledToWidth(qMin(bubbleW - 24, 360), Qt::SmoothTransformation);
+                painter->drawPixmap(QRect(bubbleRect.left() + 12, contentY, pm.width(), pm.height()), pm);
+                contentY += pm.height() + 8;
+            }
+        }
+
+        QRect textRect(bubbleRect.left() + 12, contentY, bubbleW - 24, bubbleRect.bottom() - contentY - 20);
+        painter->setPen(QColor(QStringLiteral("#111827")));
+        doc.setTextWidth(textRect.width());
+        painter->translate(textRect.topLeft());
+        doc.drawContents(painter, QRectF(0, 0, textRect.width(), textRect.height()));
+        painter->translate(-textRect.topLeft());
+
+        QString statusText;
+        if (outgoing) {
+            if (msg.syncStatus == 10)
+                statusText = QStringLiteral("待发送");
+            else if (msg.syncStatus == 12)
+                statusText = QStringLiteral("发送失败");
+            else
+                statusText = QStringLiteral("已发送");
+            painter->setPen(QColor(QStringLiteral("#6B7280")));
+            painter->drawText(QRect(bubbleRect.left() + 12, bubbleRect.bottom() - 16, bubbleW - 24, 14),
+                              Qt::AlignLeft | Qt::AlignVCenter, statusText);
+            if (msg.syncStatus == 12 && !msg.errorReason.isEmpty()) {
+                painter->drawText(QRect(bubbleRect.left() + 12, bubbleRect.bottom() + 2, bubbleW - 24, 24),
+                                  Qt::AlignLeft | Qt::AlignTop, msg.errorReason);
+            }
+        }
+
+        painter->restore();
+    }
+
+private:
+    static bool hasMessageImage(const MessageRecord& msg)
+    {
+        return !msg.contentImagePath.isEmpty() && QFile::exists(msg.contentImagePath);
+    }
+
+    static int messageMetaHeight(const MessageRecord& msg)
+    {
+        return (!msg.senderName.isEmpty() || msg.createdAt.isValid() || !msg.originalTimestamp.isEmpty()) ? 18 : 0;
+    }
+
+    static int messageImageHeight(const MessageRecord& msg, int bubbleWidth)
+    {
+        if (!hasMessageImage(msg))
+            return 0;
+        QPixmap pm(msg.contentImagePath);
+        if (pm.isNull())
+            return 0;
+        const int maxW = qMin(360, qMax(1, bubbleWidth - 24));
+        if (pm.width() <= maxW)
+            return pm.height();
+        return qMax(1, qRound(pm.height() * (qreal(maxW) / qreal(pm.width()))));
+    }
+
+    static int messageBubbleHeight(const MessageRecord& msg, int bubbleWidth, const QFont& font)
+    {
+        const QString displayText = msg.content.trimmed().isEmpty() ? QStringLiteral(" ") : msg.content;
+        QTextDocument doc;
+        doc.setDefaultFont(font);
+        doc.setTextWidth(qMax(1, bubbleWidth - 24));
+        doc.setPlainText(displayText);
+        const int textH = qMax(QFontMetrics(font).height(), qCeil(doc.size().height()));
+        int h = 8 + textH + 10;
+        const int imageH = messageImageHeight(msg, bubbleWidth);
+        if (imageH > 0)
+            h += imageH + 6;
+        h += 12;
+        return qMax(36, h);
+    }
+
+    QString m_selfDisplayName;
+    QPixmap m_selfAvatarPixmap;
+    QPixmap m_customerAvatarPixmap;
+};
+
+class ModernMessageItemDelegate final : public QStyledItemDelegate
+{
+public:
+    explicit ModernMessageItemDelegate(QObject* parent = nullptr)
+        : QStyledItemDelegate(parent)
+    {
+    }
+
+    void setSelfProfile(const QString& displayName, const QPixmap& avatar)
+    {
+        m_selfDisplayName = displayName;
+        m_selfAvatarPixmap = avatar;
+    }
+
+    void setCustomerAvatar(const QPixmap& avatar)
+    {
+        m_customerAvatarPixmap = avatar;
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        if (index.data(MessageListModel::IsSeparatorRole).toBool())
+            return { qMax(320, option.rect.width()), 48 };
+
+        const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
+        const QFont bodyFont = bodyTextFont(option.font);
+        const QFont statusFont = statusTextFont(option.font);
+        const int bubbleMax = qMin(360, qMax(180, option.rect.width() - 170));
+        const int bubbleWidth = messageBubbleWidth(msg, bubbleMax, bodyFont);
+        const int h = messageMetaHeight(msg) + messageBubbleHeight(msg, bubbleWidth, bodyFont, statusFont) + 12;
+        return { qMax(320, option.rect.width()), qMax(60, h) };
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        if (index.data(MessageListModel::IsSeparatorRole).toBool()) {
+            paintDateSeparator(painter, option, index.data(MessageListModel::SeparatorDateRole).toDate());
+            painter->restore();
+            return;
+        }
+
+        const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
+        const bool outgoing = msg.direction == QLatin1String("out");
+        const QRect rowRect = option.rect.adjusted(24, 3, -24, -3);
+        const int avatarSide = 40;
+        const int gap = 12;
+        const int bubbleMax = qMin(360, qMax(180, rowRect.width() - avatarSide - gap - 96));
+        const QFont bodyFont = bodyTextFont(option.font);
+        const QFont metaFont = metaTextFont(option.font);
+        const QFont statusFont = statusTextFont(option.font);
+        const int bubbleW = messageBubbleWidth(msg, bubbleMax, bodyFont);
+        const int metaH = messageMetaHeight(msg);
+        const int bubbleH = messageBubbleHeight(msg, bubbleW, bodyFont, statusFont);
+        const int totalH = metaH + bubbleH;
+        const int avatarX = outgoing ? rowRect.right() - avatarSide : rowRect.left();
+        const int bubbleX = outgoing ? avatarX - gap - bubbleW : avatarX + avatarSide + gap;
+        const int topY = rowRect.top() + qMax(0, (rowRect.height() - totalH) / 2);
+
+        paintAvatar(painter, QRect(avatarX, topY + metaH, avatarSide, avatarSide), outgoing, option.font);
+        paintMeta(painter, QRect(bubbleX, topY, bubbleW, metaH), msg, outgoing, metaFont);
+
+        const QRect bubbleRect(bubbleX, topY + metaH, bubbleW, bubbleH);
+        painter->setPen(outgoing ? QColor(QStringLiteral("#20B8E8")) : QColor(QStringLiteral("#E5E7EB")));
+        painter->setBrush(outgoing ? QColor(QStringLiteral("#20B8E8")) : QColor(QStringLiteral("#FFFFFF")));
+        painter->drawRoundedRect(bubbleRect, 13, 13);
+
+        paintMessageContent(painter, bubbleRect, bubbleW, msg, outgoing, bodyFont, statusFont);
+
+        if (outgoing)
+            paintSendStatus(painter, bubbleRect, bubbleW, msg, statusFont);
+
+        painter->restore();
+    }
+
+private:
+    static QFont bodyTextFont(const QFont& base)
+    {
+        QFont f(base);
+        if (f.pointSizeF() > 0)
+            f.setPointSizeF(qMax<qreal>(10.5, f.pointSizeF() + 1.0));
+        else
+            f.setPixelSize(qMax(14, f.pixelSize() > 0 ? f.pixelSize() + 1 : 14));
+        return f;
+    }
+
+    static QFont metaTextFont(const QFont& base)
+    {
+        QFont f(base);
+        if (f.pointSizeF() > 0)
+            f.setPointSizeF(qMax<qreal>(8.5, f.pointSizeF() - 0.5));
+        else
+            f.setPixelSize(qMax(11, f.pixelSize() > 0 ? f.pixelSize() - 1 : 11));
+        return f;
+    }
+
+    static QFont statusTextFont(const QFont& base)
+    {
+        QFont f(base);
+        if (f.pointSizeF() > 0)
+            f.setPointSizeF(qMax<qreal>(8.5, f.pointSizeF() - 0.5));
+        else
+            f.setPixelSize(qMax(11, f.pixelSize() > 0 ? f.pixelSize() - 1 : 11));
+        return f;
+    }
+
+    static int messageMetaHeight(const MessageRecord& msg)
+    {
+        return (!msg.senderName.isEmpty() || msg.createdAt.isValid() || !msg.originalTimestamp.isEmpty()) ? 18 : 0;
+    }
+
+    static QSize messageImageSize(const MessageRecord& msg, int bubbleWidth)
+    {
+        if (msg.contentImagePath.isEmpty() || !QFile::exists(msg.contentImagePath))
+            return {};
+        QPixmap pm(msg.contentImagePath);
+        if (pm.isNull())
+            return {};
+        const int maxW = qMin(336, qMax(1, bubbleWidth - 24));
+        if (pm.width() <= maxW)
+            return pm.size();
+        return { maxW, qMax(1, qRound(pm.height() * (qreal(maxW) / qreal(pm.width())))) };
+    }
+
+    static QString messageDisplayText(const MessageRecord& msg)
+    {
+        if (!msg.content.trimmed().isEmpty())
+            return msg.content;
+        if (msg.contentImagePath.isEmpty())
+            return QStringLiteral("暂未识别到文本");
+        if (!QFile::exists(msg.contentImagePath))
+            return QStringLiteral("图片文件不存在");
+        QPixmap pm(msg.contentImagePath);
+        if (pm.isNull())
+            return QStringLiteral("图片加载失败");
+        return QStringLiteral("图片内容待识别");
+    }
+
+    static bool messageDisplayTextIsHint(const MessageRecord& msg)
+    {
+        return msg.content.trimmed().isEmpty();
+    }
+
+    static int textHeightForWidth(const QString& text, int width, const QFont& font)
+    {
+        QFontMetrics fm(font);
+        const QRect bounds = fm.boundingRect(QRect(0, 0, qMax(1, width), 10000),
+                                             Qt::TextWordWrap | Qt::TextExpandTabs,
+                                             text);
+        return qMax(fm.height(), bounds.height());
+    }
+
+    static int textNaturalWidth(const QString& text, int width, const QFont& font)
+    {
+        QFontMetrics fm(font);
+        const QRect bounds = fm.boundingRect(QRect(0, 0, qMax(1, width), 10000),
+                                             Qt::TextWordWrap | Qt::TextExpandTabs,
+                                             text);
+        return qBound(28, bounds.width() + 2, qMax(28, width));
+    }
+
+    static int messageBubbleWidth(const MessageRecord& msg, int bubbleMax, const QFont& bodyFont)
+    {
+        const int innerMax = qMax(1, bubbleMax - 24);
+        const QString displayText = messageDisplayText(msg);
+        const QSize imageSize = messageImageSize(msg, bubbleMax);
+        const int naturalTextW = textNaturalWidth(displayText, innerMax, bodyFont);
+        const int minBubbleW = messageDisplayTextIsHint(msg) ? 112 : 84;
+        return qMin(bubbleMax, qMax(minBubbleW, qMax(naturalTextW, imageSize.width()) + 24));
+    }
+
+    static int messageBubbleHeight(const MessageRecord& msg, int bubbleWidth,
+                                   const QFont& bodyFont, const QFont& statusFont)
+    {
+        const QString displayText = messageDisplayText(msg);
+        const QSize imageSize = messageImageSize(msg, bubbleWidth);
+        const int textH = textHeightForWidth(displayText, bubbleWidth - 24, bodyFont);
+        int h = 8;
+        if (imageSize.height() > 0)
+            h += imageSize.height() + 6;
+        h += textH;
+        if (msg.direction == QLatin1String("out"))
+            h += messageStatusBlockHeight(msg, statusFont);
+        h += 7;
+        return qMax(msg.direction == QLatin1String("out") ? 46 : 40, h);
+    }
+
+    static int messageStatusBlockHeight(const MessageRecord& msg, const QFont& statusFont)
+    {
+        if (msg.direction != QLatin1String("out"))
+            return 0;
+        const int lineH = QFontMetrics(statusFont).height();
+        return lineH + 5 + ((msg.syncStatus == 12 && !msg.errorReason.isEmpty()) ? lineH + 3 : 0);
+    }
+
+    void paintDateSeparator(QPainter* painter, const QStyleOptionViewItem& option, const QDate& date) const
+    {
+        const QString text = date == QDate::currentDate()
+                                 ? QStringLiteral("今天")
+                                 : date.toString(QStringLiteral("yyyy/MM/dd"));
+        QFontMetrics fm(option.font);
+        const QSize textSize(fm.horizontalAdvance(text) + 24, 28);
+        const QRect pill(QPoint(option.rect.center().x() - textSize.width() / 2,
+                                option.rect.center().y() - textSize.height() / 2),
+                         textSize);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(QStringLiteral("#E5E7EB")));
+        painter->drawRoundedRect(pill, 14, 14);
+        painter->setPen(QColor(QStringLiteral("#6B7280")));
+        painter->drawText(pill, Qt::AlignCenter, text);
+    }
+
+    void paintAvatar(QPainter* painter, const QRect& avatarRect, bool outgoing, const QFont& baseFont) const
+    {
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(QStringLiteral("#20B8E8")));
+        painter->drawEllipse(avatarRect);
+        const QPixmap& avatarPixmap = outgoing ? m_selfAvatarPixmap : m_customerAvatarPixmap;
+        if (!avatarPixmap.isNull())
+            painter->drawPixmap(avatarRect, avatarPixmap);
+        QFont avatarFont(baseFont);
+        avatarFont.setBold(true);
+        painter->setFont(avatarFont);
+        painter->setPen(Qt::white);
+        painter->drawText(avatarRect, Qt::AlignCenter, outgoing ? QStringLiteral("我") : QStringLiteral("客"));
+    }
+
+    void paintMeta(QPainter* painter, const QRect& metaRect, const MessageRecord& msg,
+                   bool outgoing, const QFont& metaFont) const
+    {
+        if (metaRect.height() <= 0)
+            return;
+
+        painter->setFont(metaFont);
+        const QFontMetrics fm(metaFont);
+        QString timeStr;
+        if (msg.createdAt.isValid())
+            timeStr = msg.createdAt.toString(QStringLiteral("HH:mm"));
+        else if (!msg.originalTimestamp.isEmpty())
+            timeStr = msg.originalTimestamp;
+
+        QString name = outgoing ? m_selfDisplayName.trimmed() : msg.senderName.trimmed();
+        if (name.isEmpty())
+            name = outgoing ? QStringLiteral("我") : QStringLiteral("客户");
+
+        painter->setPen(QColor(QStringLiteral("#6B7280")));
+        if (outgoing) {
+            const int nameW = qMin(160, fm.horizontalAdvance(name) + 4);
+            const int timeW = timeStr.isEmpty() ? 0 : qMin(92, fm.horizontalAdvance(timeStr) + 4);
+            if (!timeStr.isEmpty()) {
+                painter->drawText(QRect(metaRect.right() - nameW - timeW - 8, metaRect.top(),
+                                        timeW, metaRect.height()),
+                                  Qt::AlignRight | Qt::AlignVCenter, timeStr);
+            }
+            painter->drawText(QRect(metaRect.right() - nameW, metaRect.top(), nameW, metaRect.height()),
+                              Qt::AlignRight | Qt::AlignVCenter, name);
+            return;
+        }
+
+        QString meta = name;
+        if (!timeStr.isEmpty())
+            meta += QStringLiteral("  ") + timeStr;
+        painter->drawText(metaRect.adjusted(0, 0, 120, 0), Qt::AlignLeft | Qt::AlignVCenter, meta);
+    }
+
+    void paintMessageContent(QPainter* painter, const QRect& bubbleRect, int bubbleW,
+                             const MessageRecord& msg, bool outgoing,
+                             const QFont& bodyFont, const QFont& statusFont) const
+    {
+        int contentY = bubbleRect.top() + 8;
+        const QSize imageSize = messageImageSize(msg, bubbleW);
+        if (imageSize.height() > 0) {
+            QPixmap pm(msg.contentImagePath);
+            pm = pm.scaled(imageSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            painter->drawPixmap(QRect(bubbleRect.left() + 12, contentY, pm.width(), pm.height()), pm);
+            contentY += pm.height() + 6;
+        }
+
+        const int statusReserve = outgoing ? messageStatusBlockHeight(msg, statusFont) + 3 : 7;
+        const QRect textRect(bubbleRect.left() + 12, contentY,
+                             bubbleW - 24, qMax(1, bubbleRect.bottom() - contentY - statusReserve));
+        painter->setFont(bodyFont);
+        if (messageDisplayTextIsHint(msg))
+            painter->setPen(outgoing ? QColor(QStringLiteral("#E0F2FE")) : QColor(QStringLiteral("#9CA3AF")));
+        else
+            painter->setPen(outgoing ? QColor(QStringLiteral("#FFFFFF")) : QColor(QStringLiteral("#111827")));
+        painter->drawText(textRect,
+                          Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap | Qt::TextExpandTabs,
+                          messageDisplayText(msg));
+    }
+
+    void paintSendStatus(QPainter* painter, const QRect& bubbleRect, int bubbleW,
+                         const MessageRecord& msg, const QFont& statusFont) const
+    {
+        QString statusText;
+        QColor statusColor;
+
+        switch (msg.syncStatus) {
+        case 10:
+            statusText = QStringLiteral("发送中...");
+            statusColor = QColor(QStringLiteral("#FBBF24"));
+            break;
+        case 11:
+            statusText = QStringLiteral("已发送");
+            statusColor = QColor(QStringLiteral("#E0F2FE"));
+            break;
+        case 12:
+            statusText = QStringLiteral("发送失败");
+            statusColor = QColor(QStringLiteral("#FCA5A5"));
+            break;
+        default:
+            statusText = QStringLiteral("已发送");
+            statusColor = QColor(QStringLiteral("#E0F2FE"));
+            break;
+        }
+
+        painter->setFont(statusFont);
+        const int statusH = QFontMetrics(statusFont).height();
+        const int blockH = messageStatusBlockHeight(msg, statusFont);
+        painter->setPen(statusColor);
+        const int statusTop = bubbleRect.bottom() - blockH + 4;
+        painter->drawText(QRect(bubbleRect.left() + 12, statusTop, bubbleW - 24, statusH),
+                          Qt::AlignLeft | Qt::AlignVCenter, statusText);
+        if (msg.syncStatus == 12 && !msg.errorReason.isEmpty()) {
+            painter->setPen(QColor(QStringLiteral("#DC2626")));
+            painter->drawText(QRect(bubbleRect.left() + 12, statusTop + statusH + 2, bubbleW - 24, statusH),
+                              Qt::AlignLeft | Qt::AlignTop, msg.errorReason);
+        }
+    }
+
+    QString m_selfDisplayName;
+    QPixmap m_selfAvatarPixmap;
+    QPixmap m_customerAvatarPixmap;
+};
+
+class MessageListView final : public QListView
+{
+public:
+    using QListView::QListView;
+
+    void setBottomReserve(int px)
+    {
+        setViewportMargins(0, 0, 0, qMax(0, px));
     }
 };
 
@@ -276,6 +1032,8 @@ AggregateChatForm::AggregateChatForm(const QString& loginUsername, QWidget* pare
     : QWidget(parent)
     , m_loginUsername(loginUsername)
 {
+    m_conversationListModel = new ConversationListModel(this);
+    m_messageListModel = new MessageListModel(this);
     setupUI();
     m_conversationService = new ConversationAppService();
     m_aiChatService = new AiChatAppService(this);
@@ -283,6 +1041,7 @@ AggregateChatForm::AggregateChatForm(const QString& loginUsername, QWidget* pare
     loadSelfBubbleIdentity();
     connectSignals();
     refreshConversationList();
+    restoreLastSelectedConversation();
     QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
     if (m_modeCombo)
         m_lastAggregateModeIndex = m_modeCombo->currentIndex();
@@ -320,6 +1079,8 @@ void AggregateChatForm::loadSelfBubbleIdentity()
         pm = canvas;
     }
     m_selfAvatarPixmap = roundedAggregateAvatarPixmap(pm, kAvatarLogical, dpr, kAvatarLogical / 2);
+    if (auto* delegate = static_cast<ModernMessageItemDelegate*>(m_messageItemDelegate))
+        delegate->setSelfProfile(m_selfDisplayName, m_selfAvatarPixmap);
 
     {
         const QString customerRes = QStringLiteral(
@@ -344,6 +1105,8 @@ void AggregateChatForm::loadSelfBubbleIdentity()
         m_customerDefaultAvatarPixmap =
             roundedAggregateAvatarPixmap(customerPm, kAvatarLogical, dpr, kAvatarLogical / 2);
     }
+    if (auto* delegate = static_cast<ModernMessageItemDelegate*>(m_messageItemDelegate))
+        delegate->setCustomerAvatar(m_customerDefaultAvatarPixmap);
 }
 
 void AggregateChatForm::refreshLocalUserProfile()
@@ -469,9 +1232,9 @@ void AggregateChatForm::setupRightBarToggleButton()
     installRightBarToggleEventFilter(m_chatArea);
     installRightBarToggleEventFilter(m_chatHeader);
     installRightBarToggleEventFilter(m_chatInputOverlayHost);
-    installRightBarToggleEventFilter(m_messageScroll);
-    if (m_messageScroll)
-        installRightBarToggleEventFilter(m_messageScroll->viewport());
+    installRightBarToggleEventFilter(m_messageView);
+    if (m_messageView)
+        installRightBarToggleEventFilter(m_messageView->viewport());
     installRightBarToggleEventFilter(m_rightPanel);
     if (m_hSplitter) {
         connect(m_hSplitter, &QSplitter::splitterMoved, this, [this]() {
@@ -559,7 +1322,7 @@ void AggregateChatForm::updateRightBarToggleButtonVisibility(const QPoint& globa
 
 void AggregateChatForm::relayoutChatInputOverlay()
 {
-    if (!m_chatInputOverlayHost || !m_messageScroll || !m_chatInputPanel)
+    if (!m_chatInputOverlayHost || !m_messageView || !m_chatInputPanel)
         return;
     const int w = m_chatInputOverlayHost->width();
     const int h = m_chatInputOverlayHost->height();
@@ -571,7 +1334,7 @@ void AggregateChatForm::relayoutChatInputOverlay()
     int ih = m_chatInputPanel->sizeHint().height();
     ih = qBound(72, ih, qMax(72, h - 16));
 
-    m_messageScroll->setGeometry(0, 0, w, h);
+    m_messageView->setGeometry(0, 0, w, h);
     m_chatInputPanel->setGeometry(0, h - ih, w, ih);
     m_chatInputPanel->raise();
     updateMessageListBottomReserve(ih);
@@ -580,10 +1343,10 @@ void AggregateChatForm::relayoutChatInputOverlay()
 
 void AggregateChatForm::updateMessageListBottomReserve(int overlayBottomPx)
 {
-    if (!m_messageLayout)
+    if (!m_messageView)
         return;
     const int extra = qMax(0, overlayBottomPx);
-    m_messageLayout->setContentsMargins(16, 12, 16, 12 + extra);
+    static_cast<MessageListView*>(m_messageView)->setBottomReserve(extra);
 }
 
 void AggregateChatForm::connectSignals()
@@ -592,15 +1355,30 @@ void AggregateChatForm::connectSignals()
 
     connect(&mgr, &ConversationManager::conversationListChanged,
             this, &AggregateChatForm::onConversationListChanged);
-    connect(&mgr, &ConversationManager::newMessageReceived,
-            this, &AggregateChatForm::onNewMessage);
-    connect(&mgr, &ConversationManager::messageSentOk,
-            this, &AggregateChatForm::onSentOk);
+    connect(&mgr, &ConversationManager::unifiedMessageReceived,
+            this, &AggregateChatForm::onUnifiedMessageReceived);
+    connect(&mgr, &ConversationManager::unifiedConversationUpdated,
+            this, &AggregateChatForm::onUnifiedConversationUpdated);
     connect(&mgr, &ConversationManager::messageSendFailed,
             this, [this](int convId, const QString& reason) {
                 Q_UNUSED(convId)
                 showStatusMessage(QStringLiteral("发送失败: %1").arg(reason), 5000);
             });
+
+    connect(&mgr, &ConversationManager::messageStatusChanged,
+            this, &AggregateChatForm::onMessageStatusChanged);
+
+    auto& ipc = Ipc::IpcService::instance();
+    connect(&ipc, &Ipc::IpcService::aiSuggestionReceived,
+            this, &AggregateChatForm::onIpcAiSuggestionReceived);
+    connect(&ipc, &Ipc::IpcService::requestFailed,
+            this, &AggregateChatForm::onIpcRequestFailed);
+    connect(&ipc, &Ipc::IpcService::serviceStatusChanged, this, [this](bool available) {
+        if (available) {
+            ConversationManager::instance().reloadFromDatabase();
+            reloadFromDatabase();
+        }
+    });
 
     auto* shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     connect(shortcut, &QShortcut::activated, this, &AggregateChatForm::onSendClicked);
@@ -665,6 +1443,19 @@ QWidget* AggregateChatForm::buildLeftToolBar()
     connect(m_platformButtonGroup, &QButtonGroup::idClicked, this,
             &AggregateChatForm::onPlatformFilterButtonIdClicked);
     updatePlatformToolBarButtonIcons();
+
+    m_btnSimulateMessage = new QToolButton(bar);
+    m_btnSimulateMessage->setObjectName(QStringLiteral("aggregateToolBarButton"));
+    m_btnSimulateMessage->setText(QStringLiteral("测"));
+    m_btnSimulateMessage->setToolTip(QStringLiteral("模拟一条随机平台买家消息"));
+    m_btnSimulateMessage->setAccessibleName(QStringLiteral("模拟买家消息"));
+    m_btnSimulateMessage->setFixedSize(40, 40);
+    m_btnSimulateMessage->setAutoRaise(true);
+    m_btnSimulateMessage->setCursor(Qt::PointingHandCursor);
+    connect(m_btnSimulateMessage, &QToolButton::clicked,
+            this, &AggregateChatForm::onSimulateMessageClicked);
+    lay->addWidget(m_btnSimulateMessage, 0, Qt::AlignHCenter);
+
     lay->addStretch(1);
     return bar;
 }
@@ -694,6 +1485,24 @@ void AggregateChatForm::onPlatformFilterButtonIdClicked(int id)
     updatePlatformToolBarButtonIcons();
     updatePlatformSectionTitle();
     refreshConversationList();
+}
+
+void AggregateChatForm::onSimulateMessageClicked()
+{
+    auto* router = ConversationManager::instance().router();
+    if (!router) {
+        showStatusMessage(QStringLiteral("模拟失败：消息路由未初始化"), 4000);
+        return;
+    }
+
+    auto* adapter = qobject_cast<SimPlatformAdapter*>(router->adapter(QStringLiteral("simulator")));
+    if (!adapter) {
+        showStatusMessage(QStringLiteral("模拟失败：模拟平台未就绪"), 4000);
+        return;
+    }
+
+    adapter->simulateRandomPlatformIncomingMessage();
+    showStatusMessage(QStringLiteral("已模拟一条买家消息"), 2500);
 }
 
 void AggregateChatForm::updatePlatformSectionTitle()
@@ -817,13 +1626,19 @@ QWidget* AggregateChatForm::buildLeftPanel()
     // Conversation list
     m_leftStack = new QStackedWidget(panel);
     m_leftStack->setObjectName(QStringLiteral("aggregateLeftStack"));
-    m_conversationList = new QListWidget(panel);
+    m_conversationList = new QListView(panel);
     m_conversationList->setObjectName("aggregateConversationList");
     m_conversationList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_conversationList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_conversationList->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_conversationList->setUniformItemSizes(false);
+    m_conversationList->setMouseTracking(true);
     m_conversationList->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_conversationList, &QListWidget::itemClicked,
-            this, &AggregateChatForm::onConversationItemClicked);
-    connect(m_conversationList, &QListWidget::customContextMenuRequested,
+    m_conversationList->setModel(m_conversationListModel);
+    m_conversationList->setItemDelegate(new ConversationItemDelegate(m_conversationList));
+    connect(m_conversationList, &QListView::clicked,
+            this, &AggregateChatForm::onConversationIndexClicked);
+    connect(m_conversationList, &QListView::customContextMenuRequested,
             this, &AggregateChatForm::onConversationListContextMenu);
     m_leftStack->addWidget(m_conversationList);
 
@@ -899,20 +1714,25 @@ QWidget* AggregateChatForm::buildCenterPanel()
     chatLayout->addWidget(m_chatInputOverlayHost, 1);
 
     // Message scroll：与底部输入条叠放，输入条盖在消息区下缘
-    m_messageScroll = new QScrollArea(m_chatInputOverlayHost);
-    m_messageScroll->setObjectName("messageScroll");
-    m_messageScroll->setFrameShape(QFrame::NoFrame);
-    m_messageScroll->setWidgetResizable(true);
-    m_messageScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_messageContainer = new QWidget();
-    m_messageLayout = new QVBoxLayout(m_messageContainer);
-    m_messageLayout->setContentsMargins(16, 12, 16, 12);
-    m_messageLayout->setSpacing(8);
-    m_messageLayout->addStretch(1);
-    m_messageScroll->setWidget(m_messageContainer);
-    if (QWidget* vp = m_messageScroll->viewport())
+    m_messageView = new MessageListView(m_chatInputOverlayHost);
+    m_messageView->setObjectName("messageScroll");
+    m_messageView->setFrameShape(QFrame::NoFrame);
+    m_messageView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_messageView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_messageView->setSelectionMode(QAbstractItemView::NoSelection);
+    m_messageView->setFocusPolicy(Qt::NoFocus);
+    m_messageView->setUniformItemSizes(false);
+    m_messageView->setMouseTracking(true);
+    m_messageView->setModel(m_messageListModel);
+    m_messageItemDelegate = new ModernMessageItemDelegate(m_messageView);
+    if (auto* delegate = static_cast<ModernMessageItemDelegate*>(m_messageItemDelegate)) {
+        delegate->setSelfProfile(m_selfDisplayName, m_selfAvatarPixmap);
+        delegate->setCustomerAvatar(m_customerDefaultAvatarPixmap);
+    }
+    m_messageView->setItemDelegate(m_messageItemDelegate);
+    if (QWidget* vp = m_messageView->viewport())
         vp->setObjectName(QStringLiteral("messageScrollViewport"));
-    if (QWidget* vp = m_messageScroll->viewport())
+    if (QWidget* vp = m_messageView->viewport())
         vp->setAutoFillBackground(false);
 
     m_chatInputPanel = new QWidget(m_chatInputOverlayHost);
@@ -958,45 +1778,52 @@ QWidget* AggregateChatForm::buildCenterPanel()
             &AggregateChatForm::onAggregateAiModelMenuTriggered);
     refreshAggregateAiModelButtonUi();
 
-    auto* modelRow = new QHBoxLayout();
-    modelRow->setContentsMargins(0, 0, 0, 0);
-    modelRow->addWidget(m_btnAiModelPick);
-    modelRow->addStretch(1);
-    inputLayout->addLayout(modelRow);
-
     m_inputEdit = new QPlainTextEdit(inputInner);
     m_inputEdit->setObjectName("messageInput");
-    m_inputEdit->setPlaceholderText(QStringLiteral("输入消息，Ctrl+Enter 发送"));
+    m_inputEdit->setPlaceholderText(QString());
+    m_inputEdit->setToolTip(QStringLiteral("输入消息，Ctrl+Enter 发送"));
     m_inputEdit->setMaximumHeight(100);
     inputLayout->addWidget(m_inputEdit);
 
+    m_draftSaveTimer = new QTimer(this);
+    m_draftSaveTimer->setSingleShot(true);
+    m_draftSaveTimer->setInterval(600);
+    connect(m_draftSaveTimer, &QTimer::timeout, this, &AggregateChatForm::persistCurrentDraft);
+
     auto* btnRow = new QHBoxLayout();
+    btnRow->setContentsMargins(0, 0, 0, 0);
+    btnRow->setSpacing(8);
+    btnRow->addWidget(m_btnAiModelPick, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_statusLabel = new QLabel(inputInner);
+    m_statusLabel->setObjectName(QStringLiteral("aggregateInlineStatus"));
+    m_statusLabel->setWordWrap(false);
+    m_statusLabel->setMaximumWidth(320);
+    m_statusLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_statusLabel->setVisible(false);
+    btnRow->addWidget(m_statusLabel, 0, Qt::AlignLeft | Qt::AlignVCenter);
     btnRow->addStretch(1);
     m_btnAiGenerate = new QPushButton(QStringLiteral("生成本条回复"), inputInner);
     m_btnAiGenerate->setObjectName(QStringLiteral("simulateButton"));
     m_btnAiGenerate->setCursor(Qt::PointingHandCursor);
+    m_btnAiGenerate->setFixedSize(120, 36);
     m_btnAiGenerate->setVisible(false);
     connect(m_btnAiGenerate, &QPushButton::clicked, this, &AggregateChatForm::onGenerateAiDraftClicked);
     m_btnSend = new QPushButton(QStringLiteral("发送"), inputInner);
     m_btnSend->setObjectName("sendButton");
     m_btnSend->setCursor(Qt::PointingHandCursor);
-    m_btnSend->setFixedWidth(80);
+    m_btnSend->setFixedSize(80, 36);
     connect(m_btnSend, &QPushButton::clicked, this, &AggregateChatForm::onSendClicked);
     btnRow->addWidget(m_btnAiGenerate);
     btnRow->addWidget(m_btnSend);
     inputLayout->addLayout(btnRow);
-
-    m_statusLabel = new QLabel(inputInner);
-    m_statusLabel->setObjectName(QStringLiteral("aggregateInlineStatus"));
-    m_statusLabel->setWordWrap(true);
-    m_statusLabel->setVisible(false);
-    inputLayout->addWidget(m_statusLabel);
 
     inputOuter->addWidget(inputInner, 0);
 
     m_chatInputOverlayHost->installEventFilter(this);
     connect(m_inputEdit->document(), &QTextDocument::contentsChanged, this, [this]() {
         QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
+        if (!m_restoringDraft && m_currentConvId > 0 && m_draftSaveTimer)
+            m_draftSaveTimer->start();
     });
 
     m_centerStack->addWidget(m_chatArea);
@@ -1342,84 +2169,11 @@ QWidget* AggregateChatForm::buildRightPanel()
     return panel;
 }
 
-// ===================== Conversation Item =====================
-
-QWidget* AggregateChatForm::createConversationItem(const ConversationInfo& conv)
-{
-    auto* widget = new QWidget();
-    widget->setObjectName("convItemWidget");
-    widget->setProperty("selected", false);
-    auto* layout = new QHBoxLayout(widget);
-    layout->setContentsMargins(8, 8, 8, 8);
-    layout->setSpacing(10);
-
-    // Platform dot
-    auto* dot = new QLabel(widget);
-    dot->setObjectName("convItemDot");
-    dot->setFixedSize(10, 10);
-    QString dotColor = (conv.platform == QLatin1String("simulator"))
-                           ? "#5aaf68" : "#7eb8e8";
-    dot->setStyleSheet(QString("background: %1; border-radius: 5px;").arg(dotColor));
-    layout->addWidget(dot, 0, Qt::AlignTop | Qt::AlignLeft);
-
-    // Text info
-    auto* textCol = new QVBoxLayout();
-    textCol->setSpacing(3);
-
-    auto* nameRow = new QHBoxLayout();
-    auto* nameLabel = new QLabel(conv.customerName, widget);
-    nameLabel->setObjectName("convItemName");
-    nameRow->addWidget(nameLabel);
-    nameRow->addStretch(1);
-
-    QString timeStr;
-    if (conv.lastTime.isValid()) {
-        if (conv.lastTime.date() == QDate::currentDate())
-            timeStr = conv.lastTime.toString("HH:mm");
-        else
-            timeStr = conv.lastTime.toString("MM-dd HH:mm");
-    }
-    auto* timeLabel = new QLabel(timeStr, widget);
-    timeLabel->setObjectName("convItemTime");
-    nameRow->addWidget(timeLabel);
-    textCol->addLayout(nameRow);
-
-    auto* msgRow = new QHBoxLayout();
-    auto* msgLabel = new QLabel(conv.lastMessage.left(30), widget);
-    msgLabel->setObjectName("convItemPreview");
-    msgLabel->setMaximumWidth(180);
-    msgRow->addWidget(msgLabel);
-    msgRow->addStretch(1);
-
-    if (conv.unreadCount > 0) {
-        auto* badge = new QLabel(QString::number(conv.unreadCount), widget);
-        badge->setObjectName("unreadBadge");
-        badge->setAlignment(Qt::AlignCenter);
-        badge->setFixedSize(20, 20);
-        msgRow->addWidget(badge);
-    }
-    textCol->addLayout(msgRow);
-
-    layout->addLayout(textCol, 1);
-    widget->setFocusPolicy(Qt::NoFocus);
-    return widget;
-}
-
 void AggregateChatForm::syncConversationItemVisualState()
 {
     if (!m_conversationList)
         return;
-    for (int i = 0; i < m_conversationList->count(); ++i) {
-        QListWidgetItem* item = m_conversationList->item(i);
-        QWidget* widget = item ? m_conversationList->itemWidget(item) : nullptr;
-        if (!widget)
-            continue;
-        const bool selected = item->isSelected();
-        widget->setProperty("selected", selected);
-        widget->style()->unpolish(widget);
-        widget->style()->polish(widget);
-        widget->update();
-    }
+    m_conversationList->viewport()->update();
 }
 
 void AggregateChatForm::syncSolidBackgrounds()
@@ -1443,9 +2197,10 @@ void AggregateChatForm::syncSolidBackgrounds()
     applySolidBackground(m_chatArea, centerBg);
     applySolidBackground(m_chatInputOverlayHost, centerBg);
     applySolidBackground(m_chatInputPanel, inputBg);
-    applySolidBackground(m_messageContainer, centerBg);
-    if (m_messageScroll)
-        applySolidBackground(m_messageScroll->viewport(), centerBg);
+    if (m_messageView) {
+        applySolidBackground(m_messageView, centerBg);
+        applySolidBackground(m_messageView->viewport(), centerBg);
+    }
     if (m_conversationList) {
         applySolidBackground(m_conversationList, leftBg);
         applySolidBackground(m_conversationList->viewport(), leftBg);
@@ -1600,6 +2355,27 @@ void AggregateChatForm::onModelPickerListItem(QListWidgetItem* item)
     m_rightBarDisplayModelIndex = row;
     refreshRightBarModelDisplay();
     closeModelPickerSheet();
+}
+
+void AggregateChatForm::onMessageStatusChanged(int conversationId, int messageId,
+                                               Models::MessageStatus newStatus,
+                                               const QString& errorReason)
+{
+    if (conversationId != m_currentConvId)
+        return;
+
+    if (!m_messageListModel)
+        return;
+
+    if (m_messageListModel->updateMessageStatus(messageId, newStatus, errorReason)) {
+        m_currentMessageSignature = m_messageListModel->signature();
+        qDebug() << "[AggregateChatForm] 消息状态已更新 msgId=" << messageId
+                 << "status=" << Models::toString(newStatus);
+
+        if (newStatus == Models::MessageStatus::Failed && !errorReason.isEmpty()) {
+            showStatusMessage(QStringLiteral("发送失败: %1").arg(errorReason), 5000);
+        }
+    }
 }
 
 // ===================== Message Bubble =====================
@@ -1803,8 +2579,100 @@ QWidget* AggregateChatForm::createDateSeparator(const QDate& date)
 
 // ===================== Data Operations =====================
 
+void AggregateChatForm::persistCurrentDraft()
+{
+    if (m_currentConvId <= 0 || !m_inputEdit)
+        return;
+
+    ConversationDao dao;
+    dao.saveDraft(m_currentConvId, m_inputEdit->toPlainText());
+}
+
+void AggregateChatForm::restoreDraftForConversation(int conversationId)
+{
+    if (!m_inputEdit)
+        return;
+
+    ConversationDao dao;
+    const QString draft = conversationId > 0 ? dao.draftForConversation(conversationId) : QString();
+    m_restoringDraft = true;
+    {
+        const QSignalBlocker blocker(m_inputEdit->document());
+        m_inputEdit->setPlainText(draft);
+    }
+    m_restoringDraft = false;
+    QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
+}
+
+void AggregateChatForm::restoreLastSelectedConversation()
+{
+    if (!m_conversationListModel || m_conversationListModel->rowCount() <= 0)
+        return;
+
+    ConversationDao dao;
+    int conversationId = dao.lastSelectedConversationId();
+    if (conversationId <= 0 || !m_conversationListModel->containsConversation(conversationId))
+        conversationId = m_conversationListModel->conversationIdAt(0);
+
+    if (conversationId > 0)
+        showConversation(conversationId);
+}
+
 void AggregateChatForm::refreshConversationList()
 {
+    if (!m_conversationListModel)
+        m_conversationListModel = new ConversationListModel(this);
+
+    auto& mgr = ConversationManager::instance();
+    MessageDao msgDao;
+    const QString keyword = m_searchEdit ? m_searchEdit->text().trimmed() : QString();
+    m_conversationListModel->setFilters(static_cast<int>(m_currentTab),
+                                        static_cast<int>(m_platformFilter),
+                                        keyword,
+                                        m_pendingStickyConvId);
+    m_conversationListModel->setSourceConversations(mgr.allConversations(),
+                                                    msgDao.lastDirectionsByConversation());
+    renderConversationListFromModel();
+    return;
+}
+
+void AggregateChatForm::reloadFromDatabase()
+{
+    refreshConversationList();
+
+    if (m_currentConvId > 0
+        && m_conversationListModel
+        && m_conversationListModel->containsConversation(m_currentConvId)) {
+        const auto messages = ConversationManager::instance().messages(m_currentConvId);
+        if (!m_messageListModel)
+            m_messageListModel = new MessageListModel(this);
+        m_messageListModel->setConversationMessages(m_currentConvId, messages);
+        renderConversationMessagesFromModel();
+        m_currentMessageSignature = m_messageListModel->signature();
+
+        const auto conv = m_conversationService
+                              ? m_conversationService->conversationById(m_currentConvId)
+                              : std::optional<ConversationInfo>();
+        if (conv) {
+            if (m_chatHeader)
+                m_chatHeader->setText(QStringLiteral("%1 (%2)").arg(conv->customerName, conv->platform));
+            updateCustomerInfo(*conv);
+        }
+        scheduleScrollChatToBottom();
+        qInfo() << "[AggregateChatForm] reloaded current conversation from database:"
+                << m_currentConvId << "messages=" << messages.size();
+        return;
+    }
+
+    restoreLastSelectedConversation();
+    if (m_currentConvId <= 0) {
+        showCenterEmptyState();
+        showRightEmptyState();
+    }
+    qInfo() << "[AggregateChatForm] reloaded conversation cache from database";
+}
+
+#if 0
     auto& mgr = ConversationManager::instance();
     const auto convs = mgr.allConversations();
     MessageDao msgDao;
@@ -1905,12 +2773,46 @@ void AggregateChatForm::refreshConversationList()
     }
     syncConversationItemVisualState();
 }
+#endif
+
+void AggregateChatForm::renderConversationListFromModel()
+{
+    if (!m_conversationList || !m_leftStack || !m_conversationListModel)
+        return;
+
+    const int count = m_conversationListModel->rowCount();
+    m_leftStack->setCurrentIndex(count > 0 ? 0 : 1);
+
+    if (m_currentConvId > 0 && !m_conversationListModel->containsConversation(m_currentConvId)) {
+        const int lost = m_currentConvId;
+        persistCurrentDraft();
+        m_currentConvId = -1;
+        if (m_pendingStickyConvId == lost)
+            m_pendingStickyConvId = -1;
+        ConversationManager::instance().selectConversation(-1);
+        abortAggregateAiRequest();
+        showCenterEmptyState();
+        showRightEmptyState();
+    }
+
+    m_conversationListModel->setSelectedConversationId(m_currentConvId);
+    if (m_currentConvId > 0 && count > 0) {
+        const QModelIndex idx = m_conversationListModel->indexForConversationId(m_currentConvId);
+        if (idx.isValid()) {
+            m_conversationList->setCurrentIndex(idx);
+            m_conversationList->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+        }
+    }
+    syncConversationItemVisualState();
+}
 
 void AggregateChatForm::showConversation(int conversationId)
 {
     abortAggregateAiRequest();
 
     const int prevId = m_currentConvId;
+    if (prevId > 0 && prevId != conversationId)
+        persistCurrentDraft();
     if (prevId > 0 && prevId != conversationId && m_pendingStickyConvId == prevId)
         m_pendingStickyConvId = -1;
 
@@ -1919,8 +2821,11 @@ void AggregateChatForm::showConversation(int conversationId)
     mgr.selectConversation(conversationId);
 
     auto messages = mgr.messages(conversationId);
-    renderConversationMessages(messages);
-    m_currentMessageSignature = buildMessageSignature(messages);
+    if (!m_messageListModel)
+        m_messageListModel = new MessageListModel(this);
+    m_messageListModel->setConversationMessages(conversationId, messages);
+    renderConversationMessagesFromModel();
+    m_currentMessageSignature = m_messageListModel->signature();
 
     // Update header
     const auto conv = m_conversationService
@@ -1933,6 +2838,7 @@ void AggregateChatForm::showConversation(int conversationId)
     }
 
     m_centerStack->setCurrentWidget(m_chatArea);
+    restoreDraftForConversation(conversationId);
     m_inputEdit->setFocus();
 
     scheduleScrollChatToBottom();
@@ -1943,31 +2849,26 @@ void AggregateChatForm::showConversation(int conversationId)
 
 void AggregateChatForm::renderConversationMessages(const QVector<MessageRecord>& messages)
 {
-    while (m_messageLayout->count() > 1) {
-        auto* item = m_messageLayout->takeAt(0);
-        if (item->widget()) {
-            item->widget()->deleteLater();
-        }
-        delete item;
-    }
+    if (!m_messageListModel)
+        return;
+    m_messageListModel->setConversationMessages(m_currentConvId, messages);
+}
 
-    m_lastBubbleDate = QDate();
-    for (const auto& msg : messages)
-        appendMessageBubble(msg);
+void AggregateChatForm::renderConversationMessagesFromModel()
+{
+    if (!m_messageView || !m_messageListModel)
+        return;
+    m_messageView->setModel(m_messageListModel);
+    m_messageView->viewport()->update();
 }
 
 void AggregateChatForm::appendMessageBubble(const MessageRecord& msg)
 {
-    QDate msgDate = msg.createdAt.isValid() ? msg.createdAt.date() : QDate::currentDate();
-    if (!m_lastBubbleDate.isValid() || msgDate != m_lastBubbleDate) {
-        int sepIdx = m_messageLayout->count() - 1;
-        m_messageLayout->insertWidget(sepIdx, createDateSeparator(msgDate));
-        m_lastBubbleDate = msgDate;
-    }
-
-    auto* bubble = createBubble(msg);
-    int idx = m_messageLayout->count() - 1;
-    m_messageLayout->insertWidget(idx, bubble);
+    if (m_messageListModel)
+        m_messageListModel->appendMessage(msg);
+    renderConversationMessagesFromModel();
+    if (m_messageListModel)
+        m_currentMessageSignature = m_messageListModel->signature();
 }
 
 QString AggregateChatForm::buildMessageSignature(const QVector<MessageRecord>& messages) const
@@ -1985,7 +2886,7 @@ QString AggregateChatForm::buildMessageSignature(const QVector<MessageRecord>& m
 
 void AggregateChatForm::refreshVisibleConversationMessages()
 {
-    if (m_currentConvId <= 0 || !m_messageLayout || !m_messageScroll)
+    if (m_currentConvId <= 0 || !m_messageView)
         return;
 
     auto messages = ConversationManager::instance().messages(m_currentConvId);
@@ -1993,26 +2894,29 @@ void AggregateChatForm::refreshVisibleConversationMessages()
     if (newSignature == m_currentMessageSignature)
         return;
 
-    auto* sb = m_messageScroll->verticalScrollBar();
+    auto* sb = m_messageView->verticalScrollBar();
     const bool wasNearBottom = !sb || sb->value() >= sb->maximum() - 24;
-    renderConversationMessages(messages);
-    m_currentMessageSignature = newSignature;
+    m_messageListModel->setConversationMessages(m_currentConvId, messages);
+    renderConversationMessagesFromModel();
+    m_currentMessageSignature = m_messageListModel->signature();
     if (wasNearBottom)
         scheduleScrollChatToBottom();
 }
 
 void AggregateChatForm::scrollToBottom()
 {
-    auto* sb = m_messageScroll->verticalScrollBar();
+    if (!m_messageView)
+        return;
+    auto* sb = m_messageView->verticalScrollBar();
     sb->setValue(sb->maximum());
 }
 
 void AggregateChatForm::scheduleScrollChatToBottom()
 {
     QTimer::singleShot(100, this, [this]() {
-        if (!m_messageScroll || !m_messageContainer)
+        if (!m_messageView)
             return;
-        m_messageContainer->updateGeometry();
+        m_messageView->viewport()->update();
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         scrollToBottom();
         // QScrollArea 内容高度偶发晚一帧才更新，再拉一次
@@ -2077,6 +2981,8 @@ void AggregateChatForm::showRightEmptyState()
 
 void AggregateChatForm::setConversationTab(AggregateConversationTab tab)
 {
+    if (m_currentTab != tab && m_pendingStickyConvId > 0)
+        m_pendingStickyConvId = -1;
     m_currentTab = tab;
     if (m_btnAll)
         m_btnAll->setChecked(tab == AggregateConversationTab::All);
@@ -2111,14 +3017,27 @@ void AggregateChatForm::onConversationItemClicked(QListWidgetItem* item)
     refreshConversationList();
 }
 
+void AggregateChatForm::onConversationIndexClicked(const QModelIndex& index)
+{
+    if (!index.isValid() || !m_conversationListModel)
+        return;
+    const int convId = m_conversationListModel->data(index, ConversationListModel::ConversationIdRole).toInt();
+    if (convId <= 0)
+        return;
+    showConversation(convId);
+    refreshConversationList();
+}
+
 void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
 {
     if (!m_conversationList)
         return;
-    QListWidgetItem* item = m_conversationList->itemAt(pos);
-    if (!item)
+    const QModelIndex index = m_conversationList->indexAt(pos);
+    if (!index.isValid())
         return;
-    const int convId = item->data(Qt::UserRole).toInt();
+    const int convId = m_conversationListModel
+                            ? m_conversationListModel->data(index, ConversationListModel::ConversationIdRole).toInt()
+                            : 0;
     if (convId <= 0)
         return;
 
@@ -2207,7 +3126,10 @@ void AggregateChatForm::onSendClicked()
     QString text = m_inputEdit->toPlainText().trimmed();
     if (text.isEmpty()) return;
 
+    // 发送后先留在「待处理」，直到客服切换会话或主动切换 tab。
+    m_pendingStickyConvId = m_currentConvId;
     m_inputEdit->clear();
+    ConversationDao().clearDraft(m_currentConvId);
     ConversationManager::instance().sendMessage(m_currentConvId, text);
 }
 
@@ -2234,11 +3156,33 @@ void AggregateChatForm::onConversationListChanged()
     refreshConversationList();
 }
 
+void AggregateChatForm::onUnifiedMessageReceived(int conversationId, const Models::Message& message)
+{
+    const MessageRecord record = messageRecordFromUnified(message);
+    if (message.direction == Models::MessageDirection::Outbound)
+        onSentOk(conversationId, record);
+    else
+        onNewMessage(conversationId, record);
+}
+
+void AggregateChatForm::onUnifiedConversationUpdated(const Models::Conversation& conversation)
+{
+    if (conversation.id == m_currentConvId) {
+        const ConversationInfo info = conversationInfoFromUnified(conversation);
+        updateCustomerInfo(info);
+        if (m_chatHeader)
+            m_chatHeader->setText(QStringLiteral("%1 (%2)").arg(info.customerName, info.platform));
+    }
+    refreshConversationList();
+}
+
 void AggregateChatForm::onNewMessage(int conversationId, const MessageRecord& msg)
 {
     if (msg.direction == QLatin1String("in") && m_pendingStickyConvId == conversationId)
         m_pendingStickyConvId = -1;
-    if (conversationId == m_currentConvId) {
+    if (m_currentConvId <= 0) {
+        showConversation(conversationId);
+    } else if (conversationId == m_currentConvId) {
         appendMessageBubble(msg);
         scheduleScrollChatToBottom();
     }
@@ -2307,6 +3251,10 @@ void AggregateChatForm::setAggregateAiBusy(bool busy)
 
 void AggregateChatForm::abortAggregateAiRequest()
 {
+    if (!m_aggregateAiIpcRequestId.isEmpty()) {
+        Ipc::IpcService::instance().cancelRequest(m_aggregateAiIpcRequestId);
+        m_aggregateAiIpcRequestId.clear();
+    }
     clearStreamingSession(m_aggregateAiSession);
     clearStreamingSession(m_autoReplySession);
     if (m_aggregateAiGenerating)
@@ -2386,25 +3334,99 @@ void AggregateChatForm::onAggregateAiModelMenuTriggered(QAction* action)
 
 void AggregateChatForm::onGenerateAiDraftClicked()
 {
-    if (m_currentConvId <= 0 || m_aggregateAiGenerating || !m_aiChatService)
+    if (m_currentConvId <= 0 || m_aggregateAiGenerating)
         return;
 
-    QString skip;
-    AggregateAiBuiltRequest built =
-        m_aiChatService->buildAggregateReplyRequest(m_currentConvId, m_aggregateAiSessionModelKey);
-    if (!handleAggregateBuildFailure(this, built, false, &skip))
+    auto messages = ConversationManager::instance().messages(m_currentConvId);
+    if (messages.isEmpty()) {
+        showStatusMessage(QStringLiteral("当前会话没有可用于 AI 建议的消息"), 4000);
         return;
+    }
 
     m_aggregateAiBaseline = m_inputEdit ? m_inputEdit->toPlainText() : QString();
     m_aggregateAiAccumulated.clear();
+
+    Ipc::AiSuggestionRequest request;
+    request.conversationId = m_currentConvId;
+    request.maxSuggestions = 3;
+    request.metadata.insert(QStringLiteral("session_model_key"), m_aggregateAiSessionModelKey);
+
+    if (m_conversationService) {
+        const auto conv = m_conversationService->conversationById(m_currentConvId);
+        if (conv) {
+            request.platformType = conv->platform;
+            request.customerContext = conv->customerName;
+        }
+    }
+    if (request.platformType.isEmpty())
+        request.platformType = QStringLiteral("unknown");
+
+    const int start = qMax(0, messages.size() - 8);
+    for (int i = start; i < messages.size(); ++i) {
+        const MessageRecord& msg = messages.at(i);
+        if (msg.content.trimmed().isEmpty())
+            continue;
+
+        QString role = QStringLiteral("user");
+        if (msg.direction == QLatin1String("out"))
+            role = QStringLiteral("assistant");
+        else if (msg.direction == QLatin1String("system"))
+            role = QStringLiteral("system");
+        request.recentMessages.append(QPair<QString, QString>(role, msg.content));
+    }
+
+    if (request.recentMessages.isEmpty()) {
+        showStatusMessage(QStringLiteral("当前会话没有可用于 AI 建议的文本消息"), 4000);
+        return;
+    }
+
+    QString error;
+    if (!Ipc::IpcService::instance().connectToConfiguredService(&error)) {
+        showStatusMessage(QStringLiteral("AI 服务不可用：%1").arg(error), 6000);
+        return;
+    }
+
     setAggregateAiBusy(true);
-    built.request.extraRootFields.insert(QStringLiteral("max_tokens"), 512);
-    clearStreamingSession(m_aggregateAiSession);
-    m_aggregateAiSession = m_aiChatService->createSession(built.config, built.request, this);
-    connect(m_aggregateAiSession, &IAiStreamingSession::delta, this, &AggregateChatForm::onAggregateAiStreamDelta);
-    connect(m_aggregateAiSession, &IAiStreamingSession::completed, this, &AggregateChatForm::onAggregateAiCompleted);
-    connect(m_aggregateAiSession, &IAiStreamingSession::failed, this, &AggregateChatForm::onAggregateAiFailed);
-    m_aggregateAiSession->start();
+    m_aggregateAiIpcRequestId = Ipc::IpcService::instance().requestAiSuggestion(request);
+}
+
+void AggregateChatForm::onIpcAiSuggestionReceived(const Ipc::AiSuggestionResponse& response)
+{
+    if (response.requestId != m_aggregateAiIpcRequestId)
+        return;
+
+    m_aggregateAiIpcRequestId.clear();
+    setAggregateAiBusy(false);
+
+    if (response.status != Ipc::ResponseStatus::Success) {
+        showStatusMessage(QStringLiteral("AI 建议失败：%1").arg(response.errorMessage.left(120)), 6000);
+        return;
+    }
+    if (response.suggestions.isEmpty()) {
+        showStatusMessage(QStringLiteral("AI 未返回可用建议"), 5000);
+        return;
+    }
+
+    const QString suggestion = response.suggestions.first().trimmed();
+    if (suggestion.isEmpty()) {
+        showStatusMessage(QStringLiteral("AI 返回了空建议"), 5000);
+        return;
+    }
+
+    if (m_inputEdit)
+        m_inputEdit->setPlainText(m_aggregateAiBaseline + suggestion);
+    persistCurrentDraft();
+    showStatusMessage(QStringLiteral("AI 草稿已生成，可直接发送或继续修改"), 4000);
+}
+
+void AggregateChatForm::onIpcRequestFailed(const QString& requestId, const QString& reason)
+{
+    if (requestId != m_aggregateAiIpcRequestId)
+        return;
+
+    m_aggregateAiIpcRequestId.clear();
+    setAggregateAiBusy(false);
+    showStatusMessage(QStringLiteral("AI 建议失败：%1").arg(reason.left(120)), 6000);
 }
 
 void AggregateChatForm::tryAggregateAutoReply(int conversationId, const QString& triggerTag)

@@ -1,5 +1,6 @@
 #include "messagedao.h"
 #include "database.h"
+#include "wechatmessagedao.h"
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -32,6 +33,15 @@ static MessageRecord messageRecordFromQuery(QSqlQuery& q)
     m.errorReason = q.value(QStringLiteral("error_reason")).toString();
     m.originalTimestamp = q.value(QStringLiteral("original_timestamp")).toString();
     m.contentImagePath = q.value(QStringLiteral("content_image_path")).toString();
+    m.clientMessageId = q.value(QStringLiteral("client_message_id")).toString();
+    m.sourceType = q.value(QStringLiteral("source_type")).toString();
+    m.confidence = q.value(QStringLiteral("confidence")).isNull()
+        ? Models::defaultConfidence(Models::sourceTypeFromString(m.sourceType))
+        : q.value(QStringLiteral("confidence")).toInt();
+    m.verificationStatus = q.value(QStringLiteral("verification_status")).toString();
+    m.contentType = q.value(QStringLiteral("content_type")).toString();
+    m.observedAt = messageRowCreatedAtToLocal(q.value(QStringLiteral("observed_at")));
+    m.status = Models::toString(Models::messageStatusFromLegacySyncStatus(m.syncStatus));
     return m;
 }
 
@@ -42,21 +52,80 @@ int MessageDao::create(int conversationId, const QString& direction,
                        const QString& errorReason,
                        const QString& senderName,
                        const QString& originalTimestamp,
-                       const QString& contentImagePath)
+                       const QString& contentImagePath,
+                       const QString& clientMessageId)
+{
+    Models::Message message;
+    message.conversationId = conversationId;
+    message.direction = Models::messageDirectionFromLegacy(direction, sender);
+    message.contentType = contentImagePath.isEmpty()
+        ? Models::MessageContentType::Text
+        : Models::MessageContentType::Image;
+    message.content = content;
+    message.status = Models::messageStatusFromLegacySyncStatus(syncStatus);
+    message.platformMessageId = platformMsgId;
+    message.sourceType = Models::SourceType::Mock;
+    message.confidence = Models::defaultConfidence(message.sourceType);
+    message.verificationStatus = Models::VerificationStatus::Unverified;
+    message.observedAt = QDateTime::currentDateTime();
+    message.evidenceRef = contentImagePath;
+    message.metadata.insert(QStringLiteral("client_message_id"), clientMessageId);
+    message.clientMessageId = clientMessageId;
+
+    const int id = create(message);
+    if (id <= 0)
+        return id;
+
+    if (!errorReason.isEmpty() || !senderName.isEmpty() || !originalTimestamp.isEmpty() || !clientMessageId.isEmpty()) {
+        QSqlQuery q(Database::getInstance().connection());
+        q.prepare(QStringLiteral(
+            "UPDATE messages SET error_reason = :reason, sender_name = :sname, "
+            "original_timestamp = :ots, client_message_id = :cmid WHERE id = :id"));
+        q.bindValue(QStringLiteral(":reason"), errorReason);
+        q.bindValue(QStringLiteral(":sname"), senderName);
+        q.bindValue(QStringLiteral(":ots"), originalTimestamp);
+        q.bindValue(QStringLiteral(":cmid"), clientMessageId);
+        q.bindValue(QStringLiteral(":id"), id);
+        if (!q.exec())
+            qWarning() << "MessageDao::create legacy metadata update 失败:" << q.lastError().text();
+    }
+    return id;
+}
+
+int MessageDao::create(const Models::Message& message)
 {
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare("INSERT INTO messages (conversation_id, direction, content, sender, sender_name, platform_msg_id, sync_status, error_reason, original_timestamp, content_image_path) "
-              "VALUES (:cid, :dir, :content, :sender, :sname, :pmid, :status, :reason, :ots, :cimg)");
-    q.bindValue(":cid", conversationId);
-    q.bindValue(":dir", direction);
-    q.bindValue(":content", content);
-    q.bindValue(":sender", sender);
-    q.bindValue(":sname", senderName);
-    q.bindValue(":pmid", platformMsgId.isEmpty() ? QVariant() : platformMsgId);
-    q.bindValue(":status", syncStatus);
-    q.bindValue(":reason", errorReason);
-    q.bindValue(":ots", originalTimestamp);
-    q.bindValue(":cimg", contentImagePath.isEmpty() ? QVariant() : contentImagePath);
+    q.prepare("INSERT INTO messages (conversation_id, direction, content, sender, sender_name, "
+              "platform_msg_id, sync_status, error_reason, original_timestamp, content_image_path, "
+              "source_type, confidence, verification_status, content_type, observed_at, client_message_id) "
+              "VALUES (:cid, :dir, :content, :sender, :sname, :pmid, :status, :reason, :ots, :cimg, "
+              ":source, :confidence, :verification, :ctype, :observed, :cmid)");
+    const QString legacyDirection = Models::legacyDirectionFromMessageDirection(message.direction);
+    q.bindValue(":cid", message.conversationId);
+    q.bindValue(":dir", legacyDirection);
+    q.bindValue(":content", message.content);
+    q.bindValue(":sender", message.direction == Models::MessageDirection::Outbound
+                    ? QStringLiteral("agent")
+                    : (message.direction == Models::MessageDirection::System
+                           ? QStringLiteral("system")
+                           : QStringLiteral("customer")));
+    q.bindValue(":sname", message.metadata.value(QStringLiteral("senderName")).toString());
+    q.bindValue(":pmid", message.platformMessageId.isEmpty() ? QVariant() : message.platformMessageId);
+    q.bindValue(":status", Models::legacySyncStatusFromMessageStatus(message.status));
+    q.bindValue(":reason", message.metadata.value(QStringLiteral("errorReason")).toString());
+    q.bindValue(":ots", message.metadata.value(QStringLiteral("originalTimestamp")).toString());
+    q.bindValue(":cimg", message.evidenceRef.isEmpty() ? QVariant() : message.evidenceRef);
+    q.bindValue(":source", Models::toString(message.sourceType));
+    q.bindValue(":confidence", message.confidence);
+    q.bindValue(":verification", Models::toString(message.verificationStatus));
+    q.bindValue(":ctype", Models::toString(message.contentType));
+    q.bindValue(":observed", message.observedAt.isValid()
+                    ? message.observedAt
+                    : QDateTime::currentDateTime());
+    const QString clientMessageId = message.clientMessageId.isEmpty()
+        ? message.metadata.value(QStringLiteral("client_message_id")).toString()
+        : message.clientMessageId;
+    q.bindValue(":cmid", clientMessageId);
 
     if (!q.exec()) {
         qWarning() << "MessageDao::create 失败:" << q.lastError().text();
@@ -75,6 +144,28 @@ std::optional<MessageRecord> MessageDao::findById(int messageId) const
     q.bindValue(QStringLiteral(":id"), messageId);
     if (!q.exec()) {
         qWarning() << "MessageDao::findById 失败:" << q.lastError().text();
+        return std::nullopt;
+    }
+    if (!q.next())
+        return std::nullopt;
+    return messageRecordFromQuery(q);
+}
+
+std::optional<MessageRecord> MessageDao::latestPendingOutboundByClientMessageId(int conversationId,
+                                                                                const QString& clientMessageId) const
+{
+    if (conversationId <= 0 || clientMessageId.isEmpty())
+        return std::nullopt;
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral(
+        "SELECT * FROM messages WHERE conversation_id = :cid "
+        "AND direction = 'out' AND sync_status = 10 AND client_message_id = :cmid "
+        "ORDER BY id DESC LIMIT 1"));
+    q.bindValue(QStringLiteral(":cid"), conversationId);
+    q.bindValue(QStringLiteral(":cmid"), clientMessageId);
+    if (!q.exec()) {
+        qWarning() << "MessageDao::latestPendingOutboundByClientMessageId 失败:" << q.lastError().text();
         return std::nullopt;
     }
     if (!q.next())
@@ -307,5 +398,9 @@ bool MessageDao::clearAllForConversation(int conversationId)
         return false;
     }
     notifyReaderIncrementalStatePurge(platformForPurge, pcidForPurge);
+    if (platformForPurge == QLatin1String("wechat_pc")) {
+        WechatMessageDao wechatDao;
+        wechatDao.deleteForConversation(conversationId);
+    }
     return true;
 }

@@ -1,12 +1,12 @@
 #ifndef RPAPROCESSCONTROLLER_H
 #define RPAPROCESSCONTROLLER_H
 
-#include <QMap>
 #include <QObject>
-#include <QProcess>
-#include <QSharedPointer>
-#include <QStringDecoder>
 #include <QStringList>
+
+namespace Rpa {
+class RpaService;
+}
 
 class RpaProcessController : public QObject
 {
@@ -25,11 +25,7 @@ signals:
     void statusMessageRequested(const QString& text, int timeoutMs);
 
 private:
-    void appendProcessLog(const QString& platformId, const QString& text);
-
-    QMap<QString, QProcess*> m_processes;
-    QMap<QString, QSharedPointer<QStringDecoder>> m_consoleDecoders;
-    QMap<QString, QString> m_processLogs;
+    Rpa::RpaService* m_service = nullptr;
 };
 
 #endif // RPAPROCESSCONTROLLER_H

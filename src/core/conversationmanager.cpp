@@ -1,4 +1,4 @@
-#include "conversationmanager.h"
+﻿#include "conversationmanager.h"
 #include "messagerouter.h"
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
@@ -18,18 +18,18 @@ ConversationManager::ConversationManager(QObject* parent)
 void ConversationManager::initialize(MessageRouter* router)
 {
     if (!router) {
-        qWarning() << "[ConversationManager] 初始化失败：MessageRouter 不能为空";
+        qWarning() << "[ConversationManager] initialize failed: MessageRouter cannot be null";
         return;
     }
     if (m_router) {
-        qWarning() << "[ConversationManager] 已初始化，忽略重复装配";
+        qWarning() << "[ConversationManager] already initialized, skip duplicate setup";
         return;
     }
 
     m_router = router;
 
     connect(m_router, &MessageRouter::conversationCreated, this, [this](const ConversationInfo& conv) {
-        qDebug() << "[ConversationManager] 新会话:" << conv.customerName;
+        qDebug() << "[ConversationManager] new conversation" << conv.customerName;
         emit conversationListChanged();
         emit conversationUpdated(conv);
     });
@@ -39,11 +39,39 @@ void ConversationManager::initialize(MessageRouter* router)
         emit conversationListChanged();
     });
 
+    connect(m_router, &MessageRouter::unifiedConversationUpdated,
+            this, [this](const Models::Conversation& conv) {
+        emit unifiedConversationUpdated(conv);
+        emit conversationListChanged();
+    });
+
     connect(m_router, &MessageRouter::messageReceived, this, [this](int convId, const MessageRecord& rec) {
+        if (rec.direction == QLatin1String("in")) {
+            ConversationDao dao;
+            dao.setStatus(convId, QStringLiteral("waiting_agent"));
+        }
         emit newMessageReceived(convId, rec);
     });
 
+    connect(m_router, &MessageRouter::unifiedMessageReceived,
+            this, [this](int convId, const Models::Message& message) {
+        if (message.direction == Models::MessageDirection::Inbound) {
+            ConversationDao dao;
+            dao.setStatus(convId, QStringLiteral("waiting_agent"));
+        }
+        emit unifiedMessageReceived(convId, message);
+    });
+
     connect(m_router, &MessageRouter::messageSentOk, this, [this](int convId, const MessageRecord& rec) {
+        if (rec.direction == QLatin1String("out")) {
+            ConversationDao dao;
+            dao.setStatus(convId, QStringLiteral("waiting_customer"));
+            const auto conv = dao.findById(convId);
+            if (conv) {
+                emit unifiedConversationUpdated(LegacyModelCompat::toUnifiedConversation(*conv));
+                emit conversationUpdated(*conv);
+            }
+        }
         emit messageSentOk(convId, rec);
     });
 
@@ -51,7 +79,23 @@ void ConversationManager::initialize(MessageRouter* router)
         emit messageSendFailed(convId, reason);
     });
 
-    qInfo() << "[ConversationManager] 初始化完成，消息路由已装配";
+    connect(m_router, &MessageRouter::messageStatusChanged, this,
+            [this](int convId, int msgId, Models::MessageStatus status, const QString& reason) {
+        qDebug() << "[ConversationManager] message status changed convId=" << convId
+                 << "msgId=" << msgId << "status=" << Models::toString(status);
+        if (status == Models::MessageStatus::Sent) {
+            ConversationDao dao;
+            dao.setStatus(convId, QStringLiteral("waiting_customer"));
+            const auto conv = dao.findById(convId);
+            if (conv) {
+                emit unifiedConversationUpdated(LegacyModelCompat::toUnifiedConversation(*conv));
+                emit conversationUpdated(*conv);
+            }
+        }
+        emit messageStatusChanged(convId, msgId, status, reason);
+    });
+
+    qInfo() << "[ConversationManager] initialization complete";
 }
 
 QVector<ConversationInfo> ConversationManager::allConversations() const
@@ -66,34 +110,70 @@ QVector<MessageRecord> ConversationManager::messages(int conversationId) const
     return dao.listByConversation(conversationId);
 }
 
-void ConversationManager::selectConversation(int conversationId)
+void ConversationManager::reloadFromDatabase()
 {
-    if (m_currentConvId == conversationId)
-        return;
-    m_currentConvId = conversationId;
-    if (conversationId > 0)
-        clearUnread(conversationId);
-    qDebug() << "[ConversationManager] 选择会话:" << conversationId;
-    emit currentConversationChanged(conversationId);
+    ConversationDao dao;
+
+    if (m_currentConvId > 0) {
+        const auto current = dao.findById(m_currentConvId);
+        if (current) {
+            emit conversationUpdated(*current);
+            emit unifiedConversationUpdated(LegacyModelCompat::toUnifiedConversation(*current));
+        } else {
+            qInfo() << "[ConversationManager] current conversation missing after database reload:"
+                    << m_currentConvId;
+            m_currentConvId = -1;
+            dao.setLastSelectedConversationId(-1);
+            emit currentConversationChanged(-1);
+        }
+    }
+
+    qInfo() << "[ConversationManager] reloaded conversations from database";
+    emit conversationListChanged();
 }
 
-void ConversationManager::sendMessage(int conversationId, const QString& text)
+void ConversationManager::selectConversation(int conversationId)
+{
+    const bool changed = m_currentConvId != conversationId;
+    m_currentConvId = conversationId;
+    ConversationDao dao;
+    dao.setLastSelectedConversationId(conversationId);
+    if (conversationId > 0) {
+        clearUnread(conversationId);
+        dao.setStatus(conversationId, QStringLiteral("active"));
+        const auto conv = dao.findById(conversationId);
+        if (conv) {
+            emit unifiedConversationUpdated(LegacyModelCompat::toUnifiedConversation(*conv));
+            emit conversationUpdated(*conv);
+        }
+    }
+    qDebug() << "[ConversationManager] select conversation:" << conversationId;
+    if (changed)
+        emit currentConversationChanged(conversationId);
+}
+
+void ConversationManager::sendMessage(int conversationId, const QString& text, const QString& clientMessageId)
 {
     if (text.trimmed().isEmpty()) return;
     if (!m_router) {
-        qWarning() << "[ConversationManager] 消息路由未初始化，无法发送";
-        emit messageSendFailed(conversationId, QStringLiteral("消息路由未初始化"));
+        qWarning() << "[ConversationManager] message router not initialized" << conversationId;
+        emit messageSendFailed(conversationId, QStringLiteral("message router not initialized"));
         return;
     }
-    qDebug() << "[ConversationManager] 发送消息 convId=" << conversationId;
-    m_router->sendMessage(conversationId, text);
+    qDebug() << "[ConversationManager] send message convId=" << conversationId;
+    m_router->sendMessage(conversationId, text, clientMessageId);
 }
 
 void ConversationManager::closeConversation(int conversationId)
 {
     ConversationDao dao;
     dao.setStatus(conversationId, QStringLiteral("closed"));
-    qInfo() << "[ConversationManager] 关闭会话:" << conversationId;
+    if (m_currentConvId == conversationId) {
+        m_currentConvId = -1;
+        dao.setLastSelectedConversationId(-1);
+        emit currentConversationChanged(-1);
+    }
+    qInfo() << "[ConversationManager] close conversation:" << conversationId;
     emit conversationListChanged();
 }
 
@@ -103,9 +183,10 @@ void ConversationManager::deleteConversation(int conversationId)
     dao.remove(conversationId);
     if (m_currentConvId == conversationId) {
         m_currentConvId = -1;
+        dao.setLastSelectedConversationId(-1);
         emit currentConversationChanged(-1);
     }
-    qInfo() << "[ConversationManager] 删除会话:" << conversationId;
+    qInfo() << "[ConversationManager] delete conversation:" << conversationId;
     emit conversationListChanged();
 }
 

@@ -3,6 +3,7 @@
 #include "../core/authmanager.h"
 #include "../utils/appsettings.h"
 #include "../utils/applystyle.h"
+#include "../utils/svgresourcepixmap.h"
 #include "../data/userdao.h"
 #include <QFile>
 #include <QImage>
@@ -20,7 +21,6 @@
 #include <QPainterPath>
 #include <QPaintEvent>
 #include <QResizeEvent>
-#include <QSvgRenderer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QApplication>
@@ -317,8 +317,8 @@ void LoginWindow::paintEvent(QPaintEvent* event)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     QLinearGradient grad(0, 0, qreal(width()), qreal(height()));
-    grad.setColorAt(0, QColor(0xfd, 0xde, 0xbd));
-    grad.setColorAt(1, QColor(0xab, 0xd8, 0xdf));
+    grad.setColorAt(0, QColor(0xff, 0xff, 0xff));
+    grad.setColorAt(1, QColor(0xd8, 0xef, 0xff));
     QPainterPath path;
     path.addRoundedRect(rect(), kLoginWindowCornerRadius, kLoginWindowCornerRadius);
     p.fillPath(path, grad);
@@ -446,6 +446,9 @@ void LoginWindow::setupStyles()
 
 void LoginWindow::showLoginForm()
 {
+    setWindowTitle(QStringLiteral("AI客服 - 登录"));
+    if (auto* titleBarLabel = findChild<QLabel*>(QStringLiteral("loginTitleBarLabel")))
+        titleBarLabel->setText(QStringLiteral("AI客服 - 登录"));
     m_loginForm->setVisible(true);
     m_registerForm->setVisible(false);
     m_usernameEdit->clear();
@@ -457,6 +460,9 @@ void LoginWindow::showLoginForm()
 
 void LoginWindow::showRegisterForm()
 {
+    setWindowTitle(QStringLiteral("AI客服 - 注册"));
+    if (auto* titleBarLabel = findChild<QLabel*>(QStringLiteral("loginTitleBarLabel")))
+        titleBarLabel->setText(QStringLiteral("AI客服 - 注册"));
     m_loginForm->setVisible(false);
     m_registerForm->setVisible(true);
     m_registerUsernameEdit->clear();
@@ -506,13 +512,7 @@ void LoginWindow::refreshLoginAvatarForUsernameField()
     }
 
     if (pm.isNull()) {
-        QPixmap canvas(QSize(kAvatarSide, kAvatarSide) * dpr);
-        canvas.setDevicePixelRatio(dpr);
-        canvas.fill(Qt::transparent);
-        QSvgRenderer renderer(QStringLiteral(":/default_avatar_icon.svg"));
-        QPainter painter(&canvas);
-        renderer.render(&painter, QRectF(0, 0, canvas.width(), canvas.height()));
-        pm = canvas;
+        pm = svgResourcePixmapFittedInSquare(QStringLiteral(":/default_avatar_icon.svg"), kAvatarSide);
     }
     m_avatarLabel->setPixmap(pm);
 }

@@ -2,10 +2,12 @@
 #define WECHATRPA_ADAPTER_H
 
 #include "iplatformadapter.h"
+#include <QJsonObject>
+#include <QSet>
 #include <QTimer>
 
-// WeChat (Windows desktop) inbox consumer adapter.
-// Consumes rows from rpa_inbox_messages where platform='wechat_pc'.
+// WeChat PC adapter. The primary path consumes Python sidecar RPA events;
+// rpa_inbox_messages remains as a short-term compatibility fallback.
 class WechatRPAAdapter : public IPlatformAdapter
 {
     Q_OBJECT
@@ -17,18 +19,27 @@ public:
     void disconnectPlatform() override;
     void startListening() override;
     void stopListening() override;
-    void sendMessage(const QString& conversationId, const QString& text) override;
+    void sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId = QString()) override;
     bool isConnected() const override { return m_connected; }
 
 private:
-    void pollInboxOnce();
-    /** hadWork=true：刚消费到入站行，下次轮询缩短间隔；false：空闲或异常，拉长间隔。 */
-    void applyInboxPollCadence(bool hadInboundWork);
+    void pollOnce();
+    bool pollRpaEventsOnce();
+    bool pollInboxOnce();
+    void applyPollCadence(bool hadWork);
+    PlatformMessage platformMessageFromEvent(const QJsonObject& event) const;
+    QString normalizeConversationKey(const QString& conversationKey) const;
+    void handleRpaEvent(const QJsonObject& event);
+    void emitConversationObserved(const QJsonObject& event);
 
     bool m_connected = false;
     QTimer* m_pollTimer = nullptr;
+    QString m_eventCursor = QStringLiteral("0");
     qint64 m_lastInboxId = 0;
+    int m_idleFetchTicks = 0;
+    bool m_commandInFlight = false;
+    bool m_eventSocketConnected = false;
+    QSet<QString> m_seenSeqs;
 };
 
 #endif // WECHATRPA_ADAPTER_H
-

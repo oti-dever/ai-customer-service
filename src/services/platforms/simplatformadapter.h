@@ -15,10 +15,11 @@ public:
     void disconnectPlatform() override;
     void startListening() override;
     void stopListening() override;
-    void sendMessage(const QString& conversationId, const QString& text) override;
+    void sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId = QString()) override;
     bool isConnected() const override { return m_connected; }
 
     void simulateIncomingMessage(const QString& buyerName, const QString& text);
+    void simulateRandomPlatformIncomingMessage();
 
 private:
     bool m_connected = false;

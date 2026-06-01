@@ -156,12 +156,12 @@ void HelpCenterDialog::populateContent()
         QStringLiteral("help_rpa"), QStringLiteral("\u2022 管理启动/停止 RPA"),
         QStringLiteral(
             "<h3>管理启动/停止 RPA</h3>"
-            "<p>在系统就绪页点击「管理启动/停止RPA」，可勾选平台后统一<b>启动</b>或<b>停止</b>后台 RPA 进程。当前支持：<b>微信 PC</b>、<b>千牛 PC</b>、<b>拼多多网页</b>。</p>"
+            "<p>在系统就绪页点击「管理启动/停止RPA」，可勾选平台后统一<b>启动</b>或<b>停止</b>后台 RPA 进程。当前支持：<b>微信 PC</b>、<b>千牛 PC</b>。</p>"
             "<p><b>启动</b>：仅在「已勾选且当前未运行」的平台上拉起进程；若勾选项均已运行，会弹出说明提示。</p>"
             "<p><b>停止</b>：结束「已勾选且正在运行」的平台进程；再次打开本窗口时，正在运行的项会<b>默认勾选</b>，便于直接停止。</p>"
             "<p>可使用「全选」「取消全选」快速调整勾选。</p>"
             "<p><b>运行环境</b>：程序会在项目下的 <code>python</code> 目录作为工作目录执行 "
-            "<code>python -m rpa.main --platform &lt;wechat | qianniu | pdd&gt;</code>。"
+            "<code>python -m rpa.main --platform &lt;wechat | qianniu&gt;</code>。"
             "请确保本机已安装 Python，且命令行中 <code>python</code> 可用；若启动失败，状态栏会提示检查 PATH。</p>"
             "<p><b>右键</b>「管理启动/停止RPA」可打开<b>控制台输出</b>窗口，查看各平台子进程的标准输出日志（便于排查 OCR、数据库写入等问题）。</p>"
             "<p>各平台消息读写还依赖窗口区域校准与配置文件等，请按软件内的校准向导或项目文档完成设置。</p>")

@@ -5,6 +5,7 @@
 #include <QPoint>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListView>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QWidget>
@@ -22,16 +23,22 @@
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 #include "../core/types.h"
+#include "../ipc/ipctypes.h"
+#include "../models/unifiedmodels.h"
 #include "../utils/applystyle.h"
 
 class ConversationManager;
 class ConversationAppService;
 class AiChatAppService;
 class IAiStreamingSession;
+class ConversationListModel;
+class MessageListModel;
+class QStyledItemDelegate;
 class QToolButton;
 class QAction;
 class QButtonGroup;
 class QSplitter;
+class QModelIndex;
 
 /** 左侧平台工具条：与库中 `conversations.platform` 一致（如 qianniu、pdd_web、douyin、wechat_pc）。 */
 enum class AggregatePlatformFilter { All = 0, Qianniu = 1, Pdd = 2, Doudian = 3, Wechat = 4 };
@@ -64,14 +71,20 @@ private:
     QWidget* buildRightPanel();
 
     void refreshConversationList();
+    void reloadFromDatabase();
+    void renderConversationListFromModel();
     void showConversation(int conversationId);
     void renderConversationMessages(const QVector<MessageRecord>& messages);
+    void renderConversationMessagesFromModel();
     void appendMessageBubble(const MessageRecord& msg);
     QString buildMessageSignature(const QVector<MessageRecord>& messages) const;
     void refreshVisibleConversationMessages();
     void scrollToBottom();
     /** 在布局完成后再滚到底部（切换会话、追加消息等场景） */
     void scheduleScrollChatToBottom();
+    void persistCurrentDraft();
+    void restoreDraftForConversation(int conversationId);
+    void restoreLastSelectedConversation();
     void updateCustomerInfo(const ConversationInfo& conv);
     void resetSendTimelineForConversation();
     void showCenterEmptyState();
@@ -101,7 +114,6 @@ private:
     void closeModelPickerSheet();
     void startModelSheetWidthAnimation(int fromWidth, int toWidth, bool hideOverlayOnFinish);
 
-    QWidget* createConversationItem(const ConversationInfo& conv);
     QWidget* createBubble(const MessageRecord& msg);
     QWidget* createDateSeparator(const QDate& date);
     void loadSelfBubbleIdentity();
@@ -111,12 +123,16 @@ private slots:
     void onTabPendingClicked();
     void onTabRepliedClicked();
     void onPlatformFilterButtonIdClicked(int id);
+    void onSimulateMessageClicked();
+    void onConversationIndexClicked(const QModelIndex& index);
     void onConversationItemClicked(QListWidgetItem* item);
     void onSendClicked();
     void onStopAutoReplyClicked();
     void onModeComboChanged();
     void onGenerateAiDraftClicked();
     void onAggregateAiModelMenuTriggered(QAction* action);
+    void onIpcAiSuggestionReceived(const Ipc::AiSuggestionResponse& response);
+    void onIpcRequestFailed(const QString& requestId, const QString& reason);
     void onAggregateAiStreamDelta(const QString& delta);
     void onAggregateAiCompleted();
     void onAggregateAiFailed(const QString& reason);
@@ -125,6 +141,8 @@ private slots:
     void onAutoReplyFailed(const QString& reason);
 
     void onConversationListChanged();
+    void onUnifiedMessageReceived(int conversationId, const Models::Message& message);
+    void onUnifiedConversationUpdated(const Models::Conversation& conversation);
     void onNewMessage(int conversationId, const MessageRecord& msg);
     void onSentOk(int conversationId, const MessageRecord& msg);
     void onClearSendTimeline();
@@ -132,6 +150,7 @@ private slots:
     void onConversationListContextMenu(const QPoint& pos);
     void onModelPickerListItem(QListWidgetItem* item);
     void onModelPickerBackClicked();
+    void onMessageStatusChanged(int conversationId, int messageId, Models::MessageStatus newStatus, const QString& errorReason);
 
 private:
     QWidget* m_leftToolBar = nullptr;
@@ -148,8 +167,9 @@ private:
     QPushButton* m_btnReplied = nullptr;
     /** 原「模拟消息」；现为 **一键停止** AI 自动回复（并切人工接待），见《AI自动回复方案设计与实现》。 */
     QPushButton* m_btnStopAutoReply = nullptr;
+    QToolButton* m_btnSimulateMessage = nullptr;
     QLineEdit* m_searchEdit = nullptr;
-    QListWidget* m_conversationList = nullptr;
+    QListView* m_conversationList = nullptr;
     QStackedWidget* m_leftStack = nullptr;
     QStackedWidget* m_centerStack = nullptr;
     QStackedWidget* m_rightStack = nullptr;
@@ -158,15 +178,16 @@ private:
     /** 覆盖在消息列表上的容器：底部为半透明输入条，消息可滚至其下方并透出。 */
     QWidget* m_chatInputOverlayHost = nullptr;
     QWidget* m_chatInputPanel = nullptr;
-    QScrollArea* m_messageScroll = nullptr;
-    QVBoxLayout* m_messageLayout = nullptr;
-    QWidget* m_messageContainer = nullptr;
+    QListView* m_messageView = nullptr;
     QPlainTextEdit* m_inputEdit = nullptr;
     QToolButton* m_btnAiModelPick = nullptr;
     QMenu* m_aggregateAiModelMenu = nullptr;
     QString m_aggregateAiSessionModelKey;
     QPushButton* m_btnAiGenerate = nullptr;
     QPushButton* m_btnSend = nullptr;
+    ConversationListModel* m_conversationListModel = nullptr;
+    MessageListModel* m_messageListModel = nullptr;
+    QStyledItemDelegate* m_messageItemDelegate = nullptr;
     ConversationAppService* m_conversationService = nullptr;
     AiChatAppService* m_aiChatService = nullptr;
     IAiStreamingSession* m_aggregateAiSession = nullptr;
@@ -176,6 +197,7 @@ private:
     bool m_autoReplyBusy = false;
     int m_autoReplyTargetConvId = -1;
     QString m_autoReplyAccumulated;
+    QString m_aggregateAiIpcRequestId;
     QString m_aggregateAiBaseline;
     QString m_aggregateAiAccumulated;
     QLabel* m_chatHeader = nullptr;
@@ -208,10 +230,12 @@ private:
     QLabel* m_statusLabel = nullptr;
     QTimer* m_messageRefreshTimer = nullptr;
     QTimer* m_sendTimelineTimer = nullptr;
+    QTimer* m_draftSaveTimer = nullptr;
     qint64 m_sendTimelineBaselineId = 0;
     QToolButton* m_rightBarToggleButton = nullptr;
     bool m_rightBarHidden = false;
     int m_lastRightBarWidth = 296;
+    bool m_restoringDraft = false;
 
     AggregateConversationTab m_currentTab = AggregateConversationTab::Pending;
     int m_currentConvId = -1;
