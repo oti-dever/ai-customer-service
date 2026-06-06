@@ -4,7 +4,6 @@
 #include "ipctypes.h"
 #include <QObject>
 #include <QMap>
-#include <QProcess>
 #include <QSet>
 #include <QTimer>
 #include <QUrl>
@@ -27,39 +26,65 @@ public:
 
     bool isServiceAvailable() const { return m_serviceAvailable; }
     QString serviceEndpoint() const { return m_endpoint; }
-    bool managesServiceLifecycle() const { return m_manageServiceLifecycle; }
     void setServiceEndpoint(const QString& endpoint);
-    void setManageServiceLifecycle(bool enabled);
     void loadConnectionSettings();
     void saveConnectionSettings() const;
     bool connectToConfiguredService(QString* errorOut = nullptr);
     QString eventWebSocketUrl() const;
-    bool isManagedServiceRunning() const;
-    bool restartManagedService(QString* errorOut = nullptr);
-    bool startManagedService(QString* errorOut = nullptr);
-    void stopManagedService();
     bool ensureServiceAvailable(QString* errorOut = nullptr);
 
     QString requestAiSuggestion(const AiSuggestionRequest& request);
     void cancelRequest(const QString& requestId);
 
     HealthCheckResponse checkHealth();
-    RpaCommandResponse sendRpaCommand(const RpaCommandRequest& request,
-                                      int timeoutMs = 3000);
+    QJsonObject fetchPlatformStatuses(int timeoutMs = 3000,
+                                      ResponseStatus* statusOut = nullptr,
+                                      QString* errorOut = nullptr);
+    QJsonObject fetchCacheSnapshot(const QString& platform = QString(),
+                                   int conversationLimit = 100,
+                                   int messageLimit = 200,
+                                   const QString& cursor = QString(),
+                                   int timeoutMs = 5000,
+                                   ResponseStatus* statusOut = nullptr,
+                                   QString* errorOut = nullptr);
+    QJsonObject fetchPlatformReplay(const QString& platform = QString(),
+                                    const QString& cursor = QString(),
+                                    int limit = 100,
+                                    int timeoutMs = 5000,
+                                    ResponseStatus* statusOut = nullptr,
+                                    QString* errorOut = nullptr);
+    QJsonObject fetchRpaReplay(const QString& platform = QString(),
+                               const QString& cursor = QString(),
+                               int limit = 100,
+                               int timeoutMs = 5000,
+                               ResponseStatus* statusOut = nullptr,
+                               QString* errorOut = nullptr);
+    QJsonObject clearConversationMessages(const QString& platform,
+                                          const QString& accountId,
+                                          const QString& conversationKey,
+                                          int timeoutMs = 5000,
+                                          ResponseStatus* statusOut = nullptr,
+                                          QString* errorOut = nullptr);
+    QJsonObject deleteConversationOnService(const QString& platform,
+                                            const QString& accountId,
+                                            const QString& conversationKey,
+                                            int timeoutMs = 5000,
+                                            ResponseStatus* statusOut = nullptr,
+                                            QString* errorOut = nullptr);
+    int dispatchPlatformReplayEvents(const QJsonObject& replay);
+    int dispatchRpaReplayEvents(const QJsonObject& replay);
+    PlatformCommandResponse sendPlatformCommandViaWebSocket(const PlatformCommandRequest& request,
+                                                            int timeoutMs = 3000);
     RpaCommandResponse sendRpaCommandViaWebSocket(const RpaCommandRequest& request,
                                                   int timeoutMs = 3000);
-    RpaEventBatch fetchRpaEvents(const QString& platformType,
-                                 const QString& cursor,
-                                 int limit = 50,
-                                 int timeoutMs = 2000);
-    RpaCommandResponse checkRpaHealth(const QString& platformType,
-                                      int timeoutMs = 2000);
 
 signals:
     void aiSuggestionReceived(const AiSuggestionResponse& response);
     void requestFailed(const QString& requestId, const QString& reason);
     void serviceStatusChanged(bool available);
+    void platformEventReceived(const QJsonObject& event);
     void rpaEventReceived(const QJsonObject& event);
+    void platformEventBridgeStateChanged(bool connected);
     void rpaEventBridgeStateChanged(bool connected);
 
 private slots:
@@ -75,6 +100,7 @@ private:
     ~IpcService();
 
     QJsonObject buildAiSuggestionPayload(const AiSuggestionRequest& request) const;
+    QJsonObject buildPlatformCommandPayload(const PlatformCommandRequest& request) const;
     QJsonObject buildRpaCommandPayload(const RpaCommandRequest& request) const;
     QJsonObject performJsonGet(const QUrl& url, int timeoutMs,
                                ResponseStatus* statusOut,
@@ -85,7 +111,6 @@ private:
     AiSuggestionResponse parseAiSuggestionResponse(const QJsonObject& json,
                                                     const QString& requestId) const;
     void appendServiceLog(const QByteArray& chunk);
-    void stopExternalManagedServiceProcesses();
     void startEventWebSocketServer();
     void stopEventWebSocketServer();
     void startCommandWebSocketClient();
@@ -97,12 +122,10 @@ private:
     QWebSocketServer* m_eventServer = nullptr;
     QSet<QWebSocket*> m_eventSockets;
     QWebSocket* m_commandSocket = nullptr;
-    QProcess* m_serviceProcess = nullptr;
     QString m_endpoint;
     quint16 m_eventPort = 8766;
     quint16 m_commandPort = 8767;
     bool m_serviceAvailable = false;
-    bool m_manageServiceLifecycle = true;
     int m_defaultTimeoutMs = 30000;
 
     struct PendingRequest {

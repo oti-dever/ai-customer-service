@@ -8,13 +8,11 @@
 
 namespace {
 
-void registerAndStartAdapter(MessageRouter* router, IPlatformAdapter* adapter)
+void registerAdapter(MessageRouter* router, IPlatformAdapter* adapter)
 {
     if (!router || !adapter)
         return;
     router->registerAdapter(adapter);
-    adapter->connectPlatform();
-    adapter->startListening();
 }
 
 } // namespace
@@ -24,7 +22,7 @@ void PlatformBootstrap::initializeDefaultPlatforms(ConversationManager& manager)
     auto* router = new MessageRouter(&manager);
     manager.initialize(router);
 
-    registerAndStartAdapter(router, new SimPlatformAdapter(&manager));
-    registerAndStartAdapter(router, new QianniuRPAAdapter(&manager));
-    registerAndStartAdapter(router, new WechatRPAAdapter(&manager));
+    registerAdapter(router, new SimPlatformAdapter(&manager));
+    registerAdapter(router, new QianniuRPAAdapter(&manager));
+    registerAdapter(router, new WechatRPAAdapter(&manager));
 }

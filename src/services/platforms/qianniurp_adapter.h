@@ -2,10 +2,11 @@
 #define QIANNIURP_ADAPTER_H
 
 #include "iplatformadapter.h"
-#include <QTimer>
+#include <QJsonObject>
+#include <QSet>
 
-// 基于共享 SQLite 的千牛 RPA 适配器骨架。
-// 通过轮询 rpa_inbox_messages 队列消费入站消息（Python Reader -> Qt）。
+// 千牛 sidecar 适配器。
+// C++ 侧保留平台展示名与会话兼容键，真实自动化由 Python service + qianniu sidecar 承担。
 class QianniuRPAAdapter : public IPlatformAdapter
 {
     Q_OBJECT
@@ -21,11 +22,16 @@ public:
     bool isConnected() const override { return m_connected; }
 
 private:
-    void pollInboxOnce();
+    PlatformMessage platformMessageFromEvent(const QJsonObject& event) const;
+    QString normalizeConversationKey(const QString& conversationKey) const;
+    void handleRpaEvent(const QJsonObject& event);
+    void emitConversationObserved(const QJsonObject& event);
 
     bool m_connected = false;
-    QTimer* m_pollTimer = nullptr;
-    qint64 m_lastInboxId = 0;
+    QString m_eventCursor = QStringLiteral("0");
+    bool m_commandInFlight = false;
+    bool m_eventSocketConnected = false;
+    QSet<QString> m_seenSeqs;
 };
 
 #endif // QIANNIURP_ADAPTER_H

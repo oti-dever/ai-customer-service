@@ -1,21 +1,67 @@
 #include "qianniurp_adapter.h"
-#include "../../data/database.h"
+#include "../../ipc/ipcservice.h"
+#include <QDateTime>
 #include <QDebug>
-#include <QSqlError>
-#include <QSqlQuery>
+#include <QElapsedTimer>
+#include <QStringList>
+#include <QTimer>
+#include <QUuid>
+
+namespace {
+const QString kQianniuSidecarPlatform = QStringLiteral("qianniu");
+
+QString normalizedDirection(const QString& direction, const QString& senderRole, const QJsonObject& payload)
+{
+    auto norm = [](const QString& value) {
+        return value.trimmed().toLower();
+    };
+    const QString d = norm(direction);
+    const QString s = norm(senderRole);
+    const QString metaDirection = norm(payload.value(QStringLiteral("metadata")).toObject().value(QStringLiteral("direction")).toString());
+    const QString metaSenderRole = norm(payload.value(QStringLiteral("metadata")).toObject().value(QStringLiteral("sender_role")).toString());
+
+    const QStringList rolePriority = { s, metaSenderRole };
+    for (const QString& role : rolePriority) {
+        if (role == QLatin1String("agent"))
+            return QStringLiteral("out");
+        if (role == QLatin1String("customer"))
+            return QStringLiteral("in");
+        if (role == QLatin1String("system"))
+            return QStringLiteral("system");
+    }
+
+    const QStringList directionPriority = { d, metaDirection };
+    for (const QString& value : directionPriority) {
+        if (value == QLatin1String("outbound") || value == QLatin1String("out"))
+            return QStringLiteral("out");
+        if (value == QLatin1String("inbound") || value == QLatin1String("in"))
+            return QStringLiteral("in");
+        if (value == QLatin1String("system"))
+            return QStringLiteral("system");
+    }
+
+    return QStringLiteral("in");
+}
+} // namespace
 
 QianniuRPAAdapter::QianniuRPAAdapter(QObject* parent)
     : IPlatformAdapter(parent)
 {
-    m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(250);
-    connect(m_pollTimer, &QTimer::timeout, this, &QianniuRPAAdapter::pollInboxOnce);
+    connect(&Ipc::IpcService::instance(), &Ipc::IpcService::platformEventReceived,
+            this, &QianniuRPAAdapter::handleRpaEvent);
+    connect(&Ipc::IpcService::instance(), &Ipc::IpcService::platformEventBridgeStateChanged,
+            this, [this](bool connected) {
+        m_eventSocketConnected = connected;
+        qInfo() << "[QianniuRPAAdapter] realtime event bridge"
+                << (connected ? "connected" : "disconnected")
+                << "cursor=" << m_eventCursor;
+    });
 }
 
 void QianniuRPAAdapter::connectPlatform()
 {
     m_connected = true;
-    qInfo() << "[QianniuRPAAdapter] 千牛 RPA 适配器已就绪（inbox 轮询）";
+    qInfo() << "[QianniuRPAAdapter] Qianniu adapter connected";
     emit connectionStateChanged(true);
 }
 
@@ -23,121 +69,339 @@ void QianniuRPAAdapter::disconnectPlatform()
 {
     m_connected = false;
     stopListening();
-    qInfo() << "[QianniuRPAAdapter] 千牛 RPA 适配器已断开";
+    qInfo() << "[QianniuRPAAdapter] Qianniu adapter disconnected";
     emit connectionStateChanged(false);
 }
 
 void QianniuRPAAdapter::startListening()
 {
-    if (!m_connected) {
-        connectPlatform();
+    QElapsedTimer timer;
+    timer.start();
+    QString serviceError;
+    if (!Ipc::IpcService::instance().connectToConfiguredService(&serviceError)) {
+        qWarning() << "[QianniuRPAAdapter] Python service unavailable:"
+                   << serviceError << "elapsedMs=" << timer.elapsed();
+        return;
     }
-    if (!m_pollTimer->isActive())
-        m_pollTimer->start();
-    qInfo() << "[QianniuRPAAdapter] startListening（轮询 rpa_inbox_messages）";
+
+    Ipc::PlatformCommandRequest request;
+    request.commandType = QStringLiteral("connect");
+    request.platform = kQianniuSidecarPlatform;
+    request.accountId = accountId();
+    request.parameters.insert(QStringLiteral("mode"), QStringLiteral("listen"));
+    request.parameters.insert(QStringLiteral("emit_initial_snapshot"), false);
+    const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 3000);
+    if (response.status != Ipc::ResponseStatus::Success) {
+        qWarning() << "[QianniuRPAAdapter] connect command failed:"
+                   << response.errorMessage << "elapsedMs=" << timer.elapsed();
+        return;
+    }
+
+    if (!m_connected)
+        connectPlatform();
+    qInfo() << "[QianniuRPAAdapter] startListening with WebSocket command/event bridge"
+            << "elapsedMs=" << timer.elapsed();
 }
 
 void QianniuRPAAdapter::stopListening()
 {
-    if (m_pollTimer && m_pollTimer->isActive())
-        m_pollTimer->stop();
+    Ipc::PlatformCommandRequest request;
+    request.commandType = QStringLiteral("disconnect");
+    request.platform = kQianniuSidecarPlatform;
+    request.accountId = accountId();
+    const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 3000);
+    if (response.status != Ipc::ResponseStatus::Success)
+        qWarning() << "[QianniuRPAAdapter] disconnect command failed:" << response.errorMessage;
     qInfo() << "[QianniuRPAAdapter] stopListening";
 }
 
 void QianniuRPAAdapter::sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId)
 {
-    Q_UNUSED(conversationId)
-    Q_UNUSED(text)
-    Q_UNUSED(clientMessageId)
-    // 真正的发送逻辑由 Python Writer 负责，这里只起到“占位”作用。
-    qInfo() << "[QianniuRPAAdapter] sendMessage 被调用 — 当前实现不直接操作千牛窗口，消息会通过 SQLite 交给 Python 处理";
+    QElapsedTimer totalTimer;
+    totalTimer.start();
+    if (m_commandInFlight) {
+        qInfo() << "[QianniuRPAAdapter] sendMessage delayed: command already in flight";
+        QTimer::singleShot(200, this, [this, conversationId, text, clientMessageId]() {
+            sendMessage(conversationId, text, clientMessageId);
+        });
+        return;
+    }
+
+    m_commandInFlight = true;
+    Ipc::PlatformCommandRequest request;
+    request.commandType = QStringLiteral("send_message");
+    request.platform = kQianniuSidecarPlatform;
+    request.accountId = accountId();
+    request.taskId = clientMessageId.isEmpty()
+        ? QUuid::createUuid().toString(QUuid::WithoutBraces)
+        : clientMessageId;
+    request.parameters.insert(QStringLiteral("client_message_id"), request.taskId);
+    request.parameters.insert(QStringLiteral("conversation_key"), conversationId);
+    request.parameters.insert(QStringLiteral("display_name"), conversationId);
+    request.parameters.insert(QStringLiteral("text"), text);
+    request.parameters.insert(QStringLiteral("confirm_token"), QStringLiteral("manual_confirmed_by_agent"));
+
+    QElapsedTimer commandTimer;
+    commandTimer.start();
+    const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 4000);
+    const qint64 commandElapsedMs = commandTimer.elapsed();
+    m_commandInFlight = false;
+    auto scheduleConfirmTimeout = [this, conversationId, clientMessageId = request.taskId]() {
+        QTimer::singleShot(30000, this, [this, conversationId, clientMessageId]() {
+            emit sendFailed(conversationId, QStringLiteral("send_confirm_timeout"), clientMessageId);
+        });
+    };
+    if (response.status == Ipc::ResponseStatus::Success) {
+        const QJsonObject result = response.result;
+        const bool accepted = result.value(QStringLiteral("accepted")).toBool(false);
+        const bool sent = result.value(QStringLiteral("sent")).toBool(!accepted);
+        qInfo() << "[QianniuRPAAdapter] sendMessage timing"
+                << "conversation=" << conversationId
+                << "clientMessageId=" << request.taskId
+                << "commandElapsedMs=" << commandElapsedMs
+                << "totalElapsedMs=" << totalTimer.elapsed()
+                << "accepted=" << accepted
+                << "method=" << result.value(QStringLiteral("method")).toString()
+                << "sent=" << sent;
+        if (accepted && !sent) {
+            scheduleConfirmTimeout();
+            return;
+        }
+        if (!m_eventSocketConnected) {
+            QTimer::singleShot(300, this, [this, conversationId, text, clientMessageId = request.taskId]() {
+                emit messageSent(conversationId, text, clientMessageId);
+            });
+        }
+        return;
+    }
+
+    if (response.status == Ipc::ResponseStatus::Timeout
+        && response.errorMessage == QLatin1String("request_timeout")) {
+        qWarning() << "[QianniuRPAAdapter] sendMessage command timed out; waiting for result event"
+                   << "conversation=" << conversationId
+                   << "clientMessageId=" << request.taskId
+                   << "commandElapsedMs=" << commandElapsedMs
+                   << "totalElapsedMs=" << totalTimer.elapsed();
+        scheduleConfirmTimeout();
+        return;
+    }
+
+    qWarning() << "[QianniuRPAAdapter] sendMessage failed:"
+               << response.errorMessage
+               << "commandElapsedMs=" << commandElapsedMs
+               << "totalElapsedMs=" << totalTimer.elapsed();
+    emit sendFailed(conversationId, response.errorMessage.isEmpty()
+                                    ? QStringLiteral("qianniu_sidecar_command_failed")
+                                    : response.errorMessage,
+                    request.taskId);
 }
 
-void QianniuRPAAdapter::pollInboxOnce()
+void QianniuRPAAdapter::handleRpaEvent(const QJsonObject& event)
 {
-    if (!m_connected)
+    QElapsedTimer timer;
+    timer.start();
+    if (event.value(QStringLiteral("platform")).toString().trimmed().toLower() != kQianniuSidecarPlatform)
         return;
 
-    QSqlDatabase db = Database::getInstance().connection();
-    if (!db.isOpen())
+    const QString seq = QString::number(event.value(QStringLiteral("seq")).toInt());
+    const QString eventId = event.value(QStringLiteral("event_id")).toString();
+    const QString dedupeKey = !eventId.isEmpty() ? eventId : seq;
+    if (!dedupeKey.isEmpty() && m_seenSeqs.contains(dedupeKey))
         return;
+    if (!dedupeKey.isEmpty())
+        m_seenSeqs.insert(dedupeKey);
 
-    QSqlQuery q(db);
-    q.prepare(
-        "SELECT id, platform_conversation_id, customer_name, content, created_at, platform_msg_id, "
-        "       direction, sender_role, sender_name, original_timestamp, content_image_path "
-        "FROM rpa_inbox_messages "
-        "WHERE platform = :platform "
-        "  AND consume_status = 0 "
-        "  AND id > :lastId "
-        "ORDER BY id ASC LIMIT 50");
-    q.bindValue(":platform", platformName());
-    q.bindValue(":lastId", m_lastInboxId);
+    const QString cursor = event.value(QStringLiteral("cursor")).toString();
+    if (!cursor.isEmpty())
+        m_eventCursor = cursor;
+    else if (event.value(QStringLiteral("seq")).isDouble())
+        m_eventCursor = seq;
 
-    if (!q.exec()) {
-        qWarning() << "[QianniuRPAAdapter] inbox 查询失败:" << q.lastError().text();
+    const QString type = event.value(QStringLiteral("event_type")).toString();
+    const QJsonObject payloadObject = event.value(QStringLiteral("payload")).toObject();
+    const QString clientMessageId = event.value(QStringLiteral("client_message_id")).toString(
+        payloadObject.value(QStringLiteral("client_message_id")).toString(
+            event.value(QStringLiteral("task_id")).toString(
+                payloadObject.value(QStringLiteral("task_id")).toString())));
+    qInfo() << "[QianniuRPAAdapter] realtime event received"
+            << "type=" << type
+            << "eventId=" << eventId
+            << "seq=" << seq
+            << "cursor=" << m_eventCursor
+            << "clientMessageId=" << clientMessageId;
+
+    if (type == QLatin1String("conversation_observed")) {
+        emitConversationObserved(event);
+        qInfo() << "[QianniuRPAAdapter] event timing"
+                << "type=" << type
+                << "eventId=" << eventId
+                << "elapsedMs=" << timer.elapsed();
         return;
     }
 
-    QList<qint64> consumedIds;
-    while (q.next()) {
-        const qint64 inboxId = q.value(0).toLongLong();
-        const QString platformConvId = q.value(1).toString();
-        const QString customerName = q.value(2).toString();
-        const QString content = q.value(3).toString();
-        const QDateTime createdAt = q.value(4).toDateTime();
-        const QString platformMsgId = q.value(5).toString();
-        const QString direction = q.value(6).toString();
-        const QString senderRole = q.value(7).toString();
-        const QString senderName = q.value(8).toString();
-        const QString originalTimestamp = q.value(9).toString();
-        const QString contentImagePath = q.value(10).toString();
-
-        PlatformMessage msg;
-        msg.platform = platformName();
-        msg.platformConversationId = platformConvId;
-        msg.customerName = customerName;
-        msg.content = content;
-        msg.direction = direction.isEmpty()
-            ? QStringLiteral("in")
-            : direction;
-        msg.sender = msg.direction == QLatin1String("in")
-            ? QStringLiteral("customer")
-            : (msg.direction == QLatin1String("system") ? QStringLiteral("system") : QStringLiteral("agent"));
-        msg.createdAt = createdAt.isValid() ? createdAt : QDateTime::currentDateTime();
-        msg.platformMsgId = platformMsgId;
-        msg.senderName = senderName;
-        msg.originalTimestamp = originalTimestamp;
-        msg.contentImagePath = contentImagePath;
-        msg.sourceType = contentImagePath.isEmpty() ? QStringLiteral("ui_observed") : QStringLiteral("ocr_extracted");
-        msg.confidence = contentImagePath.isEmpty() ? 70 : 55;
-        msg.verificationStatus = QStringLiteral("unverified");
-        msg.contentType = contentImagePath.isEmpty() ? QStringLiteral("text") : QStringLiteral("image");
-        msg.metadata.insert(QStringLiteral("direction"), direction);
-        msg.metadata.insert(QStringLiteral("sender_role"), senderRole);
-
-        emit incomingMessage(msg);
-
-        consumedIds.append(inboxId);
-        if (inboxId > m_lastInboxId)
-            m_lastInboxId = inboxId;
+    if (type == QLatin1String("message_observed")) {
+        QElapsedTimer convertTimer;
+        convertTimer.start();
+        const PlatformMessage msg = platformMessageFromEvent(event);
+        const qint64 convertElapsedMs = convertTimer.elapsed();
+        if (!msg.platformConversationId.isEmpty() && !msg.content.isEmpty())
+            emit incomingMessage(msg);
+        qInfo() << "[QianniuRPAAdapter] event timing"
+                << "type=" << type
+                << "eventId=" << eventId
+                << "convertElapsedMs=" << convertElapsedMs
+                << "elapsedMs=" << timer.elapsed()
+                << "emitted=" << (!msg.platformConversationId.isEmpty() && !msg.content.isEmpty());
+        return;
     }
 
-    if (consumedIds.isEmpty())
+    if (type == QLatin1String("conversation_messages_cleared")) {
+        const QString conversation = normalizeConversationKey(event.value(QStringLiteral("conversation_key")).toString());
+        if (!conversation.isEmpty())
+            emit conversationMessagesCleared(conversation);
+        qInfo() << "[QianniuRPAAdapter] conversation cleared event"
+                << "conversation=" << conversation
+                << "eventId=" << eventId
+                << "elapsedMs=" << timer.elapsed();
         return;
+    }
 
-    // 标记已消费，避免重复
-    QSqlQuery u(db);
-    u.prepare("UPDATE rpa_inbox_messages SET consume_status = 1 WHERE id = :id");
-    db.transaction();
-    bool ok = true;
-    for (qint64 id : consumedIds) {
-        u.bindValue(":id", id);
-        if (!u.exec()) {
-            ok = false;
-            qWarning() << "[QianniuRPAAdapter] inbox 更新 consume_status 失败:" << u.lastError().text();
+    if (type == QLatin1String("conversation_deleted")) {
+        const QString conversation = normalizeConversationKey(event.value(QStringLiteral("conversation_key")).toString());
+        if (!conversation.isEmpty())
+            emit conversationDeleted(conversation);
+        qInfo() << "[QianniuRPAAdapter] conversation deleted event"
+                << "conversation=" << conversation
+                << "eventId=" << eventId
+                << "elapsedMs=" << timer.elapsed();
+        return;
+    }
+
+    if (type == QLatin1String("message_sent")) {
+        const QString conversation = normalizeConversationKey(event.value(QStringLiteral("conversation_key")).toString());
+        if (!conversation.isEmpty()) {
+            qInfo() << "[QianniuRPAAdapter] message_sent event"
+                    << "conversation=" << conversation
+                    << "clientMessageId=" << clientMessageId;
+            emit messageSent(conversation, QString(), clientMessageId);
         }
+        qInfo() << "[QianniuRPAAdapter] event timing"
+                << "type=" << type
+                << "eventId=" << eventId
+                << "elapsedMs=" << timer.elapsed();
+        return;
     }
-    ok ? db.commit() : db.rollback();
+
+    if (type == QLatin1String("send_failed")) {
+        const QString conversation = normalizeConversationKey(event.value(QStringLiteral("conversation_key")).toString());
+        QString reason = payloadObject.value(QStringLiteral("error_message")).toString();
+        if (reason.isEmpty())
+            reason = payloadObject.value(QStringLiteral("error")).toString();
+        if (reason.isEmpty())
+            reason = payloadObject.value(QStringLiteral("status")).toString();
+        if (!conversation.isEmpty()) {
+            qInfo() << "[QianniuRPAAdapter] send_failed event"
+                    << "conversation=" << conversation
+                    << "clientMessageId=" << clientMessageId
+                    << "reason=" << reason;
+            emit sendFailed(conversation,
+                            reason.isEmpty() ? QStringLiteral("qianniu_sidecar_send_failed") : reason,
+                            clientMessageId);
+        }
+        qInfo() << "[QianniuRPAAdapter] event timing"
+                << "type=" << type
+                << "eventId=" << eventId
+                << "elapsedMs=" << timer.elapsed();
+        return;
+    }
+
+    if (type == QLatin1String("account_health_changed")) {
+        const QJsonObject payload = event.value(QStringLiteral("payload")).toObject();
+        qInfo() << "[QianniuRPAAdapter] account health changed"
+                << "healthy=" << payload.value(QStringLiteral("healthy")).toBool(false)
+                << "status=" << payload.value(QStringLiteral("status")).toString()
+                << "message=" << payload.value(QStringLiteral("message")).toString();
+        qInfo() << "[QianniuRPAAdapter] event timing"
+                << "type=" << type
+                << "eventId=" << eventId
+                << "elapsedMs=" << timer.elapsed();
+        return;
+    }
+
+    qInfo() << "[QianniuRPAAdapter] unhandled realtime event type=" << type;
+}
+
+void QianniuRPAAdapter::emitConversationObserved(const QJsonObject& event)
+{
+    const QJsonObject payload = event.value(QStringLiteral("payload")).toObject();
+    const QString conversationKey = event.value(QStringLiteral("conversation_key")).toString();
+    const QString normalizedConversation = normalizeConversationKey(conversationKey);
+    if (normalizedConversation.isEmpty())
+        return;
+
+    ConversationInfo info;
+    info.platform = platformName();
+    info.platformConversationId = normalizedConversation;
+    info.customerName = payload.value(QStringLiteral("display_name")).toString(normalizedConversation);
+    info.status = QStringLiteral("active");
+    info.accountId = event.value(QStringLiteral("account_id")).toString();
+    info.sourceType = payload.value(QStringLiteral("source_type")).toString(QStringLiteral("ui_observed"));
+    info.confidence = payload.value(QStringLiteral("confidence")).toInt(70);
+    info.updatedAt = QDateTime::fromString(event.value(QStringLiteral("occurred_at")).toString(), Qt::ISODateWithMs);
+    if (!info.updatedAt.isValid())
+        info.updatedAt = QDateTime::currentDateTime();
+    info.createdAt = info.updatedAt;
+
+    emit conversationObserved(info);
+}
+
+PlatformMessage QianniuRPAAdapter::platformMessageFromEvent(const QJsonObject& event) const
+{
+    const QJsonObject payload = event.value(QStringLiteral("payload")).toObject();
+    const QString conversationKey = event.value(QStringLiteral("conversation_key")).toString();
+    const QString normalizedConversation = normalizeConversationKey(conversationKey);
+    const QString displayName = payload.value(QStringLiteral("sender_name")).toString(normalizedConversation);
+    const QString content = payload.value(QStringLiteral("content")).toString();
+    const QString rawDirection = payload.value(QStringLiteral("direction")).toString();
+    const QString rawSenderRole = payload.value(QStringLiteral("sender_role")).toString();
+    const QString direction = normalizedDirection(rawDirection, rawSenderRole, payload);
+
+    PlatformMessage msg;
+    msg.platform = platformName();
+    msg.platformConversationId = normalizedConversation;
+    msg.customerName = normalizedConversation;
+    msg.content = content;
+    msg.direction = direction;
+    msg.sender = msg.direction == QLatin1String("in")
+        ? QStringLiteral("customer")
+        : (msg.direction == QLatin1String("system") ? QStringLiteral("system") : QStringLiteral("agent"));
+    msg.createdAt = QDateTime::fromString(event.value(QStringLiteral("occurred_at")).toString(), Qt::ISODateWithMs);
+    if (!msg.createdAt.isValid())
+        msg.createdAt = QDateTime::currentDateTime();
+    msg.platformMsgId = payload.value(QStringLiteral("platform_msg_id")).toString();
+    msg.senderName = displayName;
+    msg.originalTimestamp = payload.value(QStringLiteral("metadata")).toObject().value(QStringLiteral("timestamp")).toString();
+    msg.contentImagePath = payload.value(QStringLiteral("evidence_ref")).toString();
+    msg.sourceType = payload.value(QStringLiteral("source_type")).toString(QStringLiteral("ui_observed"));
+    msg.confidence = payload.value(QStringLiteral("confidence")).toInt(70);
+    msg.verificationStatus = payload.value(QStringLiteral("verification_status")).toString(QStringLiteral("unverified"));
+    msg.contentType = payload.value(QStringLiteral("content_type")).toString(QStringLiteral("text"));
+    msg.metadata = payload;
+    msg.metadata.insert(QStringLiteral("_event_account_id"), event.value(QStringLiteral("account_id")).toString());
+    msg.metadata.insert(QStringLiteral("_event_conversation_key"), conversationKey);
+    msg.metadata.insert(QStringLiteral("raw_direction"), rawDirection);
+    msg.metadata.insert(QStringLiteral("raw_sender_role"), rawSenderRole);
+    msg.metadata.insert(QStringLiteral("normalized_direction"), direction);
+    return msg;
+}
+
+QString QianniuRPAAdapter::normalizeConversationKey(const QString& conversationKey) const
+{
+    if (conversationKey.startsWith(QStringLiteral("qianniu:"))) {
+        const int lastSep = conversationKey.lastIndexOf(QLatin1Char(':'));
+        if (lastSep >= 0 && lastSep + 1 < conversationKey.size())
+            return conversationKey.mid(lastSep + 1);
+    }
+    return conversationKey;
 }
 

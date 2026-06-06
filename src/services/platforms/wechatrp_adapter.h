@@ -4,17 +4,16 @@
 #include "iplatformadapter.h"
 #include <QJsonObject>
 #include <QSet>
-#include <QTimer>
 
-// WeChat PC adapter. The primary path consumes Python sidecar RPA events;
-// rpa_inbox_messages remains as a short-term compatibility fallback.
+// WeChat PC adapter. Commands use the command WebSocket; events arrive through
+// the event WebSocket bridge.
 class WechatRPAAdapter : public IPlatformAdapter
 {
     Q_OBJECT
 public:
     explicit WechatRPAAdapter(QObject* parent = nullptr);
 
-    QString platformName() const override { return QStringLiteral("wechat_pc"); }
+    QString platformName() const override { return QStringLiteral("wechat"); }
     void connectPlatform() override;
     void disconnectPlatform() override;
     void startListening() override;
@@ -23,20 +22,13 @@ public:
     bool isConnected() const override { return m_connected; }
 
 private:
-    void pollOnce();
-    bool pollRpaEventsOnce();
-    bool pollInboxOnce();
-    void applyPollCadence(bool hadWork);
     PlatformMessage platformMessageFromEvent(const QJsonObject& event) const;
     QString normalizeConversationKey(const QString& conversationKey) const;
     void handleRpaEvent(const QJsonObject& event);
     void emitConversationObserved(const QJsonObject& event);
 
     bool m_connected = false;
-    QTimer* m_pollTimer = nullptr;
     QString m_eventCursor = QStringLiteral("0");
-    qint64 m_lastInboxId = 0;
-    int m_idleFetchTicks = 0;
     bool m_commandInFlight = false;
     bool m_eventSocketConnected = false;
     QSet<QString> m_seenSeqs;

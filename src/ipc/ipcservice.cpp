@@ -6,12 +6,11 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QProcessEnvironment>
-#include <QCoreApplication>
 #include <QHostAddress>
+#include <QElapsedTimer>
 #include <QTimer>
-#include <QUrlQuery>
 #include <QSettings>
+#include <QUrlQuery>
 #include <QWebSocket>
 #include <QWebSocketServer>
 
@@ -61,7 +60,6 @@ void IpcService::shutdown()
     m_pendingRequests.clear();
     stopCommandWebSocketClient();
     stopEventWebSocketServer();
-    stopManagedService();
     qInfo() << "[IpcService] 已关闭";
 }
 
@@ -86,23 +84,20 @@ QString IpcService::normalizedEndpoint(const QString& endpoint) const
     return value;
 }
 
-void IpcService::setManageServiceLifecycle(bool enabled)
-{
-    m_manageServiceLifecycle = enabled;
-}
-
 void IpcService::loadConnectionSettings()
 {
     QSettings settings = AppSettings::create();
-    m_endpoint = normalizedEndpoint(settings.value(QStringLiteral("rpa/serviceEndpoint"), m_endpoint).toString());
-    m_manageServiceLifecycle = settings.value(QStringLiteral("rpa/manageServiceLifecycle"), false).toBool();
+    const QVariant savedEndpoint = settings.value(
+        QStringLiteral("pythonService/endpoint"),
+        settings.value(QStringLiteral("rpa/serviceEndpoint"), m_endpoint));
+    m_endpoint = normalizedEndpoint(savedEndpoint.toString());
 }
 
 void IpcService::saveConnectionSettings() const
 {
     QSettings settings = AppSettings::create();
-    settings.setValue(QStringLiteral("rpa/serviceEndpoint"), m_endpoint);
-    settings.setValue(QStringLiteral("rpa/manageServiceLifecycle"), m_manageServiceLifecycle);
+    settings.setValue(QStringLiteral("pythonService/endpoint"), m_endpoint);
+    settings.remove(QStringLiteral("rpa/serviceEndpoint"));
 }
 
 bool IpcService::connectToConfiguredService(QString* errorOut)
@@ -115,106 +110,14 @@ bool IpcService::connectToConfiguredService(QString* errorOut)
     return available;
 }
 
-bool IpcService::isManagedServiceRunning() const
-{
-    return m_serviceProcess && m_serviceProcess->state() != QProcess::NotRunning;
-}
-
 QString IpcService::eventWebSocketUrl() const
 {
     return QStringLiteral("ws://127.0.0.1:%1").arg(m_eventPort);
 }
 
-bool IpcService::restartManagedService(QString* errorOut)
+PlatformCommandResponse IpcService::sendPlatformCommandViaWebSocket(const PlatformCommandRequest& request, int timeoutMs)
 {
-    if (!m_manageServiceLifecycle)
-        return connectToConfiguredService(errorOut);
-
-    qInfo() << "[IpcService] 正在重启 Python sidecar";
-    stopManagedService();
-    stopExternalManagedServiceProcesses();
-    m_serviceAvailable = false;
-    emit serviceStatusChanged(false);
-    return startManagedService(errorOut);
-}
-
-bool IpcService::startManagedService(QString* errorOut)
-{
-    if (!m_manageServiceLifecycle)
-        return connectToConfiguredService(errorOut);
-
-    HealthCheckResponse health = checkHealth();
-    if (health.status == ResponseStatus::Success && health.healthy) {
-        m_serviceAvailable = true;
-        emit serviceStatusChanged(true);
-        startCommandWebSocketClient();
-        return true;
-    }
-
-    if (isManagedServiceRunning())
-        return ensureServiceAvailable(errorOut);
-
-    auto* proc = new QProcess(this);
-    proc->setProgram(QStringLiteral("python"));
-    proc->setArguments({
-        QStringLiteral("-m"),
-        QStringLiteral("service.server"),
-        QStringLiteral("--host"),
-        QStringLiteral("127.0.0.1"),
-        QStringLiteral("--port"),
-        QStringLiteral("8765"),
-    });
-    proc->setWorkingDirectory(QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python"));
-
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
-    env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
-    env.insert(QStringLiteral("YY_PARENT_PID"), QString::number(QCoreApplication::applicationPid()));
-    env.insert(QStringLiteral("YY_RPA_EVENT_WS_URL"), eventWebSocketUrl());
-    env.insert(QStringLiteral("YY_RPA_COMMAND_WS_URL"), QStringLiteral("ws://127.0.0.1:%1").arg(m_commandPort));
-    proc->setProcessEnvironment(env);
-    proc->setProcessChannelMode(QProcess::MergedChannels);
-
-    connect(proc, &QProcess::readyReadStandardOutput, this, [this, proc]() {
-        appendServiceLog(proc->readAllStandardOutput());
-    });
-    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, proc](int exitCode, QProcess::ExitStatus) {
-        appendServiceLog(proc->readAllStandardOutput());
-        qInfo() << "[IpcService] Python sidecar 已退出，退出码:" << exitCode;
-        if (m_serviceProcess == proc)
-            m_serviceProcess = nullptr;
-        m_serviceAvailable = false;
-        emit serviceStatusChanged(false);
-        proc->deleteLater();
-    });
-    connect(proc, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        qWarning() << "[IpcService] Python sidecar 进程错误:" << static_cast<int>(error);
-        m_serviceAvailable = false;
-        emit serviceStatusChanged(false);
-    });
-
-    m_serviceProcess = proc;
-    proc->start();
-    if (!proc->waitForStarted(3000)) {
-        const QString error = QStringLiteral("无法启动 Python AI 服务，请确认 python 在 PATH 中可用");
-        if (errorOut)
-            *errorOut = error;
-        qWarning() << "[IpcService]" << error;
-        proc->deleteLater();
-        m_serviceProcess = nullptr;
-        m_serviceAvailable = false;
-        emit serviceStatusChanged(false);
-        return false;
-    }
-
-    qInfo() << "[IpcService] 已启动 Python sidecar: python -m service.server";
-    return ensureServiceAvailable(errorOut);
-}
-
-RpaCommandResponse IpcService::sendRpaCommandViaWebSocket(const RpaCommandRequest& request, int timeoutMs)
-{
-    RpaCommandResponse response;
+    PlatformCommandResponse response;
     response.requestId = request.requestId;
     response.respondedAt = QDateTime::currentDateTime();
 
@@ -269,8 +172,8 @@ RpaCommandResponse IpcService::sendRpaCommandViaWebSocket(const RpaCommandReques
     const QMetaObject::Connection disconnectedConn = QObject::connect(
         m_commandSocket, &QWebSocket::disconnected, &responseLoop, &QEventLoop::quit);
 
-    const QJsonObject payload = buildRpaCommandPayload(request);
-    qInfo() << "[IpcService] command WebSocket send"
+    const QJsonObject payload = buildPlatformCommandPayload(request);
+    qInfo() << "[IpcService] platform command WebSocket send"
             << "requestId=" << request.requestId
             << "command=" << request.commandType
             << "taskId=" << request.taskId
@@ -306,30 +209,16 @@ RpaCommandResponse IpcService::sendRpaCommandViaWebSocket(const RpaCommandReques
     response.status = responseStatusFromString(json.value(QStringLiteral("status")).toString(QStringLiteral("success")));
     response.errorMessage = json.value(QStringLiteral("error")).toString();
     response.result = json.value(QStringLiteral("result")).toObject();
-    qInfo() << "[IpcService] command WebSocket response"
+    qInfo() << "[IpcService] platform command WebSocket response"
             << "requestId=" << request.requestId
             << "status=" << json.value(QStringLiteral("status")).toString()
             << "error=" << response.errorMessage;
     return response;
 }
 
-void IpcService::stopManagedService()
+RpaCommandResponse IpcService::sendRpaCommandViaWebSocket(const RpaCommandRequest& request, int timeoutMs)
 {
-    if (!m_manageServiceLifecycle)
-        return;
-
-    if (!m_serviceProcess)
-        return;
-
-    QProcess* proc = m_serviceProcess;
-    m_serviceProcess = nullptr;
-    proc->disconnect(this);
-    proc->terminate();
-    if (!proc->waitForFinished(2000))
-        proc->kill();
-    proc->deleteLater();
-    m_serviceAvailable = false;
-    emit serviceStatusChanged(false);
+    return sendPlatformCommandViaWebSocket(request, timeoutMs);
 }
 
 void IpcService::startEventWebSocketServer()
@@ -359,6 +248,7 @@ void IpcService::startEventWebSocketServer()
             connect(socket, &QWebSocket::disconnected,
                     this, &IpcService::onEventSocketDisconnected);
             qInfo() << "[IpcService] event WebSocket connected count=" << m_eventSockets.size();
+            emit platformEventBridgeStateChanged(true);
             emit rpaEventBridgeStateChanged(true);
         }
     });
@@ -424,17 +314,28 @@ void IpcService::stopCommandWebSocketClient()
 
 void IpcService::handleEventSocketPayload(const QJsonObject& payload)
 {
+    QElapsedTimer timer;
+    timer.start();
     const QString type = payload.value(QStringLiteral("type")).toString();
     if (type == QLatin1String("rpa_event")) {
         const QJsonObject event = payload.value(QStringLiteral("event")).toObject();
-        if (!event.isEmpty())
+        if (!event.isEmpty()) {
+            emit platformEventReceived(event);
             emit rpaEventReceived(event);
+            qInfo() << "[IpcService] platform event dispatch timing"
+                    << "eventId=" << event.value(QStringLiteral("event_id")).toString()
+                    << "platform=" << event.value(QStringLiteral("platform")).toString()
+                    << "eventType=" << event.value(QStringLiteral("event_type")).toString()
+                    << "cursor=" << event.value(QStringLiteral("cursor")).toString()
+                    << "elapsedMs=" << timer.elapsed();
+        }
         return;
     }
     if (type == QLatin1String("hello")) {
         qInfo() << "[IpcService] event WebSocket hello"
                 << payload.value(QStringLiteral("platform")).toString()
                 << payload.value(QStringLiteral("account_id")).toString();
+        emit platformEventBridgeStateChanged(true);
         emit rpaEventBridgeStateChanged(true);
         return;
     }
@@ -443,12 +344,17 @@ void IpcService::handleEventSocketPayload(const QJsonObject& payload)
 
 void IpcService::onEventSocketTextMessageReceived(const QString& message)
 {
+    QElapsedTimer timer;
+    timer.start();
     const QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
     if (!doc.isObject()) {
         qWarning() << "[IpcService] event WebSocket invalid JSON";
         return;
     }
     handleEventSocketPayload(doc.object());
+    qInfo() << "[IpcService] event WebSocket parse timing"
+            << "bytes=" << message.toUtf8().size()
+            << "elapsedMs=" << timer.elapsed();
 }
 
 void IpcService::onEventSocketDisconnected()
@@ -458,6 +364,7 @@ void IpcService::onEventSocketDisconnected()
         return;
     m_eventSockets.remove(socket);
     qInfo() << "[IpcService] event WebSocket disconnected count=" << m_eventSockets.size();
+    emit platformEventBridgeStateChanged(!m_eventSockets.isEmpty());
     emit rpaEventBridgeStateChanged(!m_eventSockets.isEmpty());
     socket->deleteLater();
 }
@@ -484,45 +391,6 @@ void IpcService::onCommandSocketDisconnected()
         m_commandSocket = nullptr;
         socket->deleteLater();
     }
-}
-
-void IpcService::stopExternalManagedServiceProcesses()
-{
-#ifdef Q_OS_WIN
-    QProcess killer;
-    killer.setProgram(QStringLiteral("powershell"));
-    killer.setArguments({
-        QStringLiteral("-NoProfile"),
-        QStringLiteral("-ExecutionPolicy"),
-        QStringLiteral("Bypass"),
-        QStringLiteral("-Command"),
-        QStringLiteral(
-            "$procs = Get-CimInstance Win32_Process | Where-Object { "
-            "$_.CommandLine -and "
-            "$_.CommandLine -match 'python' -and "
-            "$_.CommandLine -match 'service\\.server' -and "
-            "$_.CommandLine -match '--port' -and "
-            "$_.CommandLine -match '8765' "
-            "}; "
-            "$procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
-            "Write-Output (($procs | Measure-Object).Count)"
-        ),
-    });
-    killer.setProcessChannelMode(QProcess::MergedChannels);
-    killer.start();
-    if (!killer.waitForFinished(3000)) {
-        killer.kill();
-        qWarning() << "[IpcService] 停止已有 Python sidecar 超时";
-        return;
-    }
-
-    const QString output = QString::fromUtf8(killer.readAll()).trimmed();
-    if (killer.exitCode() != 0) {
-        qWarning() << "[IpcService] 停止已有 Python sidecar 失败:" << output;
-        return;
-    }
-    qInfo() << "[IpcService] 已停止已有 Python sidecar 进程数:" << output;
-#endif
 }
 
 bool IpcService::ensureServiceAvailable(QString* errorOut)
@@ -634,91 +502,157 @@ HealthCheckResponse IpcService::checkHealth()
     return response;
 }
 
-RpaCommandResponse IpcService::sendRpaCommand(const RpaCommandRequest& request, int timeoutMs)
+QJsonObject IpcService::fetchPlatformStatuses(int timeoutMs,
+                                              ResponseStatus* statusOut,
+                                              QString* errorOut)
 {
-    RpaCommandResponse response;
-    response.requestId = request.requestId;
-    response.respondedAt = QDateTime::currentDateTime();
+    QUrl url(m_endpoint + QStringLiteral("/api/platforms"));
+    QJsonObject statuses = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] platform statuses fetched"
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "platforms=" << statuses.value(QStringLiteral("platforms")).toArray().size()
+            << "error=" << (errorOut ? *errorOut : QString());
+    return statuses;
+}
 
-    ResponseStatus status = ResponseStatus::Error;
-    QString error;
-    const QJsonObject json = performJsonPost(
-        QUrl(m_endpoint + QStringLiteral("/api/rpa/command")),
-        buildRpaCommandPayload(request),
-        timeoutMs,
-        &status,
-        &error);
+QJsonObject IpcService::fetchCacheSnapshot(const QString& platform,
+                                           int conversationLimit,
+                                           int messageLimit,
+                                           const QString& cursor,
+                                           int timeoutMs,
+                                           ResponseStatus* statusOut,
+                                           QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/cache/snapshot"));
+    QUrlQuery query;
+    if (!platform.trimmed().isEmpty())
+        query.addQueryItem(QStringLiteral("platform"), platform.trimmed().toLower());
+    if (!cursor.trimmed().isEmpty())
+        query.addQueryItem(QStringLiteral("cursor"), cursor.trimmed());
+    query.addQueryItem(QStringLiteral("conversation_limit"), QString::number(qMax(1, conversationLimit)));
+    query.addQueryItem(QStringLiteral("message_limit"), QString::number(qMax(1, messageLimit)));
+    url.setQuery(query);
 
-    response.status = status;
-    response.errorMessage = error;
-    if (status != ResponseStatus::Success)
-        return response;
+    QJsonObject snapshot = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] cache snapshot fetched"
+            << "platform=" << platform
+            << "cursor=" << cursor
+            << "sourceRole=" << snapshot.value(QStringLiteral("source_role")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "conversations=" << snapshot.value(QStringLiteral("conversation_count")).toInt()
+            << "messages=" << snapshot.value(QStringLiteral("message_count")).toInt();
+    return snapshot;
+}
 
-    response.status = responseStatusFromString(json.value(QStringLiteral("status")).toString(QStringLiteral("success")));
-    response.errorMessage = json.value(QStringLiteral("error")).toString();
-    response.result = json.value(QStringLiteral("result")).toObject();
+QJsonObject IpcService::fetchPlatformReplay(const QString& platform,
+                                            const QString& cursor,
+                                            int limit,
+                                            int timeoutMs,
+                                            ResponseStatus* statusOut,
+                                            QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/platform/replay"));
+    QUrlQuery query;
+    if (!platform.trimmed().isEmpty())
+        query.addQueryItem(QStringLiteral("platform"), platform.trimmed().toLower());
+    if (!cursor.trimmed().isEmpty())
+        query.addQueryItem(QStringLiteral("cursor"), cursor.trimmed());
+    query.addQueryItem(QStringLiteral("limit"), QString::number(qMax(1, limit)));
+    url.setQuery(query);
+
+    QJsonObject replay = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] platform replay fetched"
+            << "platform=" << platform
+            << "cursor=" << cursor
+            << "sourceRole=" << replay.value(QStringLiteral("source_role")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "events=" << replay.value(QStringLiteral("event_count")).toInt()
+            << "nextCursor=" << replay.value(QStringLiteral("cursor")).toString();
+    return replay;
+}
+
+QJsonObject IpcService::fetchRpaReplay(const QString& platform,
+                                       const QString& cursor,
+                                       int limit,
+                                       int timeoutMs,
+                                       ResponseStatus* statusOut,
+                                       QString* errorOut)
+{
+    return fetchPlatformReplay(platform, cursor, limit, timeoutMs, statusOut, errorOut);
+}
+
+QJsonObject IpcService::clearConversationMessages(const QString& platform,
+                                                  const QString& accountId,
+                                                  const QString& conversationKey,
+                                                  int timeoutMs,
+                                                  ResponseStatus* statusOut,
+                                                  QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/conversations/clear_messages"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("platform"), platform.trimmed().toLower());
+    payload.insert(QStringLiteral("account_id"), accountId.trimmed());
+    payload.insert(QStringLiteral("conversation_key"), conversationKey.trimmed());
+    payload.insert(QStringLiteral("operator"), QStringLiteral("cpp_client"));
+    payload.insert(QStringLiteral("reason"), QStringLiteral("aggregate_context_menu"));
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] clear conversation messages"
+            << "platform=" << platform
+            << "conversationKey=" << conversationKey
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
     return response;
 }
 
-RpaEventBatch IpcService::fetchRpaEvents(const QString& platformType,
-                                         const QString& cursor,
-                                         int limit,
-                                         int timeoutMs)
+QJsonObject IpcService::deleteConversationOnService(const QString& platform,
+                                                    const QString& accountId,
+                                                    const QString& conversationKey,
+                                                    int timeoutMs,
+                                                    ResponseStatus* statusOut,
+                                                    QString* errorOut)
 {
-    RpaEventBatch batch;
-    batch.respondedAt = QDateTime::currentDateTime();
-    batch.cursor = cursor;
+    QUrl url(m_endpoint + QStringLiteral("/api/conversations/delete"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("platform"), platform.trimmed().toLower());
+    payload.insert(QStringLiteral("account_id"), accountId.trimmed());
+    payload.insert(QStringLiteral("conversation_key"), conversationKey.trimmed());
+    payload.insert(QStringLiteral("operator"), QStringLiteral("cpp_client"));
+    payload.insert(QStringLiteral("reason"), QStringLiteral("aggregate_context_menu"));
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] delete conversation"
+            << "platform=" << platform
+            << "conversationKey=" << conversationKey
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
 
-    QUrl url(m_endpoint + QStringLiteral("/api/rpa/events"));
-    QUrlQuery query;
-    query.addQueryItem(QStringLiteral("platform"), platformType);
-    query.addQueryItem(QStringLiteral("cursor"), cursor.isEmpty() ? QStringLiteral("0") : cursor);
-    query.addQueryItem(QStringLiteral("limit"), QString::number(limit));
-    url.setQuery(query);
+int IpcService::dispatchPlatformReplayEvents(const QJsonObject& replay)
+{
+    if (replay.value(QStringLiteral("status")).toString() != QLatin1String("success"))
+        return 0;
 
-    ResponseStatus status = ResponseStatus::Error;
-    QString error;
-    const QJsonObject json = performJsonGet(url, timeoutMs, &status, &error);
-    batch.status = status;
-    batch.errorMessage = error;
-    if (status != ResponseStatus::Success)
-        return batch;
-
-    batch.status = responseStatusFromString(json.value(QStringLiteral("status")).toString(QStringLiteral("success")));
-    batch.errorMessage = json.value(QStringLiteral("error")).toString();
-    batch.cursor = json.value(QStringLiteral("cursor")).toString(cursor);
-    batch.latestCursor = json.value(QStringLiteral("latest_cursor")).toString(batch.cursor);
-    const QJsonArray events = json.value(QStringLiteral("events")).toArray();
+    int dispatched = 0;
+    const QJsonArray events = replay.value(QStringLiteral("events")).toArray();
     for (const QJsonValue& value : events) {
-        if (value.isObject())
-            batch.events.append(value.toObject());
+        QJsonObject event = value.toObject();
+        if (event.isEmpty())
+            continue;
+        event.insert(QStringLiteral("replayed"), true);
+        emit platformEventReceived(event);
+        emit rpaEventReceived(event);
+        ++dispatched;
     }
-    return batch;
+    qInfo() << "[IpcService] platform replay dispatched"
+            << "platform=" << replay.value(QStringLiteral("platform")).toString()
+            << "events=" << dispatched
+            << "cursor=" << replay.value(QStringLiteral("cursor")).toString();
+    return dispatched;
 }
 
-RpaCommandResponse IpcService::checkRpaHealth(const QString& platformType, int timeoutMs)
+int IpcService::dispatchRpaReplayEvents(const QJsonObject& replay)
 {
-    RpaCommandResponse response;
-    response.requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    response.respondedAt = QDateTime::currentDateTime();
-
-    QUrl url(m_endpoint + QStringLiteral("/api/rpa/health"));
-    QUrlQuery query;
-    query.addQueryItem(QStringLiteral("platform"), platformType);
-    url.setQuery(query);
-
-    ResponseStatus status = ResponseStatus::Error;
-    QString error;
-    const QJsonObject json = performJsonGet(url, timeoutMs, &status, &error);
-    response.status = status;
-    response.errorMessage = error;
-    if (status != ResponseStatus::Success)
-        return response;
-
-    response.status = responseStatusFromString(json.value(QStringLiteral("status")).toString(QStringLiteral("success")));
-    response.errorMessage = json.value(QStringLiteral("error")).toString();
-    response.result = json;
-    return response;
+    return dispatchPlatformReplayEvents(replay);
 }
 
 void IpcService::appendServiceLog(const QByteArray& chunk)
@@ -802,7 +736,7 @@ QJsonObject IpcService::buildAiSuggestionPayload(const AiSuggestionRequest& requ
     QJsonObject payload;
     payload[QStringLiteral("request_id")] = request.requestId;
     payload[QStringLiteral("conversation_id")] = request.conversationId;
-    payload[QStringLiteral("platform_type")] = request.platformType;
+    payload[QStringLiteral("platform")] = request.platform;
     payload[QStringLiteral("max_suggestions")] = request.maxSuggestions;
     payload[QStringLiteral("customer_context")] = request.customerContext;
 
@@ -822,20 +756,23 @@ QJsonObject IpcService::buildAiSuggestionPayload(const AiSuggestionRequest& requ
     return payload;
 }
 
-QJsonObject IpcService::buildRpaCommandPayload(const RpaCommandRequest& request) const
+QJsonObject IpcService::buildPlatformCommandPayload(const PlatformCommandRequest& request) const
 {
     QJsonObject payload;
     payload[QStringLiteral("request_id")] = request.requestId;
     payload[QStringLiteral("client_message_id")] = request.taskId;
     payload[QStringLiteral("command")] = request.commandType;
-    payload[QStringLiteral("command_type")] = request.commandType;
-    payload[QStringLiteral("platform")] = request.platformType;
-    payload[QStringLiteral("platform_type")] = request.platformType;
+    payload[QStringLiteral("platform")] = request.platform;
     payload[QStringLiteral("account_id")] = request.accountId;
     payload[QStringLiteral("task_id")] = request.taskId;
     payload[QStringLiteral("target_window")] = request.targetWindow;
     payload[QStringLiteral("parameters")] = request.parameters;
     return payload;
+}
+
+QJsonObject IpcService::buildRpaCommandPayload(const RpaCommandRequest& request) const
+{
+    return buildPlatformCommandPayload(request);
 }
 
 QJsonObject IpcService::performJsonGet(const QUrl& url, int timeoutMs,

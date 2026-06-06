@@ -13,7 +13,7 @@ namespace Ipc {
 enum class RequestType {
     AiSuggestion,
     AiChat,
-    RpaCommand,
+    PlatformCommand,
     HealthCheck,
     Unknown,
 };
@@ -28,7 +28,7 @@ enum class ResponseStatus {
 struct AiSuggestionRequest {
     QString requestId;
     int conversationId = 0;
-    QString platformType;
+    QString platform;
     QVector<QPair<QString, QString>> recentMessages;
     QString customerContext;
     int maxSuggestions = 3;
@@ -47,25 +47,28 @@ struct AiSuggestionResponse {
     QDateTime respondedAt;
 };
 
-struct RpaCommandRequest {
+struct PlatformCommandRequest {
     QString requestId;
     QString commandType;
-    QString platformType;
+    QString platform;
     QString accountId;
     QString taskId;
     QString targetWindow;
     QJsonObject parameters;
 
-    RpaCommandRequest() : requestId(QUuid::createUuid().toString(QUuid::WithoutBraces)) {}
+    PlatformCommandRequest() : requestId(QUuid::createUuid().toString(QUuid::WithoutBraces)) {}
 };
 
-struct RpaCommandResponse {
+struct PlatformCommandResponse {
     QString requestId;
     ResponseStatus status = ResponseStatus::Success;
     QString errorMessage;
     QJsonObject result;
     QDateTime respondedAt;
 };
+
+using RpaCommandRequest = PlatformCommandRequest;
+using RpaCommandResponse = PlatformCommandResponse;
 
 struct HealthCheckRequest {
     QString requestId;
@@ -83,15 +86,6 @@ struct HealthCheckResponse {
     QDateTime respondedAt;
 };
 
-struct RpaEventBatch {
-    ResponseStatus status = ResponseStatus::Success;
-    QString errorMessage;
-    QString cursor;
-    QString latestCursor;
-    QVector<QJsonObject> events;
-    QDateTime respondedAt;
-};
-
 QString toString(RequestType type);
 QString toString(ResponseStatus status);
 RequestType requestTypeFromString(const QString& value);
@@ -101,10 +95,9 @@ ResponseStatus responseStatusFromString(const QString& value);
 
 Q_DECLARE_METATYPE(Ipc::AiSuggestionRequest)
 Q_DECLARE_METATYPE(Ipc::AiSuggestionResponse)
-Q_DECLARE_METATYPE(Ipc::RpaCommandRequest)
-Q_DECLARE_METATYPE(Ipc::RpaCommandResponse)
+Q_DECLARE_METATYPE(Ipc::PlatformCommandRequest)
+Q_DECLARE_METATYPE(Ipc::PlatformCommandResponse)
 Q_DECLARE_METATYPE(Ipc::HealthCheckRequest)
 Q_DECLARE_METATYPE(Ipc::HealthCheckResponse)
-Q_DECLARE_METATYPE(Ipc::RpaEventBatch)
 
 #endif // IPCTYPES_H
