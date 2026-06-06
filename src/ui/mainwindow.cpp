@@ -5,10 +5,8 @@
 #include "aicustomerservicebackendwindow.h"
 #include "editprofiledialog.h"
 #include "foldarrowcombobox.h"
-#include "rpamanagedialog.h"
+#include "pythonserviceconnectiondialog.h"
 #include "helpcenterdialog.h"
-#include "rpa_console_window.h"
-#include "rpaprocesscontroller.h"
 #include "../data/userdao.h"
 #include "../utils/appsettings.h"
 #include "../utils/applystyle.h"
@@ -71,10 +69,6 @@
 #include <QWindow>
 #include <functional>
 #include <QFile>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonParseError>
-#include <QJsonValue>
 #include <QRegularExpression>
 #include <QComboBox>
 #include <QGroupBox>
@@ -1104,114 +1098,6 @@ protected:
     }
 };
 
-// ==================== RPA region calibration overlay (WeChat / 千牛 OCR) ====================
-
-class RpaRegionCalibrationOverlay : public QWidget
-{
-public:
-    explicit RpaRegionCalibrationOverlay(QWidget* parent = nullptr)
-        : QWidget(parent,
-                  Qt::Tool
-                      | Qt::FramelessWindowHint
-                      | Qt::WindowStaysOnTopHint)
-    {
-        setAttribute(Qt::WA_TransparentForMouseEvents, false);
-        setAttribute(Qt::WA_TranslucentBackground, true);
-        setAttribute(Qt::WA_NoSystemBackground);
-        setMouseTracking(true);
-        setFocusPolicy(Qt::StrongFocus);
-    }
-
-    void setOnFinished(std::function<void(bool, const QRect&)> cb) { m_onFinished = std::move(cb); }
-    void setHelpTip(const QString& s) { m_helpTip = s; }
-    void setDimColor(const QColor& c) { m_dimColor = c; }
-
-protected:
-    void paintEvent(QPaintEvent*) override
-    {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, true);
-        p.fillRect(rect(), m_dimColor);
-
-        // help text
-        p.setPen(Qt::white);
-        p.setFont(QFont(p.font().family(), 10));
-        p.drawText(QRect(0, 8, width(), 44), Qt::AlignHCenter | Qt::AlignTop | Qt::TextWordWrap, m_helpTip);
-
-        if (m_selecting || m_selection.isValid()) {
-            QRect r = m_selection.normalized();
-            p.setPen(QPen(QColor(70, 170, 255, 220), 2));
-            p.setBrush(QColor(70, 170, 255, 40));
-            p.drawRoundedRect(r, 6, 6);
-
-            p.setPen(Qt::white);
-            p.drawText(r.adjusted(8, 8, -8, -8),
-                       Qt::AlignLeft | Qt::AlignTop,
-                       QStringLiteral("%1x%2").arg(r.width()).arg(r.height()));
-        }
-    }
-
-    void mousePressEvent(QMouseEvent* e) override
-    {
-        if (e->button() != Qt::LeftButton) return;
-        m_selecting = true;
-        m_origin = e->pos();
-        m_selection = QRect(m_origin, m_origin);
-        update();
-    }
-
-    void mouseMoveEvent(QMouseEvent* e) override
-    {
-        if (!m_selecting) return;
-        m_selection = QRect(m_origin, e->pos());
-        update();
-    }
-
-    void mouseReleaseEvent(QMouseEvent* e) override
-    {
-        if (e->button() != Qt::LeftButton) return;
-        m_selecting = false;
-        m_selection = QRect(m_origin, e->pos());
-        update();
-    }
-
-    void keyPressEvent(QKeyEvent* e) override
-    {
-        if (e->key() == Qt::Key_Escape) {
-            finish(false);
-            return;
-        }
-        if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
-            finish(true);
-            return;
-        }
-        QWidget::keyPressEvent(e);
-    }
-
-private:
-    void finish(bool ok)
-    {
-        const QRect selection = m_selection.normalized();
-        auto callback = m_onFinished;
-        m_onFinished = {};
-        hide();
-        close();
-        if (m_onFinished) {
-            m_onFinished(ok, selection);
-        } else if (callback) {
-            callback(ok, selection);
-        }
-        deleteLater();
-    }
-
-    bool m_selecting = false;
-    QPoint m_origin;
-    QRect m_selection;
-    std::function<void(bool, const QRect&)> m_onFinished;
-    QString m_helpTip = QStringLiteral("框选微信“聊天气泡滚动区”（Esc取消，回车确认）");
-    QColor m_dimColor = QColor(20, 20, 24, 120);
-};
-
 // ==================== Tree roles & delegate ====================
 
 namespace {
@@ -1382,23 +1268,6 @@ bool showStyledIntInputDialog(QWidget* parent,
 }
 
 } // namespace
-
-bool managedWindowShowsPddOcrCalibration(quintptr hwnd)
-{
-    if (!Win32WindowHelper::isWindowValid(hwnd))
-        return false;
-    const QString exe = Win32WindowHelper::executableBaseNameForWindow(hwnd).toLower();
-    const bool isBrowser = exe.contains(QStringLiteral("chrome"))
-        || exe.contains(QStringLiteral("msedge"))
-        || exe.contains(QStringLiteral("edge"));
-    if (!isBrowser)
-        return false;
-    const QString t = Win32WindowHelper::windowTitle(hwnd);
-    return t.contains(QStringLiteral("拼多多"))
-        || t.contains(QStringLiteral("Pinduoduo"), Qt::CaseInsensitive)
-        || t.contains(QStringLiteral("商家后台"))
-        || t.contains(QStringLiteral("多多商家"));
-}
 
 QStringList loadCustomEncouragementMessages()
 {
@@ -1638,14 +1507,6 @@ MainWindow::MainWindow(const QString& username, QWidget* parent)
 
     setupStyles();
     buildStatusBar();
-    m_rpaProcessController = new RpaProcessController(this);
-    connect(m_rpaProcessController, &RpaProcessController::logAppended,
-            this, &MainWindow::rpaProcessOutputAppended);
-    connect(m_rpaProcessController, &RpaProcessController::statusMessageRequested,
-            this, [this](const QString& text, int timeoutMs) {
-                if (statusBar())
-                    statusBar()->showMessage(text, timeoutMs);
-            });
     m_windowStateTimer = new QTimer(this);
     m_windowStateTimer->setInterval(250);
     connect(m_windowStateTimer, &QTimer::timeout,
@@ -2222,24 +2083,16 @@ QWidget* MainWindow::buildReadyPage()
     connect(btnPick, &QToolButton::clicked, this, &MainWindow::startOneClickAggregate);
     auto* btnEmbed = makeQuick(resourceIcon(QStringLiteral(":/start_or_stop_rpa_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_FileDialogListView)),
-                               QStringLiteral("RPA 管理"));
-    m_btnRpaManage = btnEmbed;
-    m_btnRpaManage->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_btnRpaManage, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
-        QMenu menu(m_btnRpaManage);
-        QAction* viewConsole = menu.addAction(QStringLiteral("查看控制台输出"));
-        QAction* triggered = menu.exec(m_btnRpaManage->mapToGlobal(pos));
-        if (triggered == viewConsole)
-            openRpaConsoleWindow();
-    });
-    m_btnRpaManage->setToolTip(QStringLiteral("左键：管理启动/停止 RPA\n右键：查看控制台输出"));
+                               QStringLiteral("Python 服务端"));
+    m_btnPythonServiceConnection = btnEmbed;
+    m_btnPythonServiceConnection->setToolTip(QStringLiteral("配置并测试独立 Python 服务端连接"));
     auto* btnStart = makeQuick(resourceIcon(QStringLiteral(":/quick_launch_application_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_DialogOkButton)),
                                QStringLiteral("快速启动应用"));
     m_btnQuickStart = btnStart;
     m_btnQuickStart->setToolTip(
         QStringLiteral("左键：按列表快速启动（受「数量上限」约束，默认前 10 项）\n右键：管理应用列表 / 设置数量上限"));
-    connect(btnEmbed, &QToolButton::clicked, this, &MainWindow::openRpaManageDialog);
+    connect(btnEmbed, &QToolButton::clicked, this, &MainWindow::openPythonServiceConnectionDialog);
     connect(btnStart, &QToolButton::clicked, this, &MainWindow::runQuickLaunchApps);
     btnStart->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(btnStart, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
@@ -2291,58 +2144,10 @@ void MainWindow::openAddWindowDialog()
     dlg.exec();
 }
 
-void MainWindow::openRpaManageDialog()
+void MainWindow::openPythonServiceConnectionDialog()
 {
-    RpaManageDialog dlg(this, this);
+    PythonServiceConnectionDialog dlg(this, this);
     dlg.exec();
-}
-
-void MainWindow::openRpaConsoleWindow()
-{
-    if (!m_rpaConsoleWindow) {
-        // 勿用 this 作 QWidget 父级，否则 QDialog 会作为主窗口瞬态子窗体而长期叠在主窗之上。
-        m_rpaConsoleWindow = new RpaConsoleWindow(this, nullptr);
-        connect(m_rpaConsoleWindow, &QObject::destroyed, this, [this]() {
-            m_rpaConsoleWindow = nullptr;
-        });
-    }
-    m_rpaConsoleWindow->show();
-    m_rpaConsoleWindow->raise();
-    m_rpaConsoleWindow->activateWindow();
-}
-
-QString MainWindow::rpaProcessLog(const QString& platformId) const
-{
-    return m_rpaProcessController ? m_rpaProcessController->processLog(platformId) : QString();
-}
-
-void MainWindow::clearRpaProcessLog(const QString& platformId)
-{
-    if (m_rpaProcessController)
-        m_rpaProcessController->clearProcessLog(platformId);
-}
-
-void MainWindow::appendRpaProcessLog(const QString& platformId, const QString& text)
-{
-    Q_UNUSED(platformId)
-    Q_UNUSED(text)
-}
-
-QStringList MainWindow::runningRpaPlatformIds() const
-{
-    return m_rpaProcessController ? m_rpaProcessController->runningPlatformIds() : QStringList();
-}
-
-void MainWindow::startRpaPlatforms(const QStringList& platformIds)
-{
-    if (m_rpaProcessController)
-        m_rpaProcessController->startPlatforms(platformIds);
-}
-
-void MainWindow::stopRpaPlatforms(const QStringList& platformIds)
-{
-    if (m_rpaProcessController)
-        m_rpaProcessController->stopPlatforms(platformIds);
 }
 
 int MainWindow::oneClickMaxOnlineLimit() const
@@ -3804,188 +3609,10 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
     else
         actPrimary = menu.addAction(QStringLiteral("删除"));
 
-    QAction* actCalibratePdd = nullptr;
-    {
-        const quintptr hwnd = m_managedWindows[id].handle;
-        if (managedWindowShowsPddOcrCalibration(hwnd)) {
-            actCalibratePdd = menu.addAction(QStringLiteral("拼多多OCR区域校准"));
-        }
-    }
-
     QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
     if (chosen == actPrimary) {
         removeOnlinePlatformItem(id);
-    } else if (actCalibratePdd && chosen == actCalibratePdd) {
-        startPddRpaCalibration(id);
     }
-}
-
-void MainWindow::startPddRpaCalibration(const QString& platformId)
-{
-    if (!m_managedWindows.contains(platformId))
-        return;
-
-    const ManagedWindowEntry entry = m_managedWindows.value(platformId);
-    const quintptr hwnd = entry.handle;
-    if (!Win32WindowHelper::isWindowValid(hwnd)) {
-        qWarning() << "[MainWindow] 拼多多RPA校准失败：窗口无效";
-        return;
-    }
-
-    // Ensure we are showing the correct page so user can see selection area
-    switchToWindow(platformId);
-
-    QMessageBox::information(
-        this,
-        QStringLiteral("拼多多 OCR 区域校准"),
-        QStringLiteral(
-            "将分两步在全屏半透明层上框选（可隐约看到下层拼多多后台）。\n"
-            "第 1 步：聊天消息气泡滚动区；第 2 步：输入框区域（用于点击聚焦+粘贴）。\n"
-            "每步：拖拽框选后按回车确认，Esc 取消。\n\n"
-            "提示：校准保存的是相对拼多多窗口 PrintWindow 像素坐标；请尽量保持浏览器缩放为 100%。"));
-
-    const QRect wr = Win32WindowHelper::windowRect(hwnd);
-    QScreen* baseScreen = QGuiApplication::screenAt(wr.center());
-    if (!baseScreen)
-        baseScreen = QGuiApplication::primaryScreen();
-    const QRect screenGeom = baseScreen->geometry();
-
-    auto* o1 = new RpaRegionCalibrationOverlay(nullptr);
-    o1->setAttribute(Qt::WA_NativeWindow, true);
-    o1->setHelpTip(QStringLiteral("拼多多 1/2：框选聊天消息区域，Esc 取消，回车确认"));
-    o1->setDimColor(QColor(24, 26, 32, 72));
-    o1->setGeometry(screenGeom);
-    o1->show();
-    o1->raise();
-    o1->activateWindow();
-    o1->setFocus();
-
-    qInfo() << "[MainWindow] 拼多多 OCR 校准开始 handle=0x"
-            << QString::number(static_cast<qulonglong>(hwnd), 16)
-            << "screenGeom(" << formatRect(screenGeom) << ")";
-
-    o1->setOnFinished([this, hwnd, screenGeom, o1](bool ok, QRect sel) {
-        if (!ok) {
-            qInfo() << "[MainWindow] 拼多多校准第 1 步已取消";
-            return;
-        }
-        if (!Win32WindowHelper::isWindowValid(hwnd)) {
-            qWarning() << "[MainWindow] 拼多多校准第 1 步失败：窗口已无效";
-            return;
-        }
-
-        QScreen* sc = o1->screen();
-        const qreal dpr = sc ? sc->devicePixelRatio() : 1.0;
-        const QRect chatPx = Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(
-            o1->winId(), hwnd, sel, dpr, o1->size());
-
-        if (chatPx.width() < 16 || chatPx.height() < 16) {
-            qWarning() << "[MainWindow] 拼多多校准第1步映射失败 sel=" << formatRect(sel)
-                       << "mapped=" << formatRect(chatPx);
-            QMessageBox::warning(this,
-                                 QStringLiteral("拼多多校准"),
-                                 QStringLiteral("第 1 步选区映射失败或过小，请重试。"));
-            return;
-        }
-
-        auto* o2 = new RpaRegionCalibrationOverlay(nullptr);
-        o2->setAttribute(Qt::WA_NativeWindow, true);
-        o2->setHelpTip(QStringLiteral("拼多多 2/2：框选输入框区域，Esc 取消，回车确认"));
-        o2->setDimColor(QColor(24, 26, 32, 72));
-        o2->setGeometry(screenGeom);
-        o2->show();
-        o2->raise();
-        o2->activateWindow();
-        o2->setFocus();
-
-        o2->setOnFinished([this, hwnd, chatPx, o2](bool ok2, QRect sel2) {
-            if (!ok2) {
-                qInfo() << "[MainWindow] 拼多多校准第 2 步已取消（配置未写入）";
-                return;
-            }
-            if (!Win32WindowHelper::isWindowValid(hwnd)) {
-                qWarning() << "[MainWindow] 拼多多校准写入失败：窗口已无效";
-                return;
-            }
-
-            QScreen* sc2 = o2->screen();
-            const qreal dpr2 = sc2 ? sc2->devicePixelRatio() : 1.0;
-            const QRect inputPx = Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(
-                o2->winId(), hwnd, sel2, dpr2, o2->size());
-
-            if (inputPx.width() < 8 || inputPx.height() < 8) {
-                qWarning() << "[MainWindow] 拼多多校准第2步映射失败 sel=" << formatRect(sel2)
-                           << "mapped=" << formatRect(inputPx);
-                QMessageBox::warning(this,
-                                     QStringLiteral("拼多多校准"),
-                                     QStringLiteral("第 2 步选区映射失败或过小，请重试。"));
-                return;
-            }
-
-            const bool saved = mergeWritePddRpaConfig(hwnd, chatPx, inputPx);
-            statusBar()->showMessage(saved ? QStringLiteral("已写入 python/rpa/config/pdd_config.json（含 chat/input x,y,w,h）")
-                                           : QStringLiteral("拼多多配置写入失败，请查看日志"),
-                                     5000);
-            qInfo() << "[MainWindow] 拼多多校准结果 chat=" << formatRect(chatPx)
-                    << "input=" << formatRect(inputPx)
-                    << "saved=" << saved;
-        });
-    });
-}
-
-bool MainWindow::mergeWritePddRpaConfig(quintptr hwnd,
-                                        const QRect& chatRectWindowPx,
-                                        const QRect& inputRectWindowPx) const
-{
-    const QString path = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/python/rpa/config/pdd_config.json");
-
-    QJsonObject root;
-    {
-        QFile fin(path);
-        if (fin.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            const QByteArray raw = fin.readAll();
-            fin.close();
-            QJsonParseError err{};
-            const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
-            if (doc.isObject()) {
-                root = doc.object();
-            } else if (err.error != QJsonParseError::NoError) {
-                qWarning() << "[MainWindow] pdd_config.json 解析失败，将仅保留合并字段:" << err.errorString();
-            }
-        }
-    }
-
-    root.insert(QStringLiteral("hwnd_hex"),
-                QStringLiteral("0x%1").arg(QString::number(static_cast<qulonglong>(hwnd), 16)));
-
-    QJsonObject chatRegion = root.value(QStringLiteral("chat_region")).toObject();
-    chatRegion.insert(QStringLiteral("coordinates"), QStringLiteral("window"));
-    chatRegion.insert(QStringLiteral("xywh_comment"),
-                       QStringLiteral("x,y,w,h 相对整窗 PrintWindow 左上角；存在时 Python 优先于比例字段"));
-    chatRegion.insert(QStringLiteral("x"), chatRectWindowPx.x());
-    chatRegion.insert(QStringLiteral("y"), chatRectWindowPx.y());
-    chatRegion.insert(QStringLiteral("w"), chatRectWindowPx.width());
-    chatRegion.insert(QStringLiteral("h"), chatRectWindowPx.height());
-    root.insert(QStringLiteral("chat_region"), chatRegion);
-
-    QJsonObject inputRegion = root.value(QStringLiteral("input_region")).toObject();
-    inputRegion.insert(QStringLiteral("coordinates"), QStringLiteral("window"));
-    inputRegion.insert(QStringLiteral("xywh_comment"),
-                        QStringLiteral("x,y,w,h 相对整窗 PrintWindow 左上角；用于点击输入框聚焦"));
-    inputRegion.insert(QStringLiteral("x"), inputRectWindowPx.x());
-    inputRegion.insert(QStringLiteral("y"), inputRectWindowPx.y());
-    inputRegion.insert(QStringLiteral("w"), inputRectWindowPx.width());
-    inputRegion.insert(QStringLiteral("h"), inputRectWindowPx.height());
-    root.insert(QStringLiteral("input_region"), inputRegion);
-
-    QFile fout(path);
-    if (!fout.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        qWarning() << "[MainWindow] 写入 pdd_config.json 失败:" << path << fout.errorString();
-        return false;
-    }
-    fout.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    fout.close();
-    return true;
 }
 
 // ==================== Aggregate Chat ====================
@@ -4104,8 +3731,6 @@ void MainWindow::closeEvent(QCloseEvent* event)
         m_aggregateReceptionWindow->close();
     }
     detachAllWindows();
-    if (m_rpaProcessController)
-        m_rpaProcessController->stopPlatforms(m_rpaProcessController->runningPlatformIds());
     QMainWindow::closeEvent(event);
 }
 

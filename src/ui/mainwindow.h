@@ -18,9 +18,7 @@
 class AggregateChatForm;
 class RobotAssistantWidget;
 class AiCustomerServiceBackendWindow;
-class RpaConsoleWindow;
-class RpaManageDialog;
-class RpaProcessController;
+class PythonServiceConnectionDialog;
 class QShowEvent;
 
 struct QuickLaunchApp {
@@ -66,22 +64,13 @@ private:
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
-    friend class RpaManageDialog;
+    friend class PythonServiceConnectionDialog;
 
 public:
     explicit MainWindow(const QString& username, QWidget* parent = nullptr);
     ~MainWindow();
 
     static bool isWechatWindowInfo(const WindowInfo& info);
-
-    /** 指定平台 RPA 子进程已缓存的控制台文本（按平台分桶，有长度上限）。 */
-    QString rpaProcessLog(const QString& platformId) const;
-    /** 清空指定平台已缓存的控制台文本（不影响子进程继续输出）。 */
-    void clearRpaProcessLog(const QString& platformId);
-
-signals:
-    /** 某平台新增一段控制台输出（UTF-8 解码；与 rpaProcessLog() 缓存同步）。 */
-    void rpaProcessOutputAppended(const QString& platformId, const QString& text);
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -112,9 +101,7 @@ private:
     void runQuickLaunchApps();
     void openAppHelpDialog();
     void openBugLogDialog();
-    void openRpaManageDialog();
-    void openRpaConsoleWindow();
-    void appendRpaProcessLog(const QString& platformId, const QString& text);
+    void openPythonServiceConnectionDialog();
 
 public:
     void addWindowToPlatform(const WindowInfo& info);
@@ -141,10 +128,6 @@ private:
     QStandardItem* findGroupItem(const QString& groupId) const;
     QStandardItem* findChildItem(QStandardItem* parent, const QString& platformId) const;
     void showPlatformContextMenu(const QPoint& pos);
-    void startPddRpaCalibration(const QString& platformId);
-    bool mergeWritePddRpaConfig(quintptr hwnd,
-                                 const QRect& chatRectWindowPx,
-                                 const QRect& inputRectWindowPx) const;
     void refreshStatusMessage();
     void openStatusMessageManager();
     void applyMainWindowTheme(ApplyStyle::MainWindowTheme theme);
@@ -153,10 +136,6 @@ private:
     void updateOneClickAggregateTooltip();
     void applyAlwaysOnTop(bool on);
     void updatePinTopButtonUi();
-
-    QStringList runningRpaPlatformIds() const;
-    void startRpaPlatforms(const QStringList& platformIds);
-    void stopRpaPlatforms(const QStringList& platformIds);
 
 private slots:
     void onPlatformTreeSelectionChanged();
@@ -209,9 +188,7 @@ private:
     QVector<QuickLaunchApp> m_quickLaunchApps;
     bool m_quickLaunchOnlyIfNotRunning = true;
 
-    RpaProcessController* m_rpaProcessController = nullptr;
-    RpaConsoleWindow* m_rpaConsoleWindow = nullptr;
-    QToolButton* m_btnRpaManage = nullptr;
+    QToolButton* m_btnPythonServiceConnection = nullptr;
     QToolButton* m_btnPinTop = nullptr;
     bool m_alwaysOnTop = false;
 };

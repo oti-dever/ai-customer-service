@@ -153,18 +153,13 @@ void HelpCenterDialog::populateContent()
             "<p>点击「聚合接待」即可进入，浮窗类托管窗口会自动隐藏，切回具体平台项后自动恢复。</p>")
     });
     sections.append({
-        QStringLiteral("help_rpa"), QStringLiteral("\u2022 管理启动/停止 RPA"),
+        QStringLiteral("help_python_service"), QStringLiteral("\u2022 Python 服务端连接"),
         QStringLiteral(
-            "<h3>管理启动/停止 RPA</h3>"
-            "<p>在系统就绪页点击「管理启动/停止RPA」，可勾选平台后统一<b>启动</b>或<b>停止</b>后台 RPA 进程。当前支持：<b>微信 PC</b>、<b>千牛 PC</b>。</p>"
-            "<p><b>启动</b>：仅在「已勾选且当前未运行」的平台上拉起进程；若勾选项均已运行，会弹出说明提示。</p>"
-            "<p><b>停止</b>：结束「已勾选且正在运行」的平台进程；再次打开本窗口时，正在运行的项会<b>默认勾选</b>，便于直接停止。</p>"
-            "<p>可使用「全选」「取消全选」快速调整勾选。</p>"
-            "<p><b>运行环境</b>：程序会在项目下的 <code>python</code> 目录作为工作目录执行 "
-            "<code>python -m rpa.main --platform &lt;wechat | qianniu&gt;</code>。"
-            "请确保本机已安装 Python，且命令行中 <code>python</code> 可用；若启动失败，状态栏会提示检查 PATH。</p>"
-            "<p><b>右键</b>「管理启动/停止RPA」可打开<b>控制台输出</b>窗口，查看各平台子进程的标准输出日志（便于排查 OCR、数据库写入等问题）。</p>"
-            "<p>各平台消息读写还依赖窗口区域校准与配置文件等，请按软件内的校准向导或项目文档完成设置。</p>")
+            "<h3>Python 服务端连接</h3>"
+            "<p>在系统就绪页点击「Python 服务端」，可配置并测试客户端要连接的独立 Python 服务端地址。</p>"
+            "<p>C++ 客户端不再负责启动或停止 Python 服务端；微信、千牛等平台采集与自动化由 Python 服务端独立运行。</p>"
+            "<p>客户端连接成功后，聚合界面通过服务端推送和同步数据展示会话与消息；发送消息时由客户端向 Python 服务端提交命令。</p>"
+            "<p>各平台消息读写仍依赖窗口区域校准与配置文件等，请按软件内的校准向导或项目文档完成设置。</p>")
     });
     sections.append({
         QStringLiteral("help_disconnect"), QStringLiteral("\u2022 断开窗口关联"),
@@ -203,8 +198,8 @@ void HelpCenterDialog::populateContent()
         QStringLiteral(
             "<h3>故障排查</h3>"
             "<p>若遇到窗口嵌入、浮窗跟随或快速启动异常，可关注状态栏提示。</p>"
-            "<p>RPA 相关异常可右键「管理启动/停止RPA」打开控制台输出，查看对应平台的运行日志；"
-            "亦可确认 Python 是否可用、<code>python/rpa</code> 依赖是否已按说明安装。</p>")
+            "<p>Python 服务端相关异常可先在「Python 服务端」窗口测试连接，再查看 Python 服务端自身日志；"
+            "亦可确认 Python 服务端依赖是否已按说明安装并正常运行。</p>")
     });
 
     // ---- Bug 修复日志 ----

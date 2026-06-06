@@ -467,62 +467,6 @@ QRect Win32WindowHelper::windowRect(quintptr handle)
     return QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
 }
 
-QRect Win32WindowHelper::mapOverlaySelectionToTargetWindowRelative(quintptr overlayHwnd,
-                                                                    quintptr targetHwnd,
-                                                                    const QRect& selectionInOverlayClientLogical,
-                                                                    qreal devicePixelRatio,
-                                                                    const QSize& overlayLogicalClientSize)
-{
-    if (!overlayHwnd || !targetHwnd)
-        return {};
-    HWND hOver = reinterpret_cast<HWND>(static_cast<WId>(overlayHwnd));
-    HWND hTgt = reinterpret_cast<HWND>(static_cast<WId>(targetHwnd));
-    if (!IsWindow(hOver) || !IsWindow(hTgt))
-        return {};
-
-    RECT rcClient{};
-    if (!GetClientRect(hOver, &rcClient))
-        return {};
-    const int physW = rcClient.right - rcClient.left;
-    const int physH = rcClient.bottom - rcClient.top;
-    if (physW <= 0 || physH <= 0)
-        return {};
-
-    double sx = 1.0;
-    double sy = 1.0;
-    if (overlayLogicalClientSize.isValid()
-        && overlayLogicalClientSize.width() > 0
-        && overlayLogicalClientSize.height() > 0) {
-        sx = double(physW) / double(overlayLogicalClientSize.width());
-        sy = double(physH) / double(overlayLogicalClientSize.height());
-    } else {
-        const qreal dpr = devicePixelRatio > 0 ? devicePixelRatio : 1.0;
-        sx = sy = dpr;
-    }
-
-    const QRect sel = selectionInOverlayClientLogical.normalized();
-    POINT p0{LONG(qRound(sel.left() * sx)), LONG(qRound(sel.top() * sy))};
-    POINT p1{LONG(qRound(sel.right() * sx)), LONG(qRound(sel.bottom() * sy))};
-    if (!ClientToScreen(hOver, &p0) || !ClientToScreen(hOver, &p1))
-        return {};
-
-    RECT wr{};
-    if (!GetWindowRect(hTgt, &wr))
-        return {};
-
-    const int sx1 = (std::min)(p0.x, p1.x);
-    const int sy1 = (std::min)(p0.y, p1.y);
-    const int sx2 = (std::max)(p0.x, p1.x);
-    const int sy2 = (std::max)(p0.y, p1.y);
-    const int x1 = sx1 - int(wr.left);
-    const int y1 = sy1 - int(wr.top);
-    const int x2 = sx2 - int(wr.left);
-    const int y2 = sy2 - int(wr.top);
-    if (x2 <= x1 || y2 <= y1)
-        return {};
-    return QRect(x1, y1, x2 - x1, y2 - y1);
-}
-
 QRect Win32WindowHelper::windowRectForClientRect(quintptr handle, const QRect& targetClientRect)
 {
     if (!handle || !targetClientRect.isValid()) return {};
