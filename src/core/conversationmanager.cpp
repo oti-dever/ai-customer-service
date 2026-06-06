@@ -2,6 +2,8 @@
 #include "messagerouter.h"
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
+#include "../services/platforms/iplatformadapter.h"
+#include <QDateTime>
 #include <QDebug>
 
 ConversationManager& ConversationManager::instance()
@@ -95,22 +97,39 @@ void ConversationManager::initialize(MessageRouter* router)
         emit messageStatusChanged(convId, msgId, status, reason);
     });
 
+    connect(m_router, &MessageRouter::conversationMessagesCleared, this, [this](int convId) {
+        if (m_currentConvId == convId)
+            emit currentConversationChanged(convId);
+        emit conversationMessagesCleared(convId);
+        emit conversationListChanged();
+    });
+
+    connect(m_router, &MessageRouter::conversationDeleted, this, [this](int convId) {
+        if (m_currentConvId == convId) {
+            m_currentConvId = -1;
+            ConversationDao().setLastSelectedCachedConversationId(-1);
+            emit currentConversationChanged(-1);
+        }
+        emit conversationDeleted(convId);
+        emit conversationListChanged();
+    });
+
     qInfo() << "[ConversationManager] initialization complete";
 }
 
 QVector<ConversationInfo> ConversationManager::allConversations() const
 {
     ConversationDao dao;
-    return dao.listAll();
+    return dao.listCachedConversations();
 }
 
 QVector<MessageRecord> ConversationManager::messages(int conversationId) const
 {
     MessageDao dao;
-    return dao.listByConversation(conversationId);
+    return dao.listCachedMessages(conversationId);
 }
 
-void ConversationManager::reloadFromDatabase()
+void ConversationManager::reloadFromLocalCache()
 {
     ConversationDao dao;
 
@@ -120,16 +139,21 @@ void ConversationManager::reloadFromDatabase()
             emit conversationUpdated(*current);
             emit unifiedConversationUpdated(LegacyModelCompat::toUnifiedConversation(*current));
         } else {
-            qInfo() << "[ConversationManager] current conversation missing after database reload:"
+            qInfo() << "[ConversationManager] current conversation missing after local cache reload:"
                     << m_currentConvId;
             m_currentConvId = -1;
-            dao.setLastSelectedConversationId(-1);
+            dao.setLastSelectedCachedConversationId(-1);
             emit currentConversationChanged(-1);
         }
     }
 
-    qInfo() << "[ConversationManager] reloaded conversations from database";
+    qInfo() << "[ConversationManager] reloaded conversations from local cache";
     emit conversationListChanged();
+}
+
+void ConversationManager::reloadFromDatabase()
+{
+    reloadFromLocalCache();
 }
 
 void ConversationManager::selectConversation(int conversationId)
@@ -137,7 +161,7 @@ void ConversationManager::selectConversation(int conversationId)
     const bool changed = m_currentConvId != conversationId;
     m_currentConvId = conversationId;
     ConversationDao dao;
-    dao.setLastSelectedConversationId(conversationId);
+    dao.setLastSelectedCachedConversationId(conversationId);
     if (conversationId > 0) {
         clearUnread(conversationId);
         dao.setStatus(conversationId, QStringLiteral("active"));
@@ -164,17 +188,82 @@ void ConversationManager::sendMessage(int conversationId, const QString& text, c
     m_router->sendMessage(conversationId, text, clientMessageId);
 }
 
+bool ConversationManager::startPlatformListening(const QString& platform)
+{
+    const QString normalized = platform.trimmed().toLower();
+    if (!m_router || normalized.isEmpty()) {
+        qWarning() << "[ConversationManager] start platform failed: router/platform missing" << platform;
+        return false;
+    }
+    auto* adapter = m_router->adapter(normalized);
+    if (!adapter) {
+        qWarning() << "[ConversationManager] start platform failed: adapter not found" << normalized;
+        return false;
+    }
+    adapter->startListening();
+    const bool listening = adapter->isConnected();
+    qInfo() << "[ConversationManager] platform listening requested" << normalized << "listening=" << listening;
+    return listening;
+}
+
+bool ConversationManager::stopPlatformListening(const QString& platform)
+{
+    const QString normalized = platform.trimmed().toLower();
+    if (!m_router || normalized.isEmpty()) {
+        qWarning() << "[ConversationManager] stop platform failed: router/platform missing" << platform;
+        return false;
+    }
+    auto* adapter = m_router->adapter(normalized);
+    if (!adapter) {
+        qWarning() << "[ConversationManager] stop platform failed: adapter not found" << normalized;
+        return false;
+    }
+    adapter->disconnectPlatform();
+    const bool stopped = !adapter->isConnected();
+    qInfo() << "[ConversationManager] platform stop requested" << normalized << "stopped=" << stopped;
+    return stopped;
+}
+
+bool ConversationManager::isPlatformListening(const QString& platform) const
+{
+    const QString normalized = platform.trimmed().toLower();
+    if (!m_router || normalized.isEmpty())
+        return false;
+    auto* adapter = m_router->adapter(normalized);
+    return adapter && adapter->isConnected();
+}
+
 void ConversationManager::closeConversation(int conversationId)
 {
     ConversationDao dao;
     dao.setStatus(conversationId, QStringLiteral("closed"));
     if (m_currentConvId == conversationId) {
         m_currentConvId = -1;
-        dao.setLastSelectedConversationId(-1);
+        dao.setLastSelectedCachedConversationId(-1);
         emit currentConversationChanged(-1);
     }
     qInfo() << "[ConversationManager] close conversation:" << conversationId;
     emit conversationListChanged();
+}
+
+bool ConversationManager::clearConversationMessages(int conversationId)
+{
+    MessageDao msgDao;
+    if (!msgDao.clearAllForConversation(conversationId))
+        return false;
+
+    ConversationDao convDao;
+    convDao.updateLastMessage(conversationId, QString(), QDateTime::currentDateTime());
+    convDao.clearUnread(conversationId);
+    const auto conv = convDao.findById(conversationId);
+    if (conv) {
+        emit conversationUpdated(*conv);
+        emit unifiedConversationUpdated(LegacyModelCompat::toUnifiedConversation(*conv));
+    }
+    emit conversationMessagesCleared(conversationId);
+    emit conversationListChanged();
+    qInfo() << "[ConversationManager] clear conversation messages:" << conversationId;
+    return true;
 }
 
 void ConversationManager::deleteConversation(int conversationId)
@@ -183,7 +272,7 @@ void ConversationManager::deleteConversation(int conversationId)
     dao.remove(conversationId);
     if (m_currentConvId == conversationId) {
         m_currentConvId = -1;
-        dao.setLastSelectedConversationId(-1);
+        dao.setLastSelectedCachedConversationId(-1);
         emit currentConversationChanged(-1);
     }
     qInfo() << "[ConversationManager] delete conversation:" << conversationId;

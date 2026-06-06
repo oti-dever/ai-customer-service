@@ -15,7 +15,9 @@ struct LocalUserProfile
 class ConversationAppService
 {
 public:
+    /** 客户端本地会话缓存，用于聚合 UI 展示。 */
     QVector<ConversationInfo> allConversations() const;
+    /** 客户端本地消息缓存，用于聚合 UI 展示。 */
     QVector<MessageRecord> messages(int conversationId) const;
     std::optional<ConversationInfo> conversationById(int conversationId) const;
     bool isAggregateAutoReplyCandidate(int conversationId) const;

@@ -7,13 +7,13 @@
 QVector<ConversationInfo> ConversationAppService::allConversations() const
 {
     ConversationDao dao;
-    return dao.listAll();
+    return dao.listCachedConversations();
 }
 
 QVector<MessageRecord> ConversationAppService::messages(int conversationId) const
 {
     MessageDao dao;
-    return dao.listByConversation(conversationId);
+    return dao.listCachedMessages(conversationId);
 }
 
 std::optional<ConversationInfo> ConversationAppService::conversationById(int conversationId) const
@@ -30,7 +30,7 @@ bool ConversationAppService::isAggregateAutoReplyCandidate(int conversationId) c
         return false;
 
     MessageDao mdao;
-    const auto last = mdao.lastMessageForConversation(conversationId);
+    const auto last = mdao.lastCachedMessageForConversation(conversationId);
     return last && last->direction == QLatin1String("in");
 }
 

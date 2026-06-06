@@ -19,6 +19,7 @@ public:
     bool isOpen() const;
     QSqlDatabase connection() const;
     bool runMigrations();
+    bool normalizePlatformConversationKeys();
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
 };

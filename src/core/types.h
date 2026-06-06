@@ -40,6 +40,8 @@ struct ConversationInfo {
     QString sourceType = QStringLiteral("mock");
     int confidence = 100;
     QDateTime updatedAt;
+    QString cacheScope = QStringLiteral("local_cache");
+    QString cacheOrigin = QStringLiteral("legacy_runtime");
 };
 
 struct MessageRecord {
@@ -62,6 +64,8 @@ struct MessageRecord {
     QString verificationStatus = QStringLiteral("unverified");
     QString contentType = QStringLiteral("text");
     QDateTime observedAt;
+    QString cacheScope = QStringLiteral("local_cache");
+    QString cacheOrigin = QStringLiteral("legacy_runtime");
 };
 
 /** 聚合「生成本条回复」：最后一条有效入站文本与可选聊天区截图路径。 */

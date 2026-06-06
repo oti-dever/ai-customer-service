@@ -2,12 +2,97 @@
 #include "database.h"
 #include "wechatmessagedao.h"
 #include <QDebug>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
+#include <QJsonObject>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
-#include <QTextStream>
+#include <QStringList>
+
+namespace {
+
+QString messageCacheScope()
+{
+    return QStringLiteral("local_cache");
+}
+
+QString messageCacheOrigin(const Models::Message& message)
+{
+    if (message.status == Models::MessageStatus::Pending
+        || message.status == Models::MessageStatus::Sent
+        || message.status == Models::MessageStatus::Failed) {
+        return QStringLiteral("manual_outbound_cache");
+    }
+
+    switch (message.sourceType) {
+    case Models::SourceType::Mock:
+        return QStringLiteral("simulator_runtime");
+    case Models::SourceType::ManualConfirmed:
+        return QStringLiteral("manual_runtime");
+    case Models::SourceType::DomObserved:
+    case Models::SourceType::UiObserved:
+    case Models::SourceType::OcrExtracted:
+    case Models::SourceType::NotificationObserved:
+        return QStringLiteral("platform_observed_cache");
+    case Models::SourceType::Experimental:
+        return QStringLiteral("experimental_cache");
+    }
+    return QStringLiteral("legacy_runtime");
+}
+
+QString jsonString(const QJsonObject& object, const QString& key)
+{
+    return object.value(key).toString().trimmed();
+}
+
+int jsonInt(const QJsonObject& object, const QString& key, int fallback = 0)
+{
+    const auto value = object.value(key);
+    if (value.isDouble())
+        return value.toInt();
+    bool ok = false;
+    const int parsed = value.toString().toInt(&ok);
+    return ok ? parsed : fallback;
+}
+
+int existingSnapshotMessageId(int conversationId,
+                              const QString& platformMsgId,
+                              const QString& clientMessageId)
+{
+    if (conversationId <= 0)
+        return 0;
+
+    QSqlQuery q(Database::getInstance().connection());
+    if (!platformMsgId.isEmpty()) {
+        q.prepare(QStringLiteral(
+            "SELECT id FROM messages WHERE conversation_id = :cid "
+            "AND platform_msg_id = :pmid ORDER BY id DESC LIMIT 1"));
+        q.bindValue(QStringLiteral(":cid"), conversationId);
+        q.bindValue(QStringLiteral(":pmid"), platformMsgId);
+    } else if (!clientMessageId.isEmpty()) {
+        q.prepare(QStringLiteral(
+            "SELECT id FROM messages WHERE conversation_id = :cid "
+            "AND client_message_id = :cmid ORDER BY id DESC LIMIT 1"));
+        q.bindValue(QStringLiteral(":cid"), conversationId);
+        q.bindValue(QStringLiteral(":cmid"), clientMessageId);
+    } else {
+        return 0;
+    }
+
+    if (!q.exec() || !q.next())
+        return 0;
+    return q.value(0).toInt();
+}
+
+QString placeholders(const QString& prefix, int count)
+{
+    QStringList items;
+    items.reserve(count);
+    for (int i = 0; i < count; ++i)
+        items.append(QStringLiteral(":%1%2").arg(prefix).arg(i));
+    return items.join(QStringLiteral(", "));
+}
+
+} // namespace
 
 /** SQLite DEFAULT CURRENT_TIMESTAMP 为 UTC；Qt 对无时区 DATETIME 常按 LocalTime 解析，会少时区偏移。 */
 static QDateTime messageRowCreatedAtToLocal(const QVariant& v)
@@ -42,6 +127,12 @@ static MessageRecord messageRecordFromQuery(QSqlQuery& q)
     m.contentType = q.value(QStringLiteral("content_type")).toString();
     m.observedAt = messageRowCreatedAtToLocal(q.value(QStringLiteral("observed_at")));
     m.status = Models::toString(Models::messageStatusFromLegacySyncStatus(m.syncStatus));
+    m.cacheScope = q.value(QStringLiteral("cache_scope")).toString();
+    if (m.cacheScope.isEmpty())
+        m.cacheScope = QStringLiteral("local_cache");
+    m.cacheOrigin = q.value(QStringLiteral("cache_origin")).toString();
+    if (m.cacheOrigin.isEmpty())
+        m.cacheOrigin = QStringLiteral("legacy_runtime");
     return m;
 }
 
@@ -97,9 +188,10 @@ int MessageDao::create(const Models::Message& message)
     QSqlQuery q(Database::getInstance().connection());
     q.prepare("INSERT INTO messages (conversation_id, direction, content, sender, sender_name, "
               "platform_msg_id, sync_status, error_reason, original_timestamp, content_image_path, "
-              "source_type, confidence, verification_status, content_type, observed_at, client_message_id) "
+              "source_type, confidence, verification_status, content_type, observed_at, client_message_id, "
+              "cache_scope, cache_origin) "
               "VALUES (:cid, :dir, :content, :sender, :sname, :pmid, :status, :reason, :ots, :cimg, "
-              ":source, :confidence, :verification, :ctype, :observed, :cmid)");
+              ":source, :confidence, :verification, :ctype, :observed, :cmid, :cache_scope, :cache_origin)");
     const QString legacyDirection = Models::legacyDirectionFromMessageDirection(message.direction);
     q.bindValue(":cid", message.conversationId);
     q.bindValue(":dir", legacyDirection);
@@ -126,12 +218,180 @@ int MessageDao::create(const Models::Message& message)
         ? message.metadata.value(QStringLiteral("client_message_id")).toString()
         : message.clientMessageId;
     q.bindValue(":cmid", clientMessageId);
+    q.bindValue(":cache_scope", messageCacheScope());
+    q.bindValue(":cache_origin", messageCacheOrigin(message));
 
     if (!q.exec()) {
         qWarning() << "MessageDao::create 失败:" << q.lastError().text();
         return -1;
     }
     return q.lastInsertId().toInt();
+}
+
+int MessageDao::createObservedCacheMessage(const Models::Message& message)
+{
+    Models::Message cacheMessage = message;
+    cacheMessage.status = Models::MessageStatus::Observed;
+    if (!cacheMessage.observedAt.isValid())
+        cacheMessage.observedAt = QDateTime::currentDateTime();
+    return create(cacheMessage);
+}
+
+int MessageDao::createOutboundCacheMessage(const Models::Message& message)
+{
+    Models::Message cacheMessage = message;
+    cacheMessage.direction = Models::MessageDirection::Outbound;
+    if (cacheMessage.status != Models::MessageStatus::Sent
+        && cacheMessage.status != Models::MessageStatus::Failed) {
+        cacheMessage.status = Models::MessageStatus::Pending;
+    }
+    if (!cacheMessage.observedAt.isValid())
+        cacheMessage.observedAt = QDateTime::currentDateTime();
+    return create(cacheMessage);
+}
+
+int MessageDao::upsertSnapshotCacheMessage(int conversationId, const QJsonObject& message)
+{
+    if (conversationId <= 0)
+        return -1;
+
+    const QString platformMsgId = jsonString(message, QStringLiteral("platform_msg_id"));
+    const QString clientMessageId = jsonString(message, QStringLiteral("client_message_id"));
+    if (platformMsgId.isEmpty() && clientMessageId.isEmpty())
+        return -1;
+
+    const int existingId = existingSnapshotMessageId(conversationId, platformMsgId, clientMessageId);
+    const QString direction = jsonString(message, QStringLiteral("direction")).isEmpty()
+        ? QStringLiteral("in")
+        : jsonString(message, QStringLiteral("direction"));
+    const QString sender = jsonString(message, QStringLiteral("sender")).isEmpty()
+        ? (direction == QLatin1String("out") ? QStringLiteral("agent") : QStringLiteral("customer"))
+        : jsonString(message, QStringLiteral("sender"));
+    const QString content = message.value(QStringLiteral("content")).toString();
+    const QString senderName = jsonString(message, QStringLiteral("sender_name"));
+    const int syncStatus = jsonInt(message, QStringLiteral("sync_status"), 1);
+    const QString errorReason = message.value(QStringLiteral("error_reason")).toString();
+    const QString originalTimestamp = jsonString(message, QStringLiteral("original_timestamp"));
+    const QString contentImagePath = jsonString(message, QStringLiteral("content_image_path"));
+    const QString sourceType = jsonString(message, QStringLiteral("source_type")).isEmpty()
+        ? QStringLiteral("ui_observed")
+        : jsonString(message, QStringLiteral("source_type"));
+    const int confidence = jsonInt(message, QStringLiteral("confidence"),
+                                   Models::defaultConfidence(Models::sourceTypeFromString(sourceType)));
+    const QString verificationStatus = jsonString(message, QStringLiteral("verification_status")).isEmpty()
+        ? QStringLiteral("unverified")
+        : jsonString(message, QStringLiteral("verification_status"));
+    const QString contentType = jsonString(message, QStringLiteral("content_type")).isEmpty()
+        ? (contentImagePath.isEmpty() ? QStringLiteral("text") : QStringLiteral("image"))
+        : jsonString(message, QStringLiteral("content_type"));
+    const QString observedAt = jsonString(message, QStringLiteral("observed_at"));
+    const QString createdAt = jsonString(message, QStringLiteral("created_at"));
+
+    QSqlQuery q(Database::getInstance().connection());
+    if (existingId > 0) {
+        q.prepare(QStringLiteral(
+            "UPDATE messages SET "
+            "direction = :direction, "
+            "content = :content, "
+            "sender = :sender, "
+            "sender_name = :sender_name, "
+            "platform_msg_id = COALESCE(NULLIF(:pmid, ''), platform_msg_id), "
+            "sync_status = :sync_status, "
+            "error_reason = :error_reason, "
+            "original_timestamp = :original_timestamp, "
+            "content_image_path = :content_image_path, "
+            "source_type = :source_type, "
+            "confidence = :confidence, "
+            "verification_status = :verification_status, "
+            "content_type = :content_type, "
+            "observed_at = COALESCE(NULLIF(:observed_at, ''), observed_at), "
+            "client_message_id = COALESCE(NULLIF(:cmid, ''), client_message_id), "
+            "cache_scope = 'local_cache', "
+            "cache_origin = 'server_snapshot_cache' "
+            "WHERE id = :id"));
+        q.bindValue(QStringLiteral(":id"), existingId);
+    } else {
+        q.prepare(QStringLiteral(
+            "INSERT INTO messages (conversation_id, direction, content, sender, sender_name, "
+            "platform_msg_id, sync_status, error_reason, original_timestamp, content_image_path, "
+            "source_type, confidence, verification_status, content_type, observed_at, client_message_id, "
+            "cache_scope, cache_origin, created_at) "
+            "VALUES (:cid, :direction, :content, :sender, :sender_name, :pmid, :sync_status, "
+            ":error_reason, :original_timestamp, :content_image_path, :source_type, :confidence, "
+            ":verification_status, :content_type, COALESCE(NULLIF(:observed_at, ''), datetime('now','localtime')), "
+            ":cmid, 'local_cache', 'server_snapshot_cache', "
+            "COALESCE(NULLIF(:created_at, ''), datetime('now','localtime')))"));
+        q.bindValue(QStringLiteral(":cid"), conversationId);
+        q.bindValue(QStringLiteral(":created_at"), createdAt);
+    }
+
+    q.bindValue(QStringLiteral(":direction"), direction);
+    q.bindValue(QStringLiteral(":content"), content);
+    q.bindValue(QStringLiteral(":sender"), sender);
+    q.bindValue(QStringLiteral(":sender_name"), senderName);
+    q.bindValue(QStringLiteral(":pmid"), platformMsgId);
+    q.bindValue(QStringLiteral(":sync_status"), syncStatus);
+    q.bindValue(QStringLiteral(":error_reason"), errorReason);
+    q.bindValue(QStringLiteral(":original_timestamp"), originalTimestamp);
+    q.bindValue(QStringLiteral(":content_image_path"), contentImagePath);
+    q.bindValue(QStringLiteral(":source_type"), sourceType);
+    q.bindValue(QStringLiteral(":confidence"), confidence);
+    q.bindValue(QStringLiteral(":verification_status"), verificationStatus);
+    q.bindValue(QStringLiteral(":content_type"), contentType);
+    q.bindValue(QStringLiteral(":observed_at"), observedAt);
+    q.bindValue(QStringLiteral(":cmid"), clientMessageId);
+
+    if (!q.exec()) {
+        qWarning() << "MessageDao::upsertSnapshotCacheMessage 失败:" << q.lastError().text();
+        return -1;
+    }
+    return existingId > 0 ? existingId : q.lastInsertId().toInt();
+}
+
+int MessageDao::deleteMissingSnapshotCacheMessages(
+    int conversationId,
+    const QSet<QString>& keepPlatformMessageIds,
+    const QSet<QString>& keepClientMessageIds)
+{
+    if (conversationId <= 0)
+        return 0;
+
+    QString keepPredicate;
+    if (!keepPlatformMessageIds.isEmpty())
+        keepPredicate += QStringLiteral("platform_msg_id IN (%1)")
+                             .arg(placeholders(QStringLiteral("pmid"), keepPlatformMessageIds.size()));
+    if (!keepClientMessageIds.isEmpty()) {
+        if (!keepPredicate.isEmpty())
+            keepPredicate += QStringLiteral(" OR ");
+        keepPredicate += QStringLiteral("client_message_id IN (%1)")
+                             .arg(placeholders(QStringLiteral("cmid"), keepClientMessageIds.size()));
+    }
+
+    QString sql = QStringLiteral(
+        "DELETE FROM messages WHERE conversation_id = :cid "
+        "AND cache_origin = 'server_snapshot_cache'");
+    if (!keepPredicate.isEmpty())
+        sql += QStringLiteral(" AND NOT (%1)").arg(keepPredicate);
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(sql);
+    q.bindValue(QStringLiteral(":cid"), conversationId);
+    int i = 0;
+    for (const QString& id : keepPlatformMessageIds) {
+        q.bindValue(QStringLiteral(":pmid%1").arg(i), id);
+        ++i;
+    }
+    i = 0;
+    for (const QString& id : keepClientMessageIds) {
+        q.bindValue(QStringLiteral(":cmid%1").arg(i), id);
+        ++i;
+    }
+    if (!q.exec()) {
+        qWarning() << "MessageDao::deleteMissingSnapshotCacheMessages 失败:"
+                   << q.lastError().text();
+        return 0;
+    }
+    return q.numRowsAffected();
 }
 
 std::optional<MessageRecord> MessageDao::findById(int messageId) const
@@ -173,6 +433,28 @@ std::optional<MessageRecord> MessageDao::latestPendingOutboundByClientMessageId(
     return messageRecordFromQuery(q);
 }
 
+std::optional<MessageRecord> MessageDao::latestOutboundByClientMessageId(int conversationId,
+                                                                         const QString& clientMessageId) const
+{
+    if (conversationId <= 0 || clientMessageId.isEmpty())
+        return std::nullopt;
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral(
+        "SELECT * FROM messages WHERE conversation_id = :cid "
+        "AND direction = 'out' AND client_message_id = :cmid "
+        "ORDER BY id DESC LIMIT 1"));
+    q.bindValue(QStringLiteral(":cid"), conversationId);
+    q.bindValue(QStringLiteral(":cmid"), clientMessageId);
+    if (!q.exec()) {
+        qWarning() << "MessageDao::latestOutboundByClientMessageId failed:" << q.lastError().text();
+        return std::nullopt;
+    }
+    if (!q.next())
+        return std::nullopt;
+    return messageRecordFromQuery(q);
+}
+
 QVector<MessageRecord> MessageDao::listByConversation(int conversationId, int limit, int offset)
 {
     QSqlQuery q(Database::getInstance().connection());
@@ -187,6 +469,11 @@ QVector<MessageRecord> MessageDao::listByConversation(int conversationId, int li
     while (q.next())
         result.append(messageRecordFromQuery(q));
     return result;
+}
+
+QVector<MessageRecord> MessageDao::listCachedMessages(int conversationId, int limit, int offset)
+{
+    return listByConversation(conversationId, limit, offset);
 }
 
 std::optional<MessageRecord> MessageDao::lastMessageForConversation(int conversationId) const
@@ -205,6 +492,11 @@ std::optional<MessageRecord> MessageDao::lastMessageForConversation(int conversa
         return std::nullopt;
 
     return messageRecordFromQuery(q);
+}
+
+std::optional<MessageRecord> MessageDao::lastCachedMessageForConversation(int conversationId) const
+{
+    return lastMessageForConversation(conversationId);
 }
 
 std::optional<MessageRecord> MessageDao::latestPendingOutbound(int conversationId, const QString& content) const
@@ -233,6 +525,26 @@ std::optional<MessageRecord> MessageDao::latestPendingOutbound(int conversationI
     return messageRecordFromQuery(q);
 }
 
+std::optional<MessageRecord> MessageDao::latestPendingOutboundCache(int conversationId,
+                                                                    const QString& content) const
+{
+    return latestPendingOutbound(conversationId, content);
+}
+
+std::optional<MessageRecord> MessageDao::latestPendingOutboundCacheByClientMessageId(
+    int conversationId,
+    const QString& clientMessageId) const
+{
+    return latestPendingOutboundByClientMessageId(conversationId, clientMessageId);
+}
+
+std::optional<MessageRecord> MessageDao::latestOutboundCacheByClientMessageId(
+    int conversationId,
+    const QString& clientMessageId) const
+{
+    return latestOutboundByClientMessageId(conversationId, clientMessageId);
+}
+
 bool MessageDao::updateDeliveryState(int messageId,
                                      int syncStatus,
                                      const QString& errorReason,
@@ -255,6 +567,14 @@ bool MessageDao::updateDeliveryState(int messageId,
         return false;
     }
     return q.numRowsAffected() > 0;
+}
+
+bool MessageDao::updateOutboundCacheDeliveryState(int messageId,
+                                                  int syncStatus,
+                                                  const QString& errorReason,
+                                                  const QString& platformMsgId)
+{
+    return updateDeliveryState(messageId, syncStatus, errorReason, platformMsgId);
 }
 
 std::optional<LatestInboundSnapshot> MessageDao::latestInboundSnapshot(int conversationId) const
@@ -291,6 +611,16 @@ std::optional<QString> MessageDao::latestInboundContent(int conversationId) cons
     return s->content;
 }
 
+std::optional<QString> MessageDao::latestCachedInboundContent(int conversationId) const
+{
+    return latestInboundContent(conversationId);
+}
+
+std::optional<LatestInboundSnapshot> MessageDao::latestCachedInboundSnapshot(int conversationId) const
+{
+    return latestInboundSnapshot(conversationId);
+}
+
 QHash<int, QString> MessageDao::lastDirectionsByConversation() const
 {
     QHash<int, QString> out;
@@ -307,31 +637,9 @@ QHash<int, QString> MessageDao::lastDirectionsByConversation() const
     return out;
 }
 
-void MessageDao::notifyReaderIncrementalStatePurge(const QString& platform,
-                                                   const QString& platformConversationId)
+QHash<int, QString> MessageDao::lastCachedDirectionsByConversation() const
 {
-    if (platformConversationId.isEmpty())
-        return;
-    QString fileName;
-    if (platform == QLatin1String("wechat_pc"))
-        fileName = QStringLiteral("reader_incremental_purge_wechat_pc.txt");
-    else if (platform == QLatin1String("qianniu"))
-        fileName = QStringLiteral("reader_incremental_purge_qianniu.txt");
-    else if (platform == QLatin1String("pdd_web"))
-        fileName = QStringLiteral("reader_incremental_purge_pdd_web.txt");
-    else
-        return;
-
-    const QString path = QStringLiteral(PROJECT_ROOT_DIR)
-        + QStringLiteral("/python/rpa/_state/") + fileName;
-    QDir().mkpath(QFileInfo(path).path());
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        qWarning() << "notifyReaderIncrementalStatePurge: 无法写入" << path;
-        return;
-    }
-    QTextStream out(&f);
-    out << platformConversationId << QLatin1Char('\n');
+    return lastDirectionsByConversation();
 }
 
 bool MessageDao::existsByPlatformMsgId(const QString& platformMsgId)
@@ -355,25 +663,12 @@ bool MessageDao::clearAllForConversation(int conversationId)
     }
     QSqlQuery q(db);
 
-    QString platformForPurge;
-    QString pcidForPurge;
+    QString platform;
     q.prepare(QStringLiteral(
-        "SELECT platform, platform_conversation_id FROM conversations WHERE id = :cid"));
+        "SELECT platform FROM conversations WHERE id = :cid"));
     q.bindValue(QStringLiteral(":cid"), conversationId);
     if (q.exec() && q.next()) {
-        platformForPurge = q.value(0).toString();
-        pcidForPurge = q.value(1).toString();
-        q.prepare(
-            QStringLiteral("DELETE FROM rpa_inbox_messages WHERE platform = :p "
-                           "AND platform_conversation_id = :pcid"));
-        q.bindValue(QStringLiteral(":p"), platformForPurge);
-        q.bindValue(QStringLiteral(":pcid"), pcidForPurge);
-        if (!q.exec()) {
-            qWarning() << "MessageDao::clearAllForConversation 删除 rpa_inbox_messages 失败:"
-                       << q.lastError().text();
-            db.rollback();
-            return false;
-        }
+        platform = q.value(0).toString();
     }
 
     q.prepare(QStringLiteral("DELETE FROM message_send_events WHERE conversation_id = :cid"));
@@ -397,8 +692,7 @@ bool MessageDao::clearAllForConversation(int conversationId)
         db.rollback();
         return false;
     }
-    notifyReaderIncrementalStatePurge(platformForPurge, pcidForPurge);
-    if (platformForPurge == QLatin1String("wechat_pc")) {
+    if (platform == QLatin1String("wechat")) {
         WechatMessageDao wechatDao;
         wechatDao.deleteForConversation(conversationId);
     }

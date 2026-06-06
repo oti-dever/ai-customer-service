@@ -28,6 +28,8 @@ signals:
     void messageSendFailed(int conversationId, const QString& reason);
     void conversationCreated(const ConversationInfo& conv);
     void conversationUpdated(const ConversationInfo& conv);
+    void conversationMessagesCleared(int conversationId);
+    void conversationDeleted(int conversationId);
 
     void unifiedMessageReceived(int conversationId, const Models::Message& message);
     void unifiedConversationUpdated(const Models::Conversation& conversation);
@@ -37,6 +39,8 @@ signals:
 
 private slots:
     void onConversationObserved(const ConversationInfo& conv);
+    void onConversationMessagesCleared(const QString& conversationId);
+    void onConversationDeleted(const QString& conversationId);
     void onIncomingMessage(const PlatformMessage& msg);
     void onMessageSent(const QString& conversationId, const QString& text, const QString& clientMessageId = QString());
     void onSendFailed(const QString& conversationId, const QString& reason, const QString& clientMessageId = QString());

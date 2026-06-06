@@ -16,8 +16,8 @@ QString toString(PlatformType value)
     switch (value) {
     case PlatformType::Mock: return QStringLiteral("mock");
     case PlatformType::PddWeb: return QStringLiteral("pdd_web");
-    case PlatformType::QianniuPc: return QStringLiteral("qianniu_pc");
-    case PlatformType::WechatPc: return QStringLiteral("wechat_pc");
+    case PlatformType::QianniuPc: return QStringLiteral("qianniu");
+    case PlatformType::WechatPc: return QStringLiteral("wechat");
     case PlatformType::GenericWeb: return QStringLiteral("generic_web");
     case PlatformType::GenericPc: return QStringLiteral("generic_pc");
     case PlatformType::Unknown: return QStringLiteral("unknown");
@@ -121,8 +121,8 @@ PlatformType platformTypeFromString(const QString& value)
     const QString v = normalized(value);
     if (v == QLatin1String("mock") || v == QLatin1String("simulator")) return PlatformType::Mock;
     if (v == QLatin1String("pdd_web")) return PlatformType::PddWeb;
-    if (v == QLatin1String("qianniu_pc") || v == QLatin1String("qianniu")) return PlatformType::QianniuPc;
-    if (v == QLatin1String("wechat_pc")) return PlatformType::WechatPc;
+    if (v == QLatin1String("qianniu")) return PlatformType::QianniuPc;
+    if (v == QLatin1String("wechat")) return PlatformType::WechatPc;
     if (v == QLatin1String("generic_web")) return PlatformType::GenericWeb;
     if (v == QLatin1String("generic_pc")) return PlatformType::GenericPc;
     return PlatformType::Unknown;

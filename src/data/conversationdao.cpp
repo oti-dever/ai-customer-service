@@ -1,10 +1,107 @@
 #include "conversationdao.h"
-#include "messagedao.h"
 #include "wechatmessagedao.h"
 #include "database.h"
 #include <QDebug>
+#include <QJsonObject>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QStringList>
+
+static ConversationInfo recordFromQuery(QSqlQuery& q);
+
+namespace {
+
+QString conversationCacheScope()
+{
+    return QStringLiteral("local_cache");
+}
+
+QString conversationCacheOriginForSourceType(Models::SourceType sourceType)
+{
+    switch (sourceType) {
+    case Models::SourceType::Mock:
+        return QStringLiteral("simulator_runtime");
+    case Models::SourceType::ManualConfirmed:
+        return QStringLiteral("manual_runtime");
+    case Models::SourceType::DomObserved:
+    case Models::SourceType::UiObserved:
+    case Models::SourceType::OcrExtracted:
+    case Models::SourceType::NotificationObserved:
+        return QStringLiteral("platform_observed_cache");
+    case Models::SourceType::Experimental:
+        return QStringLiteral("experimental_cache");
+    }
+    return QStringLiteral("legacy_runtime");
+}
+
+QString jsonString(const QJsonObject& object, const QString& key)
+{
+    return object.value(key).toString().trimmed();
+}
+
+int jsonInt(const QJsonObject& object, const QString& key, int fallback = 0)
+{
+    const auto value = object.value(key);
+    if (value.isDouble())
+        return value.toInt();
+    bool ok = false;
+    const int parsed = value.toString().toInt(&ok);
+    return ok ? parsed : fallback;
+}
+
+QString snapshotCursorKey(const QString& platform)
+{
+    const QString suffix = platform.trimmed().toLower().isEmpty()
+        ? QStringLiteral("all")
+        : platform.trimmed().toLower();
+    return QStringLiteral("cache_snapshot_cursor/%1").arg(suffix);
+}
+
+QString rpaReplayCursorKey(const QString& platform)
+{
+    const QString suffix = platform.trimmed().toLower().isEmpty()
+        ? QStringLiteral("all")
+        : platform.trimmed().toLower();
+    return QStringLiteral("rpa_replay_cursor/%1").arg(suffix);
+}
+
+QString displayKeyFromCanonical(const QString& platformConversationId)
+{
+    const int lastSep = platformConversationId.lastIndexOf(QLatin1Char(':'));
+    if (lastSep < 0 || lastSep + 1 >= platformConversationId.size())
+        return QString();
+    return platformConversationId.mid(lastSep + 1).trimmed();
+}
+
+std::optional<ConversationInfo> findLegacyShortConversation(const QString& platform,
+                                                            const QString& platformConversationId)
+{
+    if (!platformConversationId.startsWith(platform + QLatin1Char(':')))
+        return std::nullopt;
+    const QString displayKey = displayKeyFromCanonical(platformConversationId);
+    if (displayKey.isEmpty() || displayKey == platformConversationId)
+        return std::nullopt;
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral("SELECT * FROM conversations WHERE platform = :p AND platform_conversation_id = :pcid"));
+    q.bindValue(QStringLiteral(":p"), platform);
+    q.bindValue(QStringLiteral(":pcid"), displayKey);
+    if (!q.exec() || !q.next())
+        return std::nullopt;
+    return recordFromQuery(q);
+}
+
+QString placeholders(const QString& prefix, int count)
+{
+    QStringList items;
+    items.reserve(count);
+    for (int i = 0; i < count; ++i)
+        items.append(QStringLiteral(":%1%2").arg(prefix).arg(i));
+    return items.join(QStringLiteral(", "));
+}
+
+} // namespace
 
 static ConversationInfo recordFromQuery(QSqlQuery& q)
 {
@@ -22,6 +119,12 @@ static ConversationInfo recordFromQuery(QSqlQuery& q)
     c.sourceType = q.value("source_type").toString();
     c.confidence = q.value("confidence").isNull() ? 100 : q.value("confidence").toInt();
     c.updatedAt = q.value("updated_at").toDateTime();
+    c.cacheScope = q.value("cache_scope").toString();
+    if (c.cacheScope.isEmpty())
+        c.cacheScope = QStringLiteral("local_cache");
+    c.cacheOrigin = q.value("cache_origin").toString();
+    if (c.cacheOrigin.isEmpty())
+        c.cacheOrigin = QStringLiteral("legacy_runtime");
     return c;
 }
 
@@ -29,8 +132,8 @@ int ConversationDao::create(const QString& platform, const QString& platformConv
 {
     QSqlQuery q(Database::getInstance().connection());
     q.prepare("INSERT INTO conversations (platform, platform_conversation_id, account_id, customer_name, "
-              "status, source_type, confidence, last_time, updated_at) "
-              "VALUES (:platform, :pcid, :account, :name, :status, :source, :confidence, "
+              "status, source_type, confidence, cache_scope, cache_origin, last_time, updated_at) "
+              "VALUES (:platform, :pcid, :account, :name, :status, :source, :confidence, :cache_scope, :cache_origin, "
               "datetime('now','localtime'), datetime('now','localtime'))");
     const Models::PlatformType platformType = Models::platformTypeFromString(platform);
     const Models::SourceType sourceType = (platformType == Models::PlatformType::Mock)
@@ -43,6 +146,8 @@ int ConversationDao::create(const QString& platform, const QString& platformConv
     q.bindValue(":status", QStringLiteral("new"));
     q.bindValue(":source", Models::toString(sourceType));
     q.bindValue(":confidence", Models::defaultConfidence(sourceType));
+    q.bindValue(":cache_scope", conversationCacheScope());
+    q.bindValue(":cache_origin", conversationCacheOriginForSourceType(sourceType));
 
     if (!q.exec()) {
         qWarning() << "ConversationDao::create 失败:" << q.lastError().text();
@@ -57,8 +162,8 @@ int ConversationDao::create(const Models::Conversation& conversation)
 {
     QSqlQuery q(Database::getInstance().connection());
     q.prepare("INSERT INTO conversations (platform, platform_conversation_id, account_id, customer_name, "
-              "status, source_type, confidence, last_time, updated_at) "
-              "VALUES (:platform, :pcid, :account, :name, :status, :source, :confidence, "
+              "status, source_type, confidence, cache_scope, cache_origin, last_time, updated_at) "
+              "VALUES (:platform, :pcid, :account, :name, :status, :source, :confidence, :cache_scope, :cache_origin, "
               "datetime('now','localtime'), datetime('now','localtime'))");
     q.bindValue(":platform", Models::toString(conversation.platformType));
     q.bindValue(":pcid", conversation.platformConversationId);
@@ -67,6 +172,8 @@ int ConversationDao::create(const Models::Conversation& conversation)
     q.bindValue(":status", Models::toString(conversation.status));
     q.bindValue(":source", Models::toString(conversation.sourceType));
     q.bindValue(":confidence", conversation.confidence);
+    q.bindValue(":cache_scope", conversationCacheScope());
+    q.bindValue(":cache_origin", conversationCacheOriginForSourceType(conversation.sourceType));
 
     if (!q.exec()) {
         qWarning() << "ConversationDao::create 失败:" << q.lastError().text();
@@ -77,6 +184,190 @@ int ConversationDao::create(const Models::Conversation& conversation)
              << "platform=" << Models::toString(conversation.platformType)
              << "customer=" << conversation.title;
     return newId;
+}
+
+int ConversationDao::upsertObservedCacheConversation(const Models::Conversation& conversation)
+{
+    const QString platform = Models::toString(conversation.platformType);
+    if (platform.isEmpty() || conversation.platformConversationId.isEmpty())
+        return -1;
+
+    auto existing = findByPlatformId(platform, conversation.platformConversationId);
+    if (!existing)
+        existing = findLegacyShortConversation(platform, conversation.platformConversationId);
+    if (!existing)
+        return create(conversation);
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral(
+        "UPDATE conversations SET "
+        "platform_conversation_id = :pcid, "
+        "account_id = COALESCE(NULLIF(:account, ''), account_id), "
+        "customer_name = CASE "
+        "  WHEN length(trim(coalesce(:name, ''))) > 0 THEN :name "
+        "  ELSE customer_name END, "
+        "status = CASE "
+        "  WHEN status = 'closed' THEN 'active' "
+        "  ELSE status END, "
+        "source_type = :source, "
+        "confidence = :confidence, "
+        "cache_scope = :cache_scope, "
+        "cache_origin = :cache_origin, "
+        "updated_at = datetime('now','localtime') "
+        "WHERE id = :id"));
+    q.bindValue(QStringLiteral(":pcid"), conversation.platformConversationId);
+    q.bindValue(QStringLiteral(":account"), conversation.accountId);
+    q.bindValue(QStringLiteral(":name"), conversation.title);
+    q.bindValue(QStringLiteral(":source"), Models::toString(conversation.sourceType));
+    q.bindValue(QStringLiteral(":confidence"), conversation.confidence);
+    q.bindValue(QStringLiteral(":cache_scope"), conversationCacheScope());
+    q.bindValue(QStringLiteral(":cache_origin"), QStringLiteral("platform_observed_cache"));
+    q.bindValue(QStringLiteral(":id"), existing->id);
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::upsertObservedCacheConversation 失败:"
+                   << q.lastError().text();
+        return -1;
+    }
+    return existing->id;
+}
+
+int ConversationDao::upsertSnapshotCacheConversation(const QJsonObject& conversation)
+{
+    const QString platform = jsonString(conversation, QStringLiteral("platform")).toLower();
+    const QString platformConversationId = jsonString(conversation, QStringLiteral("platform_conversation_id"));
+    if (platform.isEmpty() || platformConversationId.isEmpty())
+        return -1;
+
+    const QString customerName = jsonString(conversation, QStringLiteral("customer_name"));
+    const QString accountId = jsonString(conversation, QStringLiteral("account_id"));
+    const QString lastMessage = conversation.value(QStringLiteral("last_message")).toString();
+    const QString status = jsonString(conversation, QStringLiteral("status")).isEmpty()
+        ? QStringLiteral("active")
+        : jsonString(conversation, QStringLiteral("status"));
+    const QString sourceType = jsonString(conversation, QStringLiteral("source_type")).isEmpty()
+        ? QStringLiteral("ui_observed")
+        : jsonString(conversation, QStringLiteral("source_type"));
+    const int confidence = jsonInt(conversation, QStringLiteral("confidence"),
+                                   Models::defaultConfidence(Models::sourceTypeFromString(sourceType)));
+    const int unreadCount = jsonInt(conversation, QStringLiteral("unread_count"), 0);
+    const QString lastTime = jsonString(conversation, QStringLiteral("last_time"));
+    const QString updatedAt = jsonString(conversation, QStringLiteral("updated_at"));
+    auto existing = findByPlatformId(platform, platformConversationId);
+    if (!existing)
+        existing = findLegacyShortConversation(platform, platformConversationId);
+
+    QSqlQuery q(Database::getInstance().connection());
+    if (existing) {
+        q.prepare(QStringLiteral(
+            "UPDATE conversations SET "
+            "platform_conversation_id = :pcid, "
+                "account_id = :account, "
+            "customer_name = :name, "
+            "last_message = :last_message, "
+            "unread_count = :unread, "
+            "status = :status, "
+            "source_type = :source, "
+            "confidence = :confidence, "
+            "cache_scope = 'local_cache', "
+            "cache_origin = 'server_snapshot_cache', "
+            "last_time = COALESCE(NULLIF(:last_time, ''), last_time), "
+            "updated_at = COALESCE(NULLIF(:updated_at, ''), datetime('now','localtime')) "
+            "WHERE id = :id"));
+        q.bindValue(QStringLiteral(":id"), existing->id);
+        q.bindValue(QStringLiteral(":pcid"), platformConversationId);
+    } else {
+        q.prepare(QStringLiteral(
+            "INSERT INTO conversations (platform, platform_conversation_id, account_id, customer_name, "
+            "last_message, unread_count, status, source_type, confidence, cache_scope, cache_origin, "
+            "last_time, updated_at) "
+            "VALUES (:platform, :pcid, :account, :name, :last_message, :unread, :status, :source, "
+            ":confidence, 'local_cache', 'server_snapshot_cache', "
+            "COALESCE(NULLIF(:last_time, ''), datetime('now','localtime')), "
+            "COALESCE(NULLIF(:updated_at, ''), datetime('now','localtime')))"));
+        q.bindValue(QStringLiteral(":platform"), platform);
+        q.bindValue(QStringLiteral(":pcid"), platformConversationId);
+    }
+    q.bindValue(QStringLiteral(":account"), accountId.isEmpty() ? platform : accountId);
+    q.bindValue(QStringLiteral(":name"), customerName.isEmpty() ? platformConversationId : customerName);
+    q.bindValue(QStringLiteral(":last_message"), lastMessage);
+    q.bindValue(QStringLiteral(":unread"), unreadCount);
+    q.bindValue(QStringLiteral(":status"), status);
+    q.bindValue(QStringLiteral(":source"), sourceType);
+    q.bindValue(QStringLiteral(":confidence"), confidence);
+    q.bindValue(QStringLiteral(":last_time"), lastTime);
+    q.bindValue(QStringLiteral(":updated_at"), updatedAt);
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::upsertSnapshotCacheConversation 失败:"
+                   << q.lastError().text();
+        return -1;
+    }
+    if (existing)
+        return existing->id;
+    return q.lastInsertId().toInt();
+}
+
+int ConversationDao::deleteMissingSnapshotCacheConversations(
+    const QString& platform,
+    const QSet<QString>& keepPlatformConversationIds)
+{
+    const QString normalizedPlatform = platform.trimmed().toLower();
+    if (normalizedPlatform.isEmpty())
+        return 0;
+
+    QSqlDatabase db = Database::getInstance().connection();
+    const QString keepClause = keepPlatformConversationIds.isEmpty()
+        ? QString()
+        : QStringLiteral(" AND platform_conversation_id NOT IN (%1)")
+              .arg(placeholders(QStringLiteral("pcid"), keepPlatformConversationIds.size()));
+    const QString targetWhere = QStringLiteral(
+        "platform = :platform "
+        "AND cache_origin = 'server_snapshot_cache' "
+        "%1 "
+        "AND id NOT IN ("
+        "  SELECT DISTINCT conversation_id FROM messages "
+        "  WHERE conversation_id IS NOT NULL "
+        "    AND coalesce(cache_origin, '') <> 'server_snapshot_cache'"
+        ")").arg(keepClause);
+
+    if (!db.transaction()) {
+        qWarning() << "ConversationDao::deleteMissingSnapshotCacheConversations 无法开启事务";
+        return 0;
+    }
+
+    auto bindKeepIds = [&keepPlatformConversationIds](QSqlQuery& query) {
+        int i = 0;
+        for (const QString& id : keepPlatformConversationIds) {
+            query.bindValue(QStringLiteral(":pcid%1").arg(i), id);
+            ++i;
+        }
+    };
+
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "DELETE FROM messages WHERE conversation_id IN ("
+        "  SELECT id FROM conversations WHERE %1"
+        ")").arg(targetWhere));
+    q.bindValue(QStringLiteral(":platform"), normalizedPlatform);
+    bindKeepIds(q);
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::deleteMissingSnapshotCacheConversations 删除消息失败:"
+                   << q.lastError().text();
+        db.rollback();
+        return 0;
+    }
+
+    q.prepare(QStringLiteral("DELETE FROM conversations WHERE %1").arg(targetWhere));
+    q.bindValue(QStringLiteral(":platform"), normalizedPlatform);
+    bindKeepIds(q);
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::deleteMissingSnapshotCacheConversations 删除会话失败:"
+                   << q.lastError().text();
+        db.rollback();
+        return 0;
+    }
+    const int removed = q.numRowsAffected();
+    db.commit();
+    return removed;
 }
 
 std::optional<ConversationInfo> ConversationDao::findById(int id)
@@ -127,6 +418,24 @@ QVector<ConversationInfo> ConversationDao::listAll(int limit, int offset)
     while (q.next())
         result.append(recordFromQuery(q));
     return result;
+}
+
+QVector<ConversationInfo> ConversationDao::listCachedConversations(int limit, int offset)
+{
+    return listAll(limit, offset);
+}
+
+bool ConversationDao::updateDisplayName(int id, const QString& customerName)
+{
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare("UPDATE conversations SET customer_name = :name, updated_at = datetime('now','localtime') WHERE id = :id");
+    q.bindValue(":name", customerName);
+    q.bindValue(":id", id);
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::updateDisplayName 失败:" << q.lastError().text();
+        return false;
+    }
+    return true;
 }
 
 bool ConversationDao::updateLastMessage(int id, const QString& lastMessage, const QDateTime& lastTime)
@@ -263,22 +572,109 @@ bool ConversationDao::setLastSelectedConversationId(int id)
     return true;
 }
 
+QString ConversationDao::snapshotCursor(const QString& platform) const
+{
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral("SELECT value FROM app_state WHERE key = :key"));
+    q.bindValue(QStringLiteral(":key"), snapshotCursorKey(platform));
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::snapshotCursor 失败:" << q.lastError().text();
+        return {};
+    }
+    if (!q.next())
+        return {};
+    return q.value(0).toString();
+}
+
+bool ConversationDao::setSnapshotCursor(const QString& platform, const QString& cursor)
+{
+    const QString cleanCursor = cursor.trimmed();
+    QSqlQuery q(Database::getInstance().connection());
+    if (cleanCursor.isEmpty()) {
+        q.prepare(QStringLiteral("DELETE FROM app_state WHERE key = :key"));
+        q.bindValue(QStringLiteral(":key"), snapshotCursorKey(platform));
+        return q.exec();
+    }
+
+    q.prepare(QStringLiteral(
+        "INSERT OR REPLACE INTO app_state (key, value, updated_at) "
+        "VALUES (:key, :value, datetime('now','localtime'))"));
+    q.bindValue(QStringLiteral(":key"), snapshotCursorKey(platform));
+    q.bindValue(QStringLiteral(":value"), cleanCursor);
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::setSnapshotCursor 失败:" << q.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QString ConversationDao::rpaReplayCursor(const QString& platform) const
+{
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral("SELECT value FROM app_state WHERE key = :key"));
+    q.bindValue(QStringLiteral(":key"), rpaReplayCursorKey(platform));
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::rpaReplayCursor 失败:" << q.lastError().text();
+        return {};
+    }
+    if (!q.next())
+        return {};
+    return q.value(0).toString();
+}
+
+bool ConversationDao::setRpaReplayCursor(const QString& platform, const QString& cursor)
+{
+    const QString cleanCursor = cursor.trimmed();
+    QSqlQuery q(Database::getInstance().connection());
+    if (cleanCursor.isEmpty()) {
+        q.prepare(QStringLiteral("DELETE FROM app_state WHERE key = :key"));
+        q.bindValue(QStringLiteral(":key"), rpaReplayCursorKey(platform));
+        return q.exec();
+    }
+
+    q.prepare(QStringLiteral(
+        "INSERT OR REPLACE INTO app_state (key, value, updated_at) "
+        "VALUES (:key, :value, datetime('now','localtime'))"));
+    q.bindValue(QStringLiteral(":key"), rpaReplayCursorKey(platform));
+    q.bindValue(QStringLiteral(":value"), cleanCursor);
+    if (!q.exec()) {
+        qWarning() << "ConversationDao::setRpaReplayCursor 失败:" << q.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QString ConversationDao::cachedDraftForConversation(int id) const
+{
+    return draftForConversation(id);
+}
+
+bool ConversationDao::saveCachedDraft(int id, const QString& content)
+{
+    return saveDraft(id, content);
+}
+
+bool ConversationDao::clearCachedDraft(int id)
+{
+    return clearDraft(id);
+}
+
+int ConversationDao::lastSelectedCachedConversationId() const
+{
+    return lastSelectedConversationId();
+}
+
+bool ConversationDao::setLastSelectedCachedConversationId(int id)
+{
+    return setLastSelectedConversationId(id);
+}
+
 bool ConversationDao::remove(int id)
 {
     QSqlDatabase db = Database::getInstance().connection();
     QSqlQuery q(db);
 
     const auto conv = findById(id);
-    if (conv) {
-        q.prepare(
-            QStringLiteral("DELETE FROM rpa_inbox_messages WHERE platform = :p "
-                           "AND platform_conversation_id = :pcid"));
-        q.bindValue(QStringLiteral(":p"), conv->platform);
-        q.bindValue(QStringLiteral(":pcid"), conv->platformConversationId);
-        if (!q.exec())
-            qWarning() << "ConversationDao::remove 清理 rpa_inbox_messages 失败:"
-                       << q.lastError().text();
-    }
 
     q.prepare(QStringLiteral("DELETE FROM message_send_events WHERE conversation_id = :id"));
     q.bindValue(QStringLiteral(":id"), id);
@@ -289,9 +685,7 @@ bool ConversationDao::remove(int id)
     q.prepare(QStringLiteral("DELETE FROM conversations WHERE id = :id"));
     q.bindValue(QStringLiteral(":id"), id);
     const bool ok = q.exec();
-    if (ok && conv)
-        MessageDao::notifyReaderIncrementalStatePurge(conv->platform, conv->platformConversationId);
-    if (ok && conv && conv->platform == QLatin1String("wechat_pc")) {
+    if (ok && conv && conv->platform == QLatin1String("wechat")) {
         WechatMessageDao wechatDao;
         wechatDao.deleteForConversation(id);
     }

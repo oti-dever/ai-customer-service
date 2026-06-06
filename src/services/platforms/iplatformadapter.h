@@ -23,6 +23,8 @@ public:
 
 signals:
     void conversationObserved(const ConversationInfo& conversation);
+    void conversationMessagesCleared(const QString& conversationId);
+    void conversationDeleted(const QString& conversationId);
     void incomingMessage(const PlatformMessage& msg);
     void messageSent(const QString& conversationId, const QString& text, const QString& clientMessageId = QString());
     void sendFailed(const QString& conversationId, const QString& reason, const QString& clientMessageId = QString());

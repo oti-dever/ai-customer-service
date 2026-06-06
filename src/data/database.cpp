@@ -6,6 +6,7 @@
 #include <QSqlQuery>
 #include <QStandardPaths>
 #include <QDebug>
+#include <QStringList>
 
 namespace {
 
@@ -15,7 +16,31 @@ QString defaultDatabasePath()
     if (dataDir.isEmpty())
         dataDir = QDir::homePath() + QStringLiteral("/.yy-ai-customer-service");
     QDir().mkpath(dataDir);
-    return dataDir + QDir::separator() + QStringLiteral("app.db");
+    return dataDir + QDir::separator() + QStringLiteral("client_cache.db");
+}
+
+bool copyDatabaseWithSidecars(const QString& sourcePath, const QString& targetPath)
+{
+    if (!QFileInfo::exists(sourcePath))
+        return false;
+
+    const QFileInfo targetInfo(targetPath);
+    QDir().mkpath(targetInfo.absolutePath());
+    if (!QFile::copy(sourcePath, targetPath))
+        return false;
+
+    const QStringList suffixes = {
+        QStringLiteral("-wal"),
+        QStringLiteral("-shm"),
+        QStringLiteral("-journal")
+    };
+    for (const QString& suffix : suffixes) {
+        const QString sourceSidecar = sourcePath + suffix;
+        const QString targetSidecar = targetPath + suffix;
+        if (QFileInfo::exists(sourceSidecar) && !QFileInfo::exists(targetSidecar))
+            QFile::copy(sourceSidecar, targetSidecar);
+    }
+    return true;
 }
 
 void migrateLegacyDatabaseIfNeeded(const QString& targetPath)
@@ -23,6 +48,14 @@ void migrateLegacyDatabaseIfNeeded(const QString& targetPath)
     const QFileInfo targetInfo(targetPath);
     if (targetInfo.exists())
         return;
+
+    const QString appDataLegacyPath =
+        targetInfo.absolutePath() + QDir::separator() + QStringLiteral("app.db");
+    if (copyDatabaseWithSidecars(appDataLegacyPath, targetPath)) {
+        qInfo() << "[Database] migrated legacy AppData cache database:"
+                << appDataLegacyPath << "->" << targetPath;
+        return;
+    }
 
     const QString legacyDir = QStringLiteral(PROJECT_ROOT_DIR) + QStringLiteral("/database");
     const QString legacyPath = legacyDir + QDir::separator() + QStringLiteral("app.db");
@@ -67,10 +100,10 @@ bool Database::open(const QString& path)
         qWarning() << "数据库打开失败:" << db.lastError().text();
         return false;
     }
-    qInfo() << "[Database] SQLite 路径:" << m_path
-            << "（Python RPA 默认与此路径对齐；覆盖请设环境变量 AI_CUSTOMER_SERVICE_DB）";
+    qInfo() << "[Database] SQLite path:" << m_path << "(client local cache)";
 
-    // Multi-process read/write (Qt + Python RPA) recommended defaults
+
+    // Client cache uses SQLite WAL for local recovery.
     {
         QSqlQuery pragma(db);
         pragma.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
@@ -78,7 +111,9 @@ bool Database::open(const QString& path)
         pragma.exec(QStringLiteral("PRAGMA busy_timeout=3000"));
         pragma.exec(QStringLiteral("PRAGMA foreign_keys=ON"));
     }
-    return runMigrations();
+    if (!runMigrations())
+        return false;
+    return normalizePlatformConversationKeys();
 }
 
 void Database::close()
@@ -109,7 +144,7 @@ bool Database::runMigrations()
 {
     QSqlQuery q(connection());
 
-    // 必须成功的迁移（CREATE TABLE/INDEX IF NOT EXISTS）
+    // Required migrations must succeed.
     const char* requiredMigrations[] = {
         "CREATE TABLE IF NOT EXISTS users ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -131,6 +166,8 @@ bool Database::runMigrations()
         "  status TEXT DEFAULT 'new',"
         "  source_type TEXT NOT NULL DEFAULT 'mock',"
         "  confidence INTEGER NOT NULL DEFAULT 100,"
+        "  cache_scope TEXT NOT NULL DEFAULT 'local_cache',"
+        "  cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime',"
         "  updated_at DATETIME,"
         "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
         "  UNIQUE(platform, platform_conversation_id)"
@@ -167,36 +204,13 @@ bool Database::runMigrations()
         "  content_type TEXT NOT NULL DEFAULT 'text',"
         "  observed_at DATETIME,"
         "  client_message_id TEXT DEFAULT '',"
+        "  cache_scope TEXT NOT NULL DEFAULT 'local_cache',"
+        "  cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime',"
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
-        ")",
-
-        "CREATE TABLE IF NOT EXISTS rpa_inbox_messages ("
-        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "  platform TEXT NOT NULL,"
-        "  platform_conversation_id TEXT NOT NULL,"
-        "  customer_name TEXT NOT NULL,"
-        "  content TEXT NOT NULL,"
-        "  created_at DATETIME,"
-        "  platform_msg_id TEXT NOT NULL,"
-        "  consume_status INTEGER NOT NULL DEFAULT 0,"
-        "  error_reason TEXT DEFAULT '',"
-        "  direction TEXT DEFAULT '',"
-        "  sender_role TEXT DEFAULT '',"
-        "  sender_name TEXT DEFAULT '',"
-        "  original_timestamp TEXT DEFAULT '',"
-        "  source_type TEXT NOT NULL DEFAULT 'ui_observed',"
-        "  confidence INTEGER NOT NULL DEFAULT 70,"
-        "  verification_status TEXT NOT NULL DEFAULT 'unverified',"
-        "  content_type TEXT NOT NULL DEFAULT 'text'"
         ")",
 
         "CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)",
         "CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations(status)",
-
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_platform_msg_id "
-        "  ON rpa_inbox_messages(platform, platform_msg_id)",
-        "CREATE INDEX IF NOT EXISTS idx_inbox_consume_status "
-        "  ON rpa_inbox_messages(platform, consume_status, id)",
 
         "CREATE TABLE IF NOT EXISTS message_send_events ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -280,16 +294,22 @@ bool Database::runMigrations()
     const char* optionalMigrations[] = {
         "ALTER TABLE messages ADD COLUMN sender_name TEXT DEFAULT ''",
         "ALTER TABLE messages ADD COLUMN original_timestamp TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN sender_name TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN original_timestamp TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN avatar_path TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN content_image_path TEXT DEFAULT ''",
         "ALTER TABLE messages ADD COLUMN content_image_path TEXT DEFAULT ''",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN sender_name TEXT DEFAULT ''",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN original_timestamp TEXT DEFAULT ''",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN content_image_path TEXT DEFAULT ''",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
+        "ALTER TABLE rpa_inbox_messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
         "ALTER TABLE conversations ADD COLUMN account_id TEXT DEFAULT ''",
         "ALTER TABLE conversations ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
         "ALTER TABLE conversations ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
+        "ALTER TABLE conversations ADD COLUMN cache_scope TEXT NOT NULL DEFAULT 'local_cache'",
+        "ALTER TABLE conversations ADD COLUMN cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime'",
         "ALTER TABLE conversations ADD COLUMN updated_at DATETIME",
         "ALTER TABLE messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
         "ALTER TABLE messages ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
@@ -297,12 +317,8 @@ bool Database::runMigrations()
         "ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
         "ALTER TABLE messages ADD COLUMN observed_at DATETIME",
         "ALTER TABLE messages ADD COLUMN client_message_id TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'ui_observed'",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN confidence INTEGER NOT NULL DEFAULT 70",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN direction TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN sender_role TEXT DEFAULT ''",
+        "ALTER TABLE messages ADD COLUMN cache_scope TEXT NOT NULL DEFAULT 'local_cache'",
+        "ALTER TABLE messages ADD COLUMN cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime'",
         "ALTER TABLE wechat_conversations ADD COLUMN session_control_hash TEXT DEFAULT ''",
         "ALTER TABLE wechat_conversations ADD COLUMN last_unread_badge INTEGER DEFAULT 0",
         "ALTER TABLE wechat_conversations ADD COLUMN last_observed_at DATETIME",
@@ -342,5 +358,109 @@ bool Database::runMigrations()
     }
 
     qInfo() << "数据库迁移完成";
+    return true;
+}
+
+bool Database::normalizePlatformConversationKeys()
+{
+    QSqlDatabase db = connection();
+    if (!db.transaction()) {
+        qWarning() << "[Database] normalize conversation keys transaction failed";
+        return false;
+    }
+
+    const QStringList platforms = {
+        QStringLiteral("wechat"),
+        QStringLiteral("qianniu"),
+    };
+
+    for (const QString& platform : platforms) {
+        QSqlQuery canonicalQuery(db);
+        canonicalQuery.prepare(QStringLiteral(
+            "SELECT id, platform_conversation_id FROM conversations "
+            "WHERE platform = :platform AND platform_conversation_id LIKE :prefix"));
+        canonicalQuery.bindValue(QStringLiteral(":platform"), platform);
+        canonicalQuery.bindValue(QStringLiteral(":prefix"), platform + QStringLiteral(":%"));
+        if (!canonicalQuery.exec()) {
+            qWarning() << "[Database] query canonical conversations failed:" << canonicalQuery.lastError().text();
+            db.rollback();
+            return false;
+        }
+
+        while (canonicalQuery.next()) {
+            const int canonicalId = canonicalQuery.value(0).toInt();
+            const QString canonicalKey = canonicalQuery.value(1).toString();
+            const int lastSep = canonicalKey.lastIndexOf(QLatin1Char(':'));
+            if (lastSep < 0 || lastSep + 1 >= canonicalKey.size())
+                continue;
+            const QString displayKey = canonicalKey.mid(lastSep + 1);
+            if (displayKey.isEmpty() || displayKey == canonicalKey)
+                continue;
+
+            QSqlQuery shortQuery(db);
+            shortQuery.prepare(QStringLiteral(
+                "SELECT id FROM conversations "
+                "WHERE platform = :platform AND platform_conversation_id = :shortKey "
+                "LIMIT 1"));
+            shortQuery.bindValue(QStringLiteral(":platform"), platform);
+            shortQuery.bindValue(QStringLiteral(":shortKey"), displayKey);
+            if (!shortQuery.exec()) {
+                qWarning() << "[Database] query short conversation failed:" << shortQuery.lastError().text();
+                db.rollback();
+                return false;
+            }
+            if (!shortQuery.next())
+                continue;
+
+            const int shortId = shortQuery.value(0).toInt();
+            if (shortId == canonicalId)
+                continue;
+
+            QSqlQuery moveMessages(db);
+            moveMessages.prepare(QStringLiteral(
+                "UPDATE messages SET conversation_id = :canonicalId WHERE conversation_id = :shortId"));
+            moveMessages.bindValue(QStringLiteral(":canonicalId"), canonicalId);
+            moveMessages.bindValue(QStringLiteral(":shortId"), shortId);
+            if (!moveMessages.exec()) {
+                qWarning() << "[Database] move messages to canonical conversation failed:" << moveMessages.lastError().text();
+                db.rollback();
+                return false;
+            }
+
+            QSqlQuery moveDraft(db);
+            moveDraft.prepare(QStringLiteral(
+                "UPDATE OR IGNORE conversation_drafts SET conversation_id = :canonicalId WHERE conversation_id = :shortId"));
+            moveDraft.bindValue(QStringLiteral(":canonicalId"), canonicalId);
+            moveDraft.bindValue(QStringLiteral(":shortId"), shortId);
+            if (!moveDraft.exec()) {
+                qWarning() << "[Database] move conversation draft failed:" << moveDraft.lastError().text();
+                db.rollback();
+                return false;
+            }
+
+            QSqlQuery deleteShortDraft(db);
+            deleteShortDraft.prepare(QStringLiteral("DELETE FROM conversation_drafts WHERE conversation_id = :shortId"));
+            deleteShortDraft.bindValue(QStringLiteral(":shortId"), shortId);
+            if (!deleteShortDraft.exec()) {
+                qWarning() << "[Database] delete duplicate conversation draft failed:" << deleteShortDraft.lastError().text();
+                db.rollback();
+                return false;
+            }
+
+            QSqlQuery deleteShort(db);
+            deleteShort.prepare(QStringLiteral("DELETE FROM conversations WHERE id = :shortId"));
+            deleteShort.bindValue(QStringLiteral(":shortId"), shortId);
+            if (!deleteShort.exec()) {
+                qWarning() << "[Database] delete short conversation failed:" << deleteShort.lastError().text();
+                db.rollback();
+                return false;
+            }
+        }
+    }
+
+    if (!db.commit()) {
+        qWarning() << "[Database] normalize conversation keys commit failed:" << db.lastError().text();
+        return false;
+    }
     return true;
 }
