@@ -16,7 +16,7 @@ def rpa_log(msg: str) -> None:
 
 
 def rpa_phase(component: str, phase: str, detail: str = "") -> None:
-    """例如：rpa_phase("qianniu.reader", "ocr_init_start", "首次加载可能较久")"""
+    """例如：rpa_phase("wechat.reader", "scan_start", "start scanning")"""
     suffix = f" — {detail}" if detail else ""
     rpa_log(f"[RPA][{component}] PHASE {phase}{suffix}")
 

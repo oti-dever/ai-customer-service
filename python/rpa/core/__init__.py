@@ -1,7 +1,7 @@
 """
 RPA 通用基础设施模块。
 
-提供与平台无关的 Win32 输入模拟、窗口截图、OCR 引擎、窗口锁、增量去重等能力。
+提供与平台无关的 Win32 输入模拟、窗口截图、窗口锁、增量去重等能力。
 平台特化代码应放在 platforms/ 子目录下。
 """
 from .input_sim import (
@@ -49,14 +49,6 @@ from .win32_window import (
     bring_to_foreground,
     window_client_area_pixels,
 )
-from .ocr_engine import (
-    BaseOCREngine,
-    PaddleOCREngine,
-    RapidOCREngine,
-    build_ocr_engine,
-    bgra_to_pil,
-    OCRBlock,
-)
 from .window_lock import (
     PlatformWindowLock,
     hold_platform_window_lock,
@@ -73,12 +65,6 @@ from .rpa_console_log import (
     rpa_heartbeat,
 )
 from .name_stabilizer import NameStabilizer
-from .layout_parser import (
-    LayoutParserConfig,
-    ParsedMessage,
-    default_layout_config,
-    parse_chat_layout,
-)
 
 __all__ = [
     # input_sim
@@ -123,13 +109,6 @@ __all__ = [
     "is_window_visible",
     "bring_to_foreground",
     "window_client_area_pixels",
-    # ocr_engine
-    "BaseOCREngine",
-    "PaddleOCREngine",
-    "RapidOCREngine",
-    "build_ocr_engine",
-    "bgra_to_pil",
-    "OCRBlock",
     # window_lock
     "PlatformWindowLock",
     "hold_platform_window_lock",
@@ -144,9 +123,4 @@ __all__ = [
     "rpa_heartbeat",
     # name_stabilizer
     "NameStabilizer",
-    # layout_parser
-    "LayoutParserConfig",
-    "ParsedMessage",
-    "default_layout_config",
-    "parse_chat_layout",
 ]

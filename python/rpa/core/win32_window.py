@@ -119,7 +119,7 @@ def find_window_by_title_candidates(
 ) -> Optional[int]:
     """
     按顺序尝试每个标题子串，返回第一个有匹配的窗口（同串多条时取面积最大）。
-    用于千牛：先「接待中心」独立窗，再「千牛工作台」一体窗。
+    用于平台窗口标题存在多个候选值时按优先级查找。
     """
     for sub in title_substrings:
         s = (sub or "").strip()

@@ -3,7 +3,7 @@ Incremental detection: deduplicate messages by content_hash + fuzzy similarity.
 Only emit messages not seen before (sliding window).
 Persists state to file for restart resilience.
 
-去重依据：每条 ParsedMessage 的 (side, content) 经 SHA1 得到哈希；与平台真实消息 ID 无关。
+去重依据：每条 MessageLike 的 (side, content) 经 SHA1 得到哈希；与平台真实消息 ID 无关。
 写入 inbox 的 platform_msg_id 形如 ``{platform}:{conv_id}:{content_hash}``。
 """
 from __future__ import annotations
