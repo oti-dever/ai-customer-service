@@ -5,7 +5,9 @@
 #include "core/platformbootstrap.h"
 #include "ipc/ipcservice.h"
 #include "utils/appsettings.h"
+#include "utils/applystyle.h"
 #include "utils/logger.h"
+#include "utils/scrollbehavior.h"
 #include "utils/swordcursor.h"
 #include <QApplication>
 #include <QCoreApplication>
@@ -17,6 +19,8 @@ int main(int argc, char* argv[])
     QApplication a(argc, argv);
     AppSettings::configureApplication(a);
     a.setWindowIcon(QIcon(QStringLiteral(":/app_icon.svg")));
+    a.setStyleSheet(ApplyStyle::globalScrollBarStyle());
+    ScrollBehavior::install(a);
 
     SwordCursor::restore();
 

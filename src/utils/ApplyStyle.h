@@ -35,6 +35,8 @@ public:
 
     static QString loginWindowStyle();
     static QString messageBoxContrastStyle();
+    /** 全局悬浮滚动条：透明轨道、胶囊滑块；行为由 ScrollBehavior 管理。 */
+    static QString globalScrollBarStyle();
     /** 主窗口 QSS；Default 为浅蓝 + 白（与聚合接待默认主题一致方向）。 */
     static QString mainWindowStyle();
     static QString mainWindowStyle(MainWindowTheme theme);

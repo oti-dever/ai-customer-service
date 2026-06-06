@@ -1456,7 +1456,8 @@ QWidget#aiProviderConfigPage QPushButton#aiBackendSecondaryBtn:hover { backgroun
 QWidget#aiProviderConfigPage QLabel#robotAssistantPrivacy { color: #64748b; font-size: 13px; background: transparent; }
 QWidget#aiProviderConfigPage QLabel#aiProviderConfigStatus { color: #334155; font-size: 13px; background: transparent; }
 )QSS")
-            .arg(QLatin1String(kAiBackendContentBg)));
+            .arg(QLatin1String(kAiBackendContentBg))
+        + ApplyStyle::globalScrollBarStyle());
 }
 
 void AiCustomerServiceBackendWindow::focusApiModelPage()

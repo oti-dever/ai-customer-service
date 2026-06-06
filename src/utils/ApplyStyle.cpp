@@ -490,24 +490,25 @@ QString baseControlStyleQss()
 
 } // namespace
 
-/** 与「管理应用列表」内树视图一致的细滚动条（无箭头、圆角滑块） */
+/** 全局悬浮滚动条：透明轨道、无箭头、胶囊滑块；显隐与淡出由 ScrollBehavior 管理。 */
 static QString unifiedScrollBarQss(ApplyStyle::MainWindowTheme theme)
 {
     Q_UNUSED(theme)
     return QStringLiteral(
         R"(
         QScrollBar:vertical {
-            width: 6px;
+            width: 10px;
             background: transparent;
-            margin: 2px 3px 2px 0;
+            border: none;
+            margin: 2px 2px 2px 2px;
         }
         QScrollBar::handle:vertical {
-            background: #D4D4D8;
-            min-height: 28px;
+            background: rgba(113, 113, 122, 150);
+            min-height: 36px;
             border-radius: 3px;
         }
         QScrollBar::handle:vertical:hover {
-            background: #A1A1AA;
+            background: rgba(82, 82, 91, 200);
         }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
             height: 0;
@@ -517,17 +518,18 @@ static QString unifiedScrollBarQss(ApplyStyle::MainWindowTheme theme)
             background: transparent;
         }
         QScrollBar:horizontal {
-            height: 6px;
+            height: 10px;
             background: transparent;
-            margin: 0 0 3px 0;
+            border: none;
+            margin: 2px 2px 2px 2px;
         }
         QScrollBar::handle:horizontal {
-            background: #D4D4D8;
-            min-width: 28px;
+            background: rgba(113, 113, 122, 150);
+            min-width: 36px;
             border-radius: 3px;
         }
         QScrollBar::handle:horizontal:hover {
-            background: #A1A1AA;
+            background: rgba(82, 82, 91, 200);
         }
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
             height: 0;
@@ -536,10 +538,14 @@ static QString unifiedScrollBarQss(ApplyStyle::MainWindowTheme theme)
         QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
             background: transparent;
         }
+        QScrollBar::handle:vertical:disabled,
+        QScrollBar::handle:horizontal:disabled {
+            background: transparent;
+        }
     )");
 }
 
-/** 「添加新窗口 / 控制台输出」等 QDialog 内 QComboBox，与聚合接待模式下拉一致 */
+/** 「添加新窗口 / Python 服务端连接」等 QDialog 内 QComboBox，与聚合接待模式下拉一致 */
 static QString addWindowDialogComboBoxQss(ApplyStyle::MainWindowTheme theme)
 {
     Q_UNUSED(theme)
@@ -778,6 +784,11 @@ QString ApplyStyle::messageBoxContrastStyle()
         "  color: #ffffff;"
         "  border-color: #1d4ed8;"
         "}");
+}
+
+QString ApplyStyle::globalScrollBarStyle()
+{
+    return unifiedScrollBarQss(MainWindowTheme::Default);
 }
 
 QString ApplyStyle::mainWindowStyle(MainWindowTheme theme)
@@ -1708,6 +1719,39 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             color: %2;
             font-size: 12px;
             font-weight: 600;
+        }
+        QFrame#aggregatePlatformListenBox {
+            background: %12;
+            border: 1px solid %11;
+            border-radius: 10px;
+        }
+        QCheckBox#aggregatePlatformListenCheck {
+            color: %13;
+            font-size: 12px;
+            spacing: 5px;
+        }
+        QLabel#aggregatePlatformListenStatus {
+            color: %9;
+            font-size: 11px;
+        }
+        QPushButton#aggregatePlatformListenStartButton,
+        QPushButton#aggregatePlatformListenStopButton {
+            background: %16;
+            color: %13;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            padding: 5px 8px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        QPushButton#aggregatePlatformListenStartButton:hover,
+        QPushButton#aggregatePlatformListenStopButton:hover {
+            background: %17;
+            border-color: %14;
+        }
+        QPushButton#aggregatePlatformListenStartButton:pressed,
+        QPushButton#aggregatePlatformListenStopButton:pressed {
+            background: %15;
         }
         AggregateChatForm QComboBox {
             background: %12;
