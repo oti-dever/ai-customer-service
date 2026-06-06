@@ -51,13 +51,13 @@ def _risk_flags(text: str) -> list[str]:
     return [keyword for keyword in SENSITIVE_KEYWORDS if keyword in text]
 
 
-def _build_template_suggestions(customer_text: str, platform_type: str, max_suggestions: int) -> list[Suggestion]:
+def _build_template_suggestions(customer_text: str, platform: str, max_suggestions: int) -> list[Suggestion]:
     platform_hint = {
         "pdd_web": "拼多多后台",
-        "qianniu_pc": "千牛",
-        "wechat_pc": "微信",
+        "wechat": "微信",
+        "qianniu": "千牛",
         "mock": "当前平台",
-    }.get(platform_type, "当前平台")
+    }.get(platform, "当前平台")
 
     if not customer_text:
         base = [
@@ -76,7 +76,7 @@ def _build_template_suggestions(customer_text: str, platform_type: str, max_sugg
 
 def build_ai_suggestion_response(payload: dict[str, Any]) -> dict[str, Any]:
     request_id = _clean_text(payload.get("request_id"))
-    platform_type = _clean_text(payload.get("platform_type")) or "unknown"
+    platform = _clean_text(payload.get("platform")) or "unknown"
     max_suggestions = payload.get("max_suggestions", 3)
     try:
         max_suggestions = int(max_suggestions)
@@ -87,7 +87,7 @@ def build_ai_suggestion_response(payload: dict[str, Any]) -> dict[str, Any]:
     messages = _normalize_messages(payload.get("messages"))
     customer_text = _last_customer_message(messages)
     flags = _risk_flags(customer_text)
-    suggestions = _build_template_suggestions(customer_text, platform_type, max_suggestions)
+    suggestions = _build_template_suggestions(customer_text, platform, max_suggestions)
 
     if flags:
         suggestions[0] = Suggestion(
@@ -107,7 +107,7 @@ def build_ai_suggestion_response(payload: dict[str, Any]) -> dict[str, Any]:
             "mode": "template_fallback",
             "risk_flags": flags,
             "message_count": len(messages),
-            "platform_type": platform_type,
+            "platform": platform,
         },
     }
 

@@ -13,26 +13,75 @@ import hashlib
 from typing import Any
 from urllib.parse import urlparse
 
+from rpa.platforms.qianniu.adapter import PLATFORM_QIANNIU, QianniuSidecarAdapter
 from rpa.platforms.wechat.adapter import PLATFORM_WECHAT, WechatSidecarAdapter, clean, payload_status
+from .truth_store import PythonServiceTruthStore
+
+
+MUTATION_OBSERVATION_QUIET_SECONDS = 3.0
+
+
+def normalize_platform(value: Any) -> str:
+    return clean(value).lower()
 
 
 class RpaEventStore:
-    def __init__(self, max_events: int = 500) -> None:
+    def __init__(self, max_events: int = 500, truth_store: PythonServiceTruthStore | None = None) -> None:
         self._lock = threading.Lock()
         self._next_seq = 1
         self._events: deque[tuple[int, dict[str, Any]]] = deque(maxlen=max_events)
         self._listeners: list["_EventPushClient"] = []
         self._listeners_lock = threading.Lock()
+        self._truth_store = truth_store
+        self._last_observed_at_by_platform: dict[str, float] = {}
 
     def append(self, event: dict[str, Any]) -> int:
+        total_started_at = time.perf_counter()
+        persist_ms = 0.0
         with self._lock:
             seq = self._next_seq
             self._next_seq += 1
             stored = dict(event)
             stored["seq"] = seq
             stored["cursor"] = str(seq)
+            event_type = clean(stored.get("event_type"))
+            platform_name = normalize_platform(stored.get("platform"))
+            if event_type in {"conversation_observed", "message_observed"} and platform_name:
+                self._last_observed_at_by_platform[platform_name] = time.monotonic()
+            if self._truth_store is not None:
+                try:
+                    persist_started_at = time.perf_counter()
+                    accepted = self._truth_store.persist_event(stored)
+                    persist_ms = (time.perf_counter() - persist_started_at) * 1000.0
+                    if accepted is False:
+                        logging.info(
+                            "rpa_event_store filtered event_id=%s platform=%s event_type=%s seq=%s persist_ms=%.1f",
+                            stored.get("event_id", ""),
+                            stored.get("platform", ""),
+                            stored.get("event_type", ""),
+                            seq,
+                            persist_ms,
+                        )
+                        return 0
+                    stored["truth_persisted"] = True
+                except Exception:
+                    stored["truth_persisted"] = False
+                    logging.exception("failed to persist rpa event to Python service truth db")
             self._events.append((seq, stored))
+        broadcast_started_at = time.perf_counter()
         self._broadcast(stored)
+        broadcast_ms = (time.perf_counter() - broadcast_started_at) * 1000.0
+        logging.info(
+            "rpa_event_store timing event_id=%s platform=%s event_type=%s seq=%s total_ms=%.1f persist_ms=%.1f broadcast_ms=%.1f truth_persisted=%s",
+            stored.get("event_id", ""),
+            stored.get("platform", ""),
+            stored.get("event_type", ""),
+            seq,
+            (time.perf_counter() - total_started_at) * 1000.0,
+            persist_ms,
+            broadcast_ms,
+            stored.get("truth_persisted"),
+        )
         return seq
 
     def register_listener(self, listener: "_EventPushClient") -> None:
@@ -51,14 +100,14 @@ class RpaEventStore:
         except (TypeError, ValueError):
             since = 0
         limit = max(1, min(int(limit or 50), 200))
-        platform = clean(platform)
+        platform = normalize_platform(platform)
         with self._lock:
             selected: list[dict[str, Any]] = []
             last_cursor = since
             for seq, event in self._events:
                 if seq <= since:
                     continue
-                if platform and event.get("platform") != platform:
+                if platform and normalize_platform(event.get("platform")) != platform:
                     continue
                 selected.append(dict(event))
                 last_cursor = seq
@@ -71,6 +120,31 @@ class RpaEventStore:
             "latest_cursor": str(latest),
             "events": selected,
         }
+
+    def seconds_since_observed_event(self, platform: str) -> float | None:
+        normalized = normalize_platform(platform)
+        if not normalized:
+            return None
+        with self._lock:
+            observed_at = self._last_observed_at_by_platform.get(normalized)
+        if observed_at is None:
+            return None
+        return max(0.0, time.monotonic() - observed_at)
+
+    def filter_observed_message_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        bootstrap_limit: int = 100,
+        incremental_limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        if self._truth_store is None:
+            return list(events)
+        return self._truth_store.filter_observed_message_events(
+            events,
+            bootstrap_limit=bootstrap_limit,
+            incremental_limit=incremental_limit,
+        )
 
 
 class _EventPushClient:
@@ -124,7 +198,7 @@ class _EventPushClient:
         self._socket = sock
         self._send_json({
             "type": "hello",
-            "platform": PLATFORM_WECHAT,
+            "platform": "multi",
         })
 
     def _drain(self) -> None:
@@ -242,6 +316,7 @@ class _CommandWebSocketServer:
             client.sendall(response)
             logging.info("Command WebSocket connected from %s:%s", addr[0], addr[1])
 
+            client.settimeout(None)
             while self._running:
                 frame = self._recv_frame(client)
                 if frame is None:
@@ -275,6 +350,8 @@ class _CommandWebSocketServer:
                         result={},
                     )
                 self._send_json(client, response_json)
+        except socket.timeout:
+            logging.info("Command WebSocket client timed out during handshake from %s:%s", addr[0], addr[1])
         except Exception as exc:
             logging.warning("Command WebSocket client error: %s", exc)
         finally:
@@ -364,8 +441,14 @@ class _CommandWebSocketServer:
 
 class RpaBridge:
     def __init__(self, mode: str = "debug", command_ws_host: str = "127.0.0.1", command_ws_port: int = 8767) -> None:
-        self.store = RpaEventStore()
+        self._truth_store = PythonServiceTruthStore()
+        self.store = RpaEventStore(truth_store=self._truth_store)
         self._wechat = WechatSidecarAdapter(self.store)
+        self._qianniu = QianniuSidecarAdapter(self.store)
+        self._adapters = {
+            PLATFORM_WECHAT: self._wechat,
+            PLATFORM_QIANNIU: self._qianniu,
+        }
         self._event_client = _EventPushClient()
         self._command_server = _CommandWebSocketServer(self, command_ws_host, command_ws_port)
         self._command_lock = threading.Lock()
@@ -376,15 +459,16 @@ class RpaBridge:
 
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._command_lock:
-            platform = clean(payload.get("platform") or payload.get("platform_type")) or PLATFORM_WECHAT
-            if platform != PLATFORM_WECHAT:
+            platform = normalize_platform(payload.get("platform")) or PLATFORM_WECHAT
+            adapter = self._adapters.get(platform)
+            if adapter is None:
                 return payload_status(
                     "error",
                     clean(payload.get("request_id")),
                     error=f"unsupported_platform:{platform}",
                     result={},
                 )
-            command = clean(payload.get("command") or payload.get("command_type"))
+            command = clean(payload.get("command"))
             if self._mode == "formal" and command in {"send_message", "prepare_reply_draft"}:
                 return payload_status(
                     "error",
@@ -392,15 +476,196 @@ class RpaBridge:
                     error="send_disabled_in_formal_mode",
                     result={},
                 )
-            return self._wechat.command(payload)
+            normalized_payload = dict(payload)
+            normalized_payload["platform"] = platform
+            if command == "send_message":
+                self._truth_store.persist_outbound_command(normalized_payload)
+                threading.Thread(
+                    target=self._run_async_send_message,
+                    args=(platform, adapter, normalized_payload),
+                    name=f"{platform}-send-message",
+                    daemon=True,
+                ).start()
+                params = normalized_payload.get("parameters")
+                if not isinstance(params, dict):
+                    params = {}
+                client_message_id = clean(
+                    normalized_payload.get("client_message_id")
+                    or params.get("client_message_id")
+                    or normalized_payload.get("task_id")
+                    or params.get("task_id")
+                    or normalized_payload.get("request_id")
+                )
+                return payload_status(
+                    "success",
+                    clean(normalized_payload.get("request_id")),
+                    result={
+                        "accepted": True,
+                        "async": True,
+                        "sent": False,
+                        "task_id": clean(normalized_payload.get("task_id") or params.get("task_id")),
+                        "client_message_id": client_message_id,
+                    },
+                )
+            return adapter.command(normalized_payload)
+
+    def clear_conversation_messages(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._apply_conversation_mutation(payload, mutation_type="clear_messages")
+
+    def delete_conversation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._apply_conversation_mutation(payload, mutation_type="delete_conversation")
+
+    def _apply_conversation_mutation(self, payload: dict[str, Any], *, mutation_type: str) -> dict[str, Any]:
+        with self._command_lock:
+            platform = normalize_platform(payload.get("platform"))
+            params = payload.get("parameters")
+            if not isinstance(params, dict):
+                params = {}
+            conversation_key = clean(
+                payload.get("conversation_key")
+                or params.get("conversation_key")
+                or params.get("display_name")
+            )
+            if not platform or not conversation_key:
+                return {
+                    "status": "error",
+                    "error": "missing_platform_or_conversation_key",
+                    "result": {},
+                }
+
+            active = self._mutation_blocker(platform)
+            if active:
+                return {
+                    "status": "error",
+                    "error": active["error"],
+                    "result": active,
+                }
+
+            if mutation_type == "delete_conversation":
+                result = self._truth_store.delete_conversation(
+                    platform,
+                    conversation_key,
+                    account_id=clean(payload.get("account_id") or params.get("account_id")),
+                    operator=clean(payload.get("operator") or params.get("operator")),
+                    reason=clean(payload.get("reason") or params.get("reason")),
+                )
+            else:
+                result = self._truth_store.clear_conversation_messages(
+                    platform,
+                    conversation_key,
+                    account_id=clean(payload.get("account_id") or params.get("account_id")),
+                    operator=clean(payload.get("operator") or params.get("operator")),
+                    reason=clean(payload.get("reason") or params.get("reason")),
+                )
+
+            event = result.get("event")
+            if isinstance(event, dict):
+                self.store.append(event)
+            return {
+                "status": result.get("status", "success"),
+                "error": result.get("error", ""),
+                "result": {key: value for key, value in result.items() if key != "event"},
+            }
+
+    def _mutation_blocker(self, platform: str) -> dict[str, Any] | None:
+        adapter = self._adapters.get(platform)
+        if adapter is None:
+            return {"error": f"unsupported_platform:{platform}", "platform": platform}
+        connected = bool(getattr(adapter, "_connected", False))
+        observer_thread = getattr(adapter, "_observer_thread", None)
+        observer_running = bool(observer_thread is not None and observer_thread.is_alive())
+        if connected or observer_running:
+            return {
+                "error": "observer_active",
+                "platform": platform,
+                "connected": connected,
+                "observer_running": observer_running,
+                "quiet_seconds_required": MUTATION_OBSERVATION_QUIET_SECONDS,
+            }
+
+        elapsed = self.store.seconds_since_observed_event(platform)
+        if elapsed is not None and elapsed < MUTATION_OBSERVATION_QUIET_SECONDS:
+            return {
+                "error": "recent_observation",
+                "platform": platform,
+                "seconds_since_observed_event": elapsed,
+                "quiet_seconds_required": MUTATION_OBSERVATION_QUIET_SECONDS,
+            }
+        return None
+
+    def _run_async_send_message(self, platform: str, adapter: Any, payload: dict[str, Any]) -> None:
+        with self._command_lock:
+            request_id = clean(payload.get("request_id"))
+            try:
+                response = adapter.command(payload)
+            except Exception as exc:
+                logging.exception("Async send_message raised request_id=%s platform=%s", request_id, platform)
+                self._emit_send_failed(payload, str(exc))
+                return
+            if response.get("status") != "success":
+                self._emit_send_failed(payload, clean(response.get("error")) or "send_message_failed")
+
+    def _emit_send_failed(self, payload: dict[str, Any], reason: str) -> None:
+        params = payload.get("parameters")
+        if not isinstance(params, dict):
+            params = {}
+        client_message_id = clean(
+            payload.get("client_message_id")
+            or params.get("client_message_id")
+            or payload.get("task_id")
+            or params.get("task_id")
+            or payload.get("request_id")
+        )
+        event = {
+            "event_type": "send_failed",
+            "platform": normalize_platform(payload.get("platform")),
+            "account_id": clean(payload.get("account_id")),
+            "conversation_key": clean(params.get("conversation_key") or params.get("display_name")),
+            "client_message_id": client_message_id,
+            "payload": {
+                "client_message_id": client_message_id,
+                "error_message": clean(reason) or "send_message_failed",
+            },
+        }
+        self.store.append(event)
 
     def events(self, platform: str, cursor: str | int | None, limit: int) -> dict[str, Any]:
-        return self.store.list_after(cursor, platform=platform, limit=limit)
+        return self.store.list_after(cursor, platform=normalize_platform(platform), limit=limit)
+
+    def replay(self, platform: str, cursor: str | int | None, limit: int) -> dict[str, Any]:
+        return self._truth_store.replay_events(platform=normalize_platform(platform), cursor=cursor, limit=limit)
+
+    def platforms(self) -> dict[str, Any]:
+        def adapter_status(platform: str, display_name: str, adapter: Any) -> dict[str, Any]:
+            connected = bool(getattr(adapter, "_connected", False))
+            observer_thread = getattr(adapter, "_observer_thread", None)
+            observer_running = bool(observer_thread is not None and observer_thread.is_alive())
+            account_id = clean(getattr(adapter, "_account_id", ""))
+            return {
+                "platform": platform,
+                "display_name": display_name,
+                "registered": True,
+                "connected": connected,
+                "listening": connected and observer_running,
+                "observer_running": observer_running,
+                "account_id": account_id,
+            }
+
+        return {
+            "status": "success",
+            "mode": self._mode,
+            "platforms": [
+                adapter_status(PLATFORM_WECHAT, "微信", self._wechat),
+                adapter_status(PLATFORM_QIANNIU, "千牛", self._qianniu),
+            ],
+        }
 
     def health(self, platform: str) -> dict[str, Any]:
-        if clean(platform) not in ("", PLATFORM_WECHAT):
+        normalized = normalize_platform(platform) or PLATFORM_WECHAT
+        adapter = self._adapters.get(normalized)
+        if adapter is None:
             return {"status": "error", "error": f"unsupported_platform:{platform}"}
-        payload = self._wechat.health()
+        payload = adapter.health()
         payload["mode"] = self._mode
         return payload
 

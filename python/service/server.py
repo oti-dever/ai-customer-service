@@ -13,6 +13,7 @@ import threading
 import time
 
 from .ai_suggestion import build_ai_suggestion_response
+from .cache_snapshot import build_cache_snapshot
 from . import rpa_bridge
 
 
@@ -84,12 +85,15 @@ class AiServiceHandler(BaseHTTPRequestHandler):
                 }
             )
             return
-        if path == "/api/rpa/health":
-            platform = query.get("platform", ["wechat_pc"])[0]
+        if path in {"/api/platforms", "/api/platform/list"}:
+            self._send_json(rpa_bridge.get_bridge().platforms())
+            return
+        if path in {"/api/platform/health", "/api/rpa/health"}:
+            platform = query.get("platform", ["wechat"])[0]
             self._send_json(rpa_bridge.get_bridge().health(platform))
             return
-        if path == "/api/rpa/events":
-            platform = query.get("platform", ["wechat_pc"])[0]
+        if path in {"/api/platform/events", "/api/rpa/events"}:
+            platform = query.get("platform", ["wechat"])[0]
             cursor = query.get("cursor", ["0"])[0]
             limit_raw = query.get("limit", ["50"])[0]
             try:
@@ -97,6 +101,30 @@ class AiServiceHandler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 50
             self._send_json(rpa_bridge.get_bridge().events(platform, cursor, limit))
+            return
+        if path in {"/api/platform/replay", "/api/rpa/replay"}:
+            platform = query.get("platform", [""])[0]
+            cursor = query.get("cursor", ["0"])[0]
+            limit_raw = query.get("limit", ["50"])[0]
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 50
+            self._send_json(rpa_bridge.get_bridge().replay(platform, cursor, limit))
+            return
+        if path == "/api/cache/snapshot":
+            platform = query.get("platform", [""])[0]
+            cursor = query.get("cursor", [""])[0]
+            conversation_limit = query.get("conversation_limit", ["100"])[0]
+            message_limit = query.get("message_limit", ["200"])[0]
+            self._send_json(
+                build_cache_snapshot(
+                    platform=platform,
+                    cursor=cursor,
+                    conversation_limit=conversation_limit,
+                    message_limit=message_limit,
+                )
+            )
             return
         self._send_json({"status": "error", "error": "not_found"}, status_code=404)
 
@@ -111,12 +139,26 @@ class AiServiceHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(build_ai_suggestion_response(payload))
             return
-        if path == "/api/rpa/command":
+        if path in {"/api/platform/command", "/api/rpa/command"}:
             payload = self._read_json_body()
             if payload is None:
                 self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
                 return
             self._send_json(rpa_bridge.get_bridge().command(payload))
+            return
+        if path == "/api/conversations/clear_messages":
+            payload = self._read_json_body()
+            if payload is None:
+                self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
+                return
+            self._send_json(rpa_bridge.get_bridge().clear_conversation_messages(payload))
+            return
+        if path == "/api/conversations/delete":
+            payload = self._read_json_body()
+            if payload is None:
+                self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
+                return
+            self._send_json(rpa_bridge.get_bridge().delete_conversation(payload))
             return
         self._send_json({"status": "error", "error": "not_found"}, status_code=404)
 
