@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .detector import WechatDetector
-from .reader_v2 import WechatVisibleMessageReader
-from .sender_v2 import WechatMessageSender
+from .reader import WechatVisibleMessageReader
+from .sender import WechatMessageSender
 from .stability import DebugArtifactWriter, FailureTracker, uia_guard
 from .wechat_logging import get_logger
 logger = get_logger(__name__)
 
-PLATFORM_WECHAT = "wechat_pc"
+PLATFORM_WECHAT = "wechat"
 DEFAULT_ACCOUNT_ID = "local_wechat"
 OBSERVER_POLL_INTERVAL_SEC = 0.8
 OBSERVER_AFTER_WORK_SLEEP_SEC = 0.2
@@ -114,7 +114,7 @@ class WechatSidecarAdapter:
 
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
         request_id = clean(payload.get("request_id"))
-        command = clean(payload.get("command") or payload.get("command_type"))
+        command = clean(payload.get("command"))
         self._account_id = clean(payload.get("account_id")) or self._account_id
         params = payload.get("parameters")
         if not isinstance(params, dict):
@@ -371,9 +371,10 @@ class WechatSidecarAdapter:
         read_limit = self._message_window_limit_for_unread(display_name, unread_count, limit)
         batch = self._reader.read_visible_messages(display_name=display_name, limit=read_limit, tail_only=tail_only)
         display_name = batch.display_name
+        key = _conversation_key(self._account_id, display_name)
         context = getattr(batch, "context", None)
         self._update_active_chat_state(display_name, context=context, samples=batch.samples)
-        messages: list[dict[str, Any]] = []
+        raw_message_events: list[dict[str, Any]] = []
         for item in batch.samples:
             content = clean(getattr(item, "name", ""))
             if not content:
@@ -384,9 +385,14 @@ class WechatSidecarAdapter:
                 continue
             if platform_msg_id:
                 self._seen_message_ids.add(platform_msg_id)
+            raw_message_events.append(event)
+
+        messages = self._filter_unread_message_events(raw_message_events)
+        for event in messages:
+            platform_msg_id = clean(event.get("payload", {}).get("platform_msg_id"))
+            if platform_msg_id:
                 self._conversation_message_cursors[key] = platform_msg_id
             self._store.append(event)
-            messages.append(event)
         self._seen_conversation_keys.add(key)
         return {
             "count": len(messages),
@@ -583,6 +589,7 @@ class WechatSidecarAdapter:
             self._update_active_chat_state(display_name, context=context, samples=batch.samples)
 
             count_before = len(messages)
+            raw_message_events: list[dict[str, Any]] = []
             for item in batch.samples:
                 content = clean(getattr(item, "name", ""))
                 if not content:
@@ -593,6 +600,12 @@ class WechatSidecarAdapter:
                     continue
                 if platform_msg_id:
                     self._seen_message_ids.add(platform_msg_id)
+                raw_message_events.append(msg_event)
+
+            filtered_message_events = self._filter_unread_message_events(raw_message_events)
+            for msg_event in filtered_message_events:
+                platform_msg_id = clean(msg_event.get("payload", {}).get("platform_msg_id"))
+                if platform_msg_id:
                     self._conversation_message_cursors[_conversation_key(self._account_id, display_name)] = platform_msg_id
                 self._store.append(msg_event)
                 messages.append(msg_event)
@@ -637,6 +650,19 @@ class WechatSidecarAdapter:
         if count <= 0:
             return default_limit
         return max(1, min(default_limit, count + 2))
+
+    def _filter_unread_message_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not events:
+            return []
+        filterer = getattr(self._store, "filter_observed_message_events", None)
+        if not callable(filterer):
+            return events
+        try:
+            filtered = filterer(events, bootstrap_limit=100, incremental_limit=10)
+        except Exception:
+            logger.exception("wechat unread message filter failed; emitting visible messages")
+            return events
+        return list(filtered)
 
     def _is_same_active_conversation(self, display_name: str) -> bool:
         expected_key = clean(_conversation_key(self._account_id, display_name))

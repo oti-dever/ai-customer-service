@@ -7,6 +7,7 @@ def capture_bubble(control: Any, hwnd: int, padding: int = 12) -> Any | None:
     try:
         from PIL import Image
         from rpa.core.screenshot import capture_window_printwindow
+        from rpa.platforms.wechat.uia_scoring import safe_rect_tuple
     except Exception:
         return None
 
@@ -18,15 +19,15 @@ def capture_bubble(control: Any, hwnd: int, padding: int = 12) -> Any | None:
     except Exception:
         return None
 
-    rect = getattr(control, "BoundingRectangle", None)
+    rect = safe_rect_tuple(control)
     if rect is None:
         return None
 
     try:
         import win32gui
 
-        left_top = win32gui.ScreenToClient(hwnd, (int(rect.left), int(rect.top)))
-        right_bottom = win32gui.ScreenToClient(hwnd, (int(rect.right), int(rect.bottom)))
+        left_top = win32gui.ScreenToClient(hwnd, (rect[0], rect[1]))
+        right_bottom = win32gui.ScreenToClient(hwnd, (rect[2], rect[3]))
         left = min(left_top[0], right_bottom[0]) - padding
         top = min(left_top[1], right_bottom[1]) - padding
         right = max(left_top[0], right_bottom[0]) + padding

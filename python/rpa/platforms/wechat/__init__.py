@@ -5,8 +5,8 @@
 """
 from .adapter import PLATFORM_WECHAT, WechatSidecarAdapter
 from .detector import WechatDetector
-from .reader_v2 import WechatVisibleMessageReader
-from .sender_v2 import WechatMessageSender
+from .reader import WechatVisibleMessageReader
+from .sender import WechatMessageSender
 from .uia_scoring import ControlCandidate
 from .role_judgement import MessageRoleJudgement
 

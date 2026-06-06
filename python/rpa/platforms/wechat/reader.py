@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .detector import WechatDetector
-from .role_judgement import MessageRoleJudgement, judge_by_position, judge_message_role
+from .role_judgement import MessageRoleJudgement, judge_message_role
 from .uia_scoring import (
     find_message_list_candidates,
     normalize_text,
@@ -30,7 +30,7 @@ class VisibleMessageBatch:
 
 @dataclass(frozen=True)
 class ChatContext:
-    platform: str = "wechat_pc"
+    platform: str = "wechat"
     chat_title: str = ""
     user_id: str = ""
     is_group: bool = False
@@ -110,7 +110,7 @@ class WechatVisibleMessageReader:
             )
         else:
             stage_started_at = time.perf_counter()
-            samples = _attach_roles_to_samples(samples, message_list=message_list)
+            samples = _attach_roles_to_samples(samples, message_list=message_list, window_hwnd=window_hwnd)
             logger.info(
                 "read_visible_messages_timing stage=attach_roles ms=%.1f samples=%s",
                 (time.perf_counter() - stage_started_at) * 1000.0,
@@ -157,7 +157,7 @@ class WechatVisibleMessageReader:
         user_id = chat_title.strip()
         session_id = self.build_session_id(chat_title, is_group)
         return ChatContext(
-            platform="wechat_pc",
+            platform="wechat",
             chat_title=chat_title.strip(),
             user_id=user_id,
             is_group=is_group,
@@ -447,8 +447,11 @@ def _collect_messages_by_scored_list(
     return found
 
 
-def _attach_roles_to_samples(samples: list[Any], *, message_list: Any | None) -> list[Any]:
-    return [_attach_role(item, judge_by_position(item, message_list)) for item in samples]
+def _attach_roles_to_samples(samples: list[Any], *, message_list: Any | None, window_hwnd: int = 0) -> list[Any]:
+    return [
+        _attach_role(item, judge_message_role(item, message_list=message_list, window_hwnd=window_hwnd))
+        for item in samples
+    ]
 
 
 def _attach_role(sample: Any, role: MessageRoleJudgement) -> Any:

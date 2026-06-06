@@ -42,11 +42,23 @@ def safe_prop(control: Any, name: str) -> str:
 
 
 def safe_rect_tuple(control: Any) -> tuple[int, int, int, int] | None:
+    if control is None:
+        return None
     try:
         rect = control.BoundingRectangle
         return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
     except Exception:
+        pass
+    try:
+        left = int(float(getattr(control, "left")))
+        top = int(float(getattr(control, "top")))
+        right = int(float(getattr(control, "right")))
+        bottom = int(float(getattr(control, "bottom")))
+    except Exception:
         return None
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
 
 
 def safe_rect_repr(control: Any) -> str:
