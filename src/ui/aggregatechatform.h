@@ -2,6 +2,7 @@
 #define AGGREGATECHATFORM_H
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QPoint>
 #include <QLabel>
 #include <QLineEdit>
@@ -10,6 +11,7 @@
 #include <QListWidgetItem>
 #include <QWidget>
 #include <QMap>
+#include <QSet>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QMenu>
@@ -33,6 +35,7 @@ class AiChatAppService;
 class IAiStreamingSession;
 class ConversationListModel;
 class MessageListModel;
+class QJsonObject;
 class QStyledItemDelegate;
 class QToolButton;
 class QAction;
@@ -40,7 +43,7 @@ class QButtonGroup;
 class QSplitter;
 class QModelIndex;
 
-/** 左侧平台工具条：与库中 `conversations.platform` 一致（如 qianniu、pdd_web、douyin、wechat_pc）。 */
+/** 左侧平台工具条：与库中 `conversations.platform` 一致（如 qianniu、pdd_web、douyin、wechat）。 */
 enum class AggregatePlatformFilter { All = 0, Qianniu = 1, Pdd = 2, Doudian = 3, Wechat = 4 };
 enum class AggregateConversationTab { All = 0, Pending = 1, Replied = 2 };
 
@@ -71,7 +74,10 @@ private:
     QWidget* buildRightPanel();
 
     void refreshConversationList();
+    void reloadFromLocalCache();
+    /** 兼容旧命名；主路径请使用 reloadFromLocalCache()。 */
     void reloadFromDatabase();
+    void applyCacheSnapshotToLocalCache(const QJsonObject& snapshot);
     void renderConversationListFromModel();
     void showConversation(int conversationId);
     void renderConversationMessages(const QVector<MessageRecord>& messages);
@@ -90,9 +96,15 @@ private:
     void showCenterEmptyState();
     void showRightEmptyState();
     void showStatusMessage(const QString& text, int timeoutMs);
+    bool applyServiceConversationMutation(const ConversationInfo& conv, bool deleteConversation);
     void updateAggregateAiControlsVisibility();
     void refreshAggregateAiModelButtonUi();
     void setAggregateAiBusy(bool busy);
+    QStringList selectedPlatformListenTargets() const;
+    void refreshPlatformListenStateFromService();
+    void backfillFromPythonService();
+    void setPlatformListenControlsEnabled(bool enabled);
+    void updatePlatformListenStatusLabel();
     void abortAggregateAiRequest();
     void clearStreamingSession(IAiStreamingSession*& session);
     /** 千牛 + AI 自动回复模式下，在满足 §3 条件时尝试生成并发送（T1 切换会话 / T2 当前会话新入站）。 */
@@ -129,6 +141,8 @@ private slots:
     void onSendClicked();
     void onStopAutoReplyClicked();
     void onModeComboChanged();
+    void onStartPlatformListeningClicked();
+    void onStopPlatformListeningClicked();
     void onGenerateAiDraftClicked();
     void onAggregateAiModelMenuTriggered(QAction* action);
     void onIpcAiSuggestionReceived(const Ipc::AiSuggestionResponse& response);
@@ -143,6 +157,8 @@ private slots:
     void onConversationListChanged();
     void onUnifiedMessageReceived(int conversationId, const Models::Message& message);
     void onUnifiedConversationUpdated(const Models::Conversation& conversation);
+    void onConversationMessagesCleared(int conversationId);
+    void onConversationDeleted(int conversationId);
     void onNewMessage(int conversationId, const MessageRecord& msg);
     void onSentOk(int conversationId, const MessageRecord& msg);
     void onClearSendTimeline();
@@ -162,6 +178,15 @@ private:
     QWidget* m_rightPanel = nullptr;
     QLabel* m_platformSectionTitle = nullptr;
     QComboBox* m_modeCombo = nullptr;
+    QCheckBox* m_chkListenWechat = nullptr;
+    QCheckBox* m_chkListenQianniu = nullptr;
+    QPushButton* m_btnStartPlatformListening = nullptr;
+    QPushButton* m_btnStopPlatformListening = nullptr;
+    QLabel* m_platformListenStatusLabel = nullptr;
+    bool m_pythonServiceAvailable = false;
+    bool m_pythonBackfillInProgress = false;
+    QSet<QString> m_registeredListenPlatforms;
+    QSet<QString> m_serviceListeningPlatforms;
     QPushButton* m_btnAll = nullptr;
     QPushButton* m_btnPending = nullptr;
     QPushButton* m_btnReplied = nullptr;

@@ -21,12 +21,15 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSettings>
+#include <QSet>
+#include <QStringList>
 #include <algorithm>
 #include <QAbstractItemView>
 #include <QStyledItemDelegate>
 #include <QApplication>
 #include <QCursor>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -245,7 +248,7 @@ public:
         }
 
         const QColor avatarColor =
-            conv.platform == QLatin1String("wechat_pc") ? QColor(QStringLiteral("#57C17A"))
+            conv.platform == QLatin1String("wechat") ? QColor(QStringLiteral("#57C17A"))
             : conv.platform == QLatin1String("pdd_web")  ? QColor(QStringLiteral("#F2A93B"))
             : conv.platform == QLatin1String("douyin")   ? QColor(QStringLiteral("#EE4D5A"))
                                                          : QColor(QStringLiteral("#20B8E8"));
@@ -1042,6 +1045,13 @@ AggregateChatForm::AggregateChatForm(const QString& loginUsername, QWidget* pare
     connectSignals();
     refreshConversationList();
     restoreLastSelectedConversation();
+    QTimer::singleShot(0, this, [this]() {
+        auto& ipc = Ipc::IpcService::instance();
+        m_pythonServiceAvailable = ipc.isServiceAvailable();
+        refreshPlatformListenStateFromService();
+        if (m_pythonServiceAvailable)
+            backfillFromPythonService();
+    });
     QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
     if (m_modeCombo)
         m_lastAggregateModeIndex = m_modeCombo->currentIndex();
@@ -1166,6 +1176,69 @@ void AggregateChatForm::setupStyles()
 {
     setStyleSheet(ApplyStyle::aggregateChatFormStyle());
     syncSolidBackgrounds();
+}
+
+void AggregateChatForm::backfillFromPythonService()
+{
+    if (m_pythonBackfillInProgress)
+        return;
+
+    m_pythonBackfillInProgress = true;
+    ConversationDao conversationDao;
+    const QStringList platforms = {
+        QStringLiteral("wechat"),
+        QStringLiteral("qianniu"),
+    };
+    for (const QString& platform : platforms) {
+        Ipc::ResponseStatus replayStatus = Ipc::ResponseStatus::Error;
+        QString replayError;
+        const QString replayCursor = conversationDao.rpaReplayCursor(platform);
+        const QJsonObject replay = Ipc::IpcService::instance().fetchPlatformReplay(
+            platform,
+            replayCursor,
+            200,
+            5000,
+            &replayStatus,
+            &replayError);
+        const int replayedEvents = replayStatus == Ipc::ResponseStatus::Success
+            ? Ipc::IpcService::instance().dispatchPlatformReplayEvents(replay)
+            : 0;
+        const QString nextReplayCursor = replay.value(QStringLiteral("cursor")).toString().trimmed();
+        if (replayStatus == Ipc::ResponseStatus::Success && !nextReplayCursor.isEmpty())
+            conversationDao.setRpaReplayCursor(platform, nextReplayCursor);
+        qInfo() << "[AggregateChatForm] platform replay backfill"
+                << "platform=" << platform
+                << "cursor=" << replayCursor
+                << "status=" << Ipc::toString(replayStatus)
+                << "error=" << replayError
+                << "events=" << replay.value(QStringLiteral("event_count")).toInt()
+                << "dispatched=" << replayedEvents
+                << "nextCursor=" << nextReplayCursor;
+
+        Ipc::ResponseStatus snapshotStatus = Ipc::ResponseStatus::Error;
+        QString snapshotError;
+        const QString cursor = conversationDao.snapshotCursor(platform);
+        const QJsonObject snapshot = Ipc::IpcService::instance().fetchCacheSnapshot(
+            platform,
+            100,
+            200,
+            cursor,
+            5000,
+            &snapshotStatus,
+            &snapshotError);
+        qInfo() << "[AggregateChatForm] cache snapshot backfill"
+                << "platform=" << platform
+                << "cursor=" << cursor
+                << "status=" << Ipc::toString(snapshotStatus)
+                << "error=" << snapshotError
+                << "conversations=" << snapshot.value(QStringLiteral("conversation_count")).toInt()
+                << "messages=" << snapshot.value(QStringLiteral("message_count")).toInt();
+        if (snapshotStatus == Ipc::ResponseStatus::Success)
+            applyCacheSnapshotToLocalCache(snapshot);
+    }
+    ConversationManager::instance().reloadFromLocalCache();
+    reloadFromLocalCache();
+    m_pythonBackfillInProgress = false;
 }
 
 void AggregateChatForm::applyTheme(ApplyStyle::MainWindowTheme theme)
@@ -1359,6 +1432,10 @@ void AggregateChatForm::connectSignals()
             this, &AggregateChatForm::onUnifiedMessageReceived);
     connect(&mgr, &ConversationManager::unifiedConversationUpdated,
             this, &AggregateChatForm::onUnifiedConversationUpdated);
+    connect(&mgr, &ConversationManager::conversationMessagesCleared,
+            this, &AggregateChatForm::onConversationMessagesCleared);
+    connect(&mgr, &ConversationManager::conversationDeleted,
+            this, &AggregateChatForm::onConversationDeleted);
     connect(&mgr, &ConversationManager::messageSendFailed,
             this, [this](int convId, const QString& reason) {
                 Q_UNUSED(convId)
@@ -1374,10 +1451,10 @@ void AggregateChatForm::connectSignals()
     connect(&ipc, &Ipc::IpcService::requestFailed,
             this, &AggregateChatForm::onIpcRequestFailed);
     connect(&ipc, &Ipc::IpcService::serviceStatusChanged, this, [this](bool available) {
-        if (available) {
-            ConversationManager::instance().reloadFromDatabase();
-            reloadFromDatabase();
-        }
+        m_pythonServiceAvailable = available;
+        refreshPlatformListenStateFromService();
+        if (available)
+            backfillFromPythonService();
     });
 
     auto* shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
@@ -1505,6 +1582,140 @@ void AggregateChatForm::onSimulateMessageClicked()
     showStatusMessage(QStringLiteral("已模拟一条买家消息"), 2500);
 }
 
+QStringList AggregateChatForm::selectedPlatformListenTargets() const
+{
+    QStringList platforms;
+    if (m_chkListenWechat && m_chkListenWechat->isChecked())
+        platforms.append(QStringLiteral("wechat"));
+    if (m_chkListenQianniu && m_chkListenQianniu->isChecked())
+        platforms.append(QStringLiteral("qianniu"));
+    return platforms;
+}
+
+void AggregateChatForm::updatePlatformListenStatusLabel()
+{
+    if (!m_platformListenStatusLabel)
+        return;
+
+    if (!m_pythonServiceAvailable) {
+        m_platformListenStatusLabel->setText(QStringLiteral("Python 服务未连接"));
+        return;
+    }
+
+    QStringList listening;
+    if (m_serviceListeningPlatforms.contains(QStringLiteral("wechat"))
+        || ConversationManager::instance().isPlatformListening(QStringLiteral("wechat"))) {
+        listening.append(QStringLiteral("微信"));
+    }
+    if (m_serviceListeningPlatforms.contains(QStringLiteral("qianniu"))
+        || ConversationManager::instance().isPlatformListening(QStringLiteral("qianniu"))) {
+        listening.append(QStringLiteral("千牛"));
+    }
+    if (m_registeredListenPlatforms.isEmpty()) {
+        m_platformListenStatusLabel->setText(QStringLiteral("暂无已注册平台"));
+        return;
+    }
+    m_platformListenStatusLabel->setText(
+        listening.isEmpty()
+            ? QStringLiteral("未监听平台")
+            : QStringLiteral("监听中：%1").arg(listening.join(QStringLiteral("、"))));
+}
+
+void AggregateChatForm::setPlatformListenControlsEnabled(bool enabled)
+{
+    if (m_chkListenWechat)
+        m_chkListenWechat->setEnabled(enabled && m_registeredListenPlatforms.contains(QStringLiteral("wechat")));
+    if (m_chkListenQianniu)
+        m_chkListenQianniu->setEnabled(enabled && m_registeredListenPlatforms.contains(QStringLiteral("qianniu")));
+    if (m_btnStartPlatformListening)
+        m_btnStartPlatformListening->setEnabled(enabled);
+    if (m_btnStopPlatformListening)
+        m_btnStopPlatformListening->setEnabled(enabled);
+}
+
+void AggregateChatForm::refreshPlatformListenStateFromService()
+{
+    auto& ipc = Ipc::IpcService::instance();
+    m_pythonServiceAvailable = ipc.isServiceAvailable();
+    if (!m_pythonServiceAvailable) {
+        m_registeredListenPlatforms.clear();
+        m_serviceListeningPlatforms.clear();
+        setPlatformListenControlsEnabled(false);
+        updatePlatformListenStatusLabel();
+        return;
+    }
+
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    QString error;
+    const QJsonObject response = ipc.fetchPlatformStatuses(3000, &status, &error);
+    if (status == Ipc::ResponseStatus::Success
+        && response.value(QStringLiteral("status")).toString() == QLatin1String("success")) {
+        m_registeredListenPlatforms.clear();
+        m_serviceListeningPlatforms.clear();
+        const QJsonArray platforms = response.value(QStringLiteral("platforms")).toArray();
+        for (const QJsonValue& value : platforms) {
+            const QJsonObject item = value.toObject();
+            const QString platform = item.value(QStringLiteral("platform")).toString().trimmed().toLower();
+            if (platform.isEmpty())
+                continue;
+            if (item.value(QStringLiteral("registered")).toBool(false))
+                m_registeredListenPlatforms.insert(platform);
+            if (item.value(QStringLiteral("listening")).toBool(false))
+                m_serviceListeningPlatforms.insert(platform);
+        }
+    } else {
+        qWarning() << "[AggregateChatForm] fetch platform statuses failed"
+                   << Ipc::toString(status) << error;
+        m_registeredListenPlatforms = { QStringLiteral("wechat"), QStringLiteral("qianniu") };
+        m_serviceListeningPlatforms.clear();
+    }
+
+    setPlatformListenControlsEnabled(true);
+    updatePlatformListenStatusLabel();
+}
+
+void AggregateChatForm::onStartPlatformListeningClicked()
+{
+    const QStringList platforms = selectedPlatformListenTargets();
+    if (platforms.isEmpty()) {
+        showStatusMessage(QStringLiteral("请先选择要监听的平台"), 3000);
+        return;
+    }
+
+    QStringList started;
+    for (const QString& platform : platforms) {
+        if (ConversationManager::instance().startPlatformListening(platform))
+            started.append(platform == QLatin1String("wechat") ? QStringLiteral("微信") : QStringLiteral("千牛"));
+    }
+    refreshPlatformListenStateFromService();
+    if (started.isEmpty()) {
+        showStatusMessage(QStringLiteral("平台监听启动失败，请检查 Python 服务"), 5000);
+        return;
+    }
+    showStatusMessage(QStringLiteral("已请求监听：%1").arg(started.join(QStringLiteral("、"))), 4000);
+}
+
+void AggregateChatForm::onStopPlatformListeningClicked()
+{
+    const QStringList platforms = selectedPlatformListenTargets();
+    if (platforms.isEmpty()) {
+        showStatusMessage(QStringLiteral("请先选择要停止监听的平台"), 3000);
+        return;
+    }
+
+    QStringList stopped;
+    for (const QString& platform : platforms) {
+        if (ConversationManager::instance().stopPlatformListening(platform))
+            stopped.append(platform == QLatin1String("wechat") ? QStringLiteral("微信") : QStringLiteral("千牛"));
+    }
+    refreshPlatformListenStateFromService();
+    if (stopped.isEmpty()) {
+        showStatusMessage(QStringLiteral("平台监听停止失败"), 5000);
+        return;
+    }
+    showStatusMessage(QStringLiteral("已请求停止：%1").arg(stopped.join(QStringLiteral("、"))), 4000);
+}
+
 void AggregateChatForm::updatePlatformSectionTitle()
 {
     if (!m_platformSectionTitle)
@@ -1549,6 +1760,57 @@ QWidget* AggregateChatForm::buildLeftPanel()
     m_platformSectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     updatePlatformSectionTitle();
     layout->addWidget(m_platformSectionTitle);
+
+    auto* listenBox = new QFrame(panel);
+    listenBox->setObjectName(QStringLiteral("aggregatePlatformListenBox"));
+    listenBox->setFrameShape(QFrame::NoFrame);
+    auto* listenLayout = new QVBoxLayout(listenBox);
+    listenLayout->setContentsMargins(10, 8, 10, 8);
+    listenLayout->setSpacing(6);
+
+    auto* listenTitle = new QLabel(QStringLiteral("平台监听"), listenBox);
+    listenTitle->setObjectName(QStringLiteral("aggregateModeLabel"));
+    listenLayout->addWidget(listenTitle);
+
+    auto* listenCheckRow = new QWidget(listenBox);
+    auto* listenCheckLayout = new QHBoxLayout(listenCheckRow);
+    listenCheckLayout->setContentsMargins(0, 0, 0, 0);
+    listenCheckLayout->setSpacing(10);
+    m_chkListenWechat = new QCheckBox(QStringLiteral("微信"), listenCheckRow);
+    m_chkListenWechat->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
+    m_chkListenQianniu = new QCheckBox(QStringLiteral("千牛"), listenCheckRow);
+    m_chkListenQianniu->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
+    listenCheckLayout->addWidget(m_chkListenWechat);
+    listenCheckLayout->addWidget(m_chkListenQianniu);
+    listenCheckLayout->addStretch(1);
+    listenLayout->addWidget(listenCheckRow);
+
+    auto* listenButtonRow = new QWidget(listenBox);
+    auto* listenButtonLayout = new QHBoxLayout(listenButtonRow);
+    listenButtonLayout->setContentsMargins(0, 0, 0, 0);
+    listenButtonLayout->setSpacing(8);
+    m_btnStartPlatformListening = new QPushButton(QStringLiteral("开始监听"), listenButtonRow);
+    m_btnStartPlatformListening->setObjectName(QStringLiteral("aggregatePlatformListenStartButton"));
+    m_btnStartPlatformListening->setCursor(Qt::PointingHandCursor);
+    m_btnStopPlatformListening = new QPushButton(QStringLiteral("停止监听"), listenButtonRow);
+    m_btnStopPlatformListening->setObjectName(QStringLiteral("aggregatePlatformListenStopButton"));
+    m_btnStopPlatformListening->setCursor(Qt::PointingHandCursor);
+    listenButtonLayout->addWidget(m_btnStartPlatformListening);
+    listenButtonLayout->addWidget(m_btnStopPlatformListening);
+    listenLayout->addWidget(listenButtonRow);
+
+    m_platformListenStatusLabel = new QLabel(QStringLiteral("未监听平台"), listenBox);
+    m_platformListenStatusLabel->setObjectName(QStringLiteral("aggregatePlatformListenStatus"));
+    m_platformListenStatusLabel->setWordWrap(true);
+    listenLayout->addWidget(m_platformListenStatusLabel);
+    layout->addWidget(listenBox);
+
+    connect(m_btnStartPlatformListening, &QPushButton::clicked,
+            this, &AggregateChatForm::onStartPlatformListeningClicked);
+    connect(m_btnStopPlatformListening, &QPushButton::clicked,
+            this, &AggregateChatForm::onStopPlatformListeningClicked);
+    setPlatformListenControlsEnabled(false);
+    updatePlatformListenStatusLabel();
 
     // Mode row
     auto* modeRow = new QWidget(panel);
@@ -2585,7 +2847,7 @@ void AggregateChatForm::persistCurrentDraft()
         return;
 
     ConversationDao dao;
-    dao.saveDraft(m_currentConvId, m_inputEdit->toPlainText());
+    dao.saveCachedDraft(m_currentConvId, m_inputEdit->toPlainText());
 }
 
 void AggregateChatForm::restoreDraftForConversation(int conversationId)
@@ -2594,7 +2856,7 @@ void AggregateChatForm::restoreDraftForConversation(int conversationId)
         return;
 
     ConversationDao dao;
-    const QString draft = conversationId > 0 ? dao.draftForConversation(conversationId) : QString();
+    const QString draft = conversationId > 0 ? dao.cachedDraftForConversation(conversationId) : QString();
     m_restoringDraft = true;
     {
         const QSignalBlocker blocker(m_inputEdit->document());
@@ -2610,7 +2872,7 @@ void AggregateChatForm::restoreLastSelectedConversation()
         return;
 
     ConversationDao dao;
-    int conversationId = dao.lastSelectedConversationId();
+    int conversationId = dao.lastSelectedCachedConversationId();
     if (conversationId <= 0 || !m_conversationListModel->containsConversation(conversationId))
         conversationId = m_conversationListModel->conversationIdAt(0);
 
@@ -2631,12 +2893,12 @@ void AggregateChatForm::refreshConversationList()
                                         keyword,
                                         m_pendingStickyConvId);
     m_conversationListModel->setSourceConversations(mgr.allConversations(),
-                                                    msgDao.lastDirectionsByConversation());
+                                                    msgDao.lastCachedDirectionsByConversation());
     renderConversationListFromModel();
     return;
 }
 
-void AggregateChatForm::reloadFromDatabase()
+void AggregateChatForm::reloadFromLocalCache()
 {
     refreshConversationList();
 
@@ -2659,7 +2921,7 @@ void AggregateChatForm::reloadFromDatabase()
             updateCustomerInfo(*conv);
         }
         scheduleScrollChatToBottom();
-        qInfo() << "[AggregateChatForm] reloaded current conversation from database:"
+        qInfo() << "[AggregateChatForm] reloaded current conversation from local cache:"
                 << m_currentConvId << "messages=" << messages.size();
         return;
     }
@@ -2669,14 +2931,107 @@ void AggregateChatForm::reloadFromDatabase()
         showCenterEmptyState();
         showRightEmptyState();
     }
-    qInfo() << "[AggregateChatForm] reloaded conversation cache from database";
+    qInfo() << "[AggregateChatForm] reloaded conversation cache from local cache";
+}
+
+void AggregateChatForm::reloadFromDatabase()
+{
+    reloadFromLocalCache();
+}
+
+void AggregateChatForm::applyCacheSnapshotToLocalCache(const QJsonObject& snapshot)
+{
+    if (snapshot.value(QStringLiteral("status")).toString() != QLatin1String("success"))
+        return;
+
+    const QString platform = snapshot.value(QStringLiteral("platform")).toString().trimmed().toLower();
+    const QString nextCursor = snapshot.value(QStringLiteral("snapshot_cursor")).toString().trimmed();
+    const bool fullSnapshot = snapshot.value(QStringLiteral("full_snapshot")).toBool(false);
+    const QJsonArray conversations = snapshot.value(QStringLiteral("conversations")).toArray();
+    if (conversations.isEmpty()) {
+        if (fullSnapshot && !platform.isEmpty()) {
+            const int removed = ConversationDao().deleteMissingSnapshotCacheConversations(
+                platform,
+                {});
+            qInfo() << "[AggregateChatForm] cache snapshot empty full sync"
+                    << "platform=" << platform
+                    << "removedConversations=" << removed;
+        }
+        if (!platform.isEmpty() && !nextCursor.isEmpty())
+            ConversationDao().setSnapshotCursor(platform, nextCursor);
+        return;
+    }
+
+    ConversationDao conversationDao;
+    MessageDao messageDao;
+    QSet<QString> keepConversationIds;
+    int appliedConversations = 0;
+    int appliedMessages = 0;
+    int removedConversations = 0;
+    int removedMessages = 0;
+    for (const QJsonValue& value : conversations) {
+        const QJsonObject conversation = value.toObject();
+        if (conversation.isEmpty())
+            continue;
+        const QString platformConversationId =
+            conversation.value(QStringLiteral("platform_conversation_id")).toString().trimmed();
+        if (!platformConversationId.isEmpty())
+            keepConversationIds.insert(platformConversationId);
+        const int conversationId = conversationDao.upsertSnapshotCacheConversation(conversation);
+        if (conversationId <= 0)
+            continue;
+        ++appliedConversations;
+
+        QSet<QString> keepPlatformMessageIds;
+        QSet<QString> keepClientMessageIds;
+        const QJsonArray messages = conversation.value(QStringLiteral("messages")).toArray();
+        for (const QJsonValue& messageValue : messages) {
+            const QJsonObject message = messageValue.toObject();
+            if (message.isEmpty())
+                continue;
+            const QString platformMessageId = message.value(QStringLiteral("platform_msg_id")).toString().trimmed();
+            const QString clientMessageId = message.value(QStringLiteral("client_message_id")).toString().trimmed();
+            if (!platformMessageId.isEmpty())
+                keepPlatformMessageIds.insert(platformMessageId);
+            if (!clientMessageId.isEmpty())
+                keepClientMessageIds.insert(clientMessageId);
+        }
+        removedMessages += messageDao.deleteMissingSnapshotCacheMessages(
+            conversationId,
+            keepPlatformMessageIds,
+            keepClientMessageIds);
+        for (const QJsonValue& messageValue : messages) {
+            const QJsonObject message = messageValue.toObject();
+            if (message.isEmpty())
+                continue;
+            if (messageDao.upsertSnapshotCacheMessage(conversationId, message) > 0)
+                ++appliedMessages;
+        }
+    }
+
+    if (fullSnapshot && !platform.isEmpty()) {
+        removedConversations = conversationDao.deleteMissingSnapshotCacheConversations(
+            platform,
+            keepConversationIds);
+    }
+    if (!platform.isEmpty() && !nextCursor.isEmpty())
+        conversationDao.setSnapshotCursor(platform, nextCursor);
+
+    qInfo() << "[AggregateChatForm] cache snapshot applied"
+            << "platform=" << platform
+            << "fullSnapshot=" << fullSnapshot
+            << "conversations=" << appliedConversations
+            << "messages=" << appliedMessages
+            << "removedConversations=" << removedConversations
+            << "removedMessages=" << removedMessages
+            << "nextCursor=" << nextCursor;
 }
 
 #if 0
     auto& mgr = ConversationManager::instance();
     const auto convs = mgr.allConversations();
     MessageDao msgDao;
-    const QHash<int, QString> lastDirs = msgDao.lastDirectionsByConversation();
+    const QHash<int, QString> lastDirs = msgDao.lastCachedDirectionsByConversation();
 
     QString keyword = m_searchEdit ? m_searchEdit->text().trimmed() : QString();
 
@@ -2714,7 +3069,7 @@ void AggregateChatForm::reloadFromDatabase()
                 wantPlat = QStringLiteral("douyin");
                 break;
             case AggregatePlatformFilter::Wechat:
-                wantPlat = QStringLiteral("wechat_pc");
+                wantPlat = QStringLiteral("wechat");
                 break;
             default:
                 break;
@@ -3060,8 +3415,12 @@ void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
         if (confirmBox.exec() != QMessageBox::Yes)
             return;
 
-        MessageDao msgDao;
-        if (!msgDao.clearAllForConversation(convId)) {
+        ConversationDao convDao;
+        const auto conv = convDao.findById(convId);
+        if (conv && !applyServiceConversationMutation(*conv, false))
+            return;
+
+        if (!ConversationManager::instance().clearConversationMessages(convId)) {
             QMessageBox warnBox(this);
             warnBox.setIcon(QMessageBox::Warning);
             warnBox.setWindowTitle(QStringLiteral("错误"));
@@ -3072,21 +3431,6 @@ void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
             return;
         }
 
-        ConversationDao convDao;
-        convDao.updateLastMessage(convId, QString(), QDateTime::currentDateTime());
-
-        if (m_pendingStickyConvId == convId)
-            m_pendingStickyConvId = -1;
-
-        if (m_currentConvId == convId) {
-            m_lastBubbleDate = QDate();
-            renderConversationMessages({});
-            m_currentMessageSignature = buildMessageSignature({});
-            resetSendTimelineForConversation();
-        }
-
-        refreshConversationList();
-        showStatusMessage(QStringLiteral("已清空聊天记录"), 3000);
         return;
     }
 
@@ -3102,26 +3446,19 @@ void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
         if (delBox.exec() != QMessageBox::Yes)
             return;
 
-        if (m_currentConvId == convId) {
-            m_currentConvId = -1;
-            m_lastBubbleDate = QDate();
-            renderConversationMessages({});
-            m_currentMessageSignature = buildMessageSignature({});
-            showCenterEmptyState();
-            showRightEmptyState();
-            if (m_inputEdit)
-                m_inputEdit->clear();
-        }
-        if (m_pendingStickyConvId == convId)
-            m_pendingStickyConvId = -1;
+        ConversationDao convDao;
+        const auto conv = convDao.findById(convId);
+        if (conv && !applyServiceConversationMutation(*conv, true))
+            return;
 
         ConversationManager::instance().deleteConversation(convId);
-        showStatusMessage(QStringLiteral("已删除会话"), 3000);
     }
 }
 
 void AggregateChatForm::onSendClicked()
 {
+    QElapsedTimer timer;
+    timer.start();
     if (m_currentConvId <= 0) return;
     QString text = m_inputEdit->toPlainText().trimmed();
     if (text.isEmpty()) return;
@@ -3129,8 +3466,12 @@ void AggregateChatForm::onSendClicked()
     // 发送后先留在「待处理」，直到客服切换会话或主动切换 tab。
     m_pendingStickyConvId = m_currentConvId;
     m_inputEdit->clear();
-    ConversationDao().clearDraft(m_currentConvId);
+    ConversationDao().clearCachedDraft(m_currentConvId);
     ConversationManager::instance().sendMessage(m_currentConvId, text);
+    qInfo() << "[AggregateChatForm] send click timing"
+            << "conversationId=" << m_currentConvId
+            << "textLength=" << text.size()
+            << "elapsedMs=" << timer.elapsed();
 }
 
 void AggregateChatForm::onStopAutoReplyClicked()
@@ -3158,11 +3499,20 @@ void AggregateChatForm::onConversationListChanged()
 
 void AggregateChatForm::onUnifiedMessageReceived(int conversationId, const Models::Message& message)
 {
+    QElapsedTimer timer;
+    timer.start();
     const MessageRecord record = messageRecordFromUnified(message);
     if (message.direction == Models::MessageDirection::Outbound)
         onSentOk(conversationId, record);
     else
         onNewMessage(conversationId, record);
+    qInfo() << "[AggregateChatForm] unified message UI timing"
+            << "conversationId=" << conversationId
+            << "messageId=" << message.id
+            << "direction=" << Models::toString(message.direction)
+            << "platformMessageId=" << message.platformMessageId
+            << "clientMessageId=" << message.clientMessageId
+            << "elapsedMs=" << timer.elapsed();
 }
 
 void AggregateChatForm::onUnifiedConversationUpdated(const Models::Conversation& conversation)
@@ -3176,8 +3526,42 @@ void AggregateChatForm::onUnifiedConversationUpdated(const Models::Conversation&
     refreshConversationList();
 }
 
+void AggregateChatForm::onConversationMessagesCleared(int conversationId)
+{
+    if (m_pendingStickyConvId == conversationId)
+        m_pendingStickyConvId = -1;
+    if (conversationId == m_currentConvId) {
+        m_lastBubbleDate = QDate();
+        renderConversationMessages({});
+        m_currentMessageSignature = buildMessageSignature({});
+        resetSendTimelineForConversation();
+    }
+    refreshConversationList();
+    showStatusMessage(QStringLiteral("已清空聊天记录"), 3000);
+}
+
+void AggregateChatForm::onConversationDeleted(int conversationId)
+{
+    if (m_pendingStickyConvId == conversationId)
+        m_pendingStickyConvId = -1;
+    if (conversationId == m_currentConvId) {
+        m_currentConvId = -1;
+        m_lastBubbleDate = QDate();
+        renderConversationMessages({});
+        m_currentMessageSignature = buildMessageSignature({});
+        showCenterEmptyState();
+        showRightEmptyState();
+        if (m_inputEdit)
+            m_inputEdit->clear();
+    }
+    refreshConversationList();
+    showStatusMessage(QStringLiteral("已删除会话"), 3000);
+}
+
 void AggregateChatForm::onNewMessage(int conversationId, const MessageRecord& msg)
 {
+    QElapsedTimer timer;
+    timer.start();
     if (msg.direction == QLatin1String("in") && m_pendingStickyConvId == conversationId)
         m_pendingStickyConvId = -1;
     if (m_currentConvId <= 0) {
@@ -3191,10 +3575,18 @@ void AggregateChatForm::onNewMessage(int conversationId, const MessageRecord& ms
 
     if (conversationId == m_currentConvId && msg.direction == QLatin1String("in"))
         tryAggregateAutoReply(conversationId, QStringLiteral("T2"));
+    qInfo() << "[AggregateChatForm] inbound message UI timing"
+            << "conversationId=" << conversationId
+            << "messageId=" << msg.id
+            << "direction=" << msg.direction
+            << "platformMsgId=" << msg.platformMsgId
+            << "elapsedMs=" << timer.elapsed();
 }
 
 void AggregateChatForm::onSentOk(int conversationId, const MessageRecord& msg)
 {
+    QElapsedTimer timer;
+    timer.start();
     if (conversationId == m_currentConvId && msg.direction == QLatin1String("out"))
         m_pendingStickyConvId = conversationId;
     if (conversationId == m_currentConvId) {
@@ -3202,6 +3594,12 @@ void AggregateChatForm::onSentOk(int conversationId, const MessageRecord& msg)
         scheduleScrollChatToBottom();
     }
     refreshConversationList();
+    qInfo() << "[AggregateChatForm] outbound message UI timing"
+            << "conversationId=" << conversationId
+            << "messageId=" << msg.id
+            << "direction=" << msg.direction
+            << "clientMessageId=" << msg.clientMessageId
+            << "elapsedMs=" << timer.elapsed();
 }
 
 void AggregateChatForm::showStatusMessage(const QString& text, int timeoutMs)
@@ -3217,6 +3615,65 @@ void AggregateChatForm::showStatusMessage(const QString& text, int timeoutMs)
             }
         });
     }
+}
+
+bool AggregateChatForm::applyServiceConversationMutation(const ConversationInfo& conv, bool deleteConversation)
+{
+    auto& ipc = Ipc::IpcService::instance();
+    QString serviceError;
+    if (!ipc.connectToConfiguredService(&serviceError)) {
+        qInfo() << "[AggregateChatForm] service mutation skipped: Python service unavailable"
+                << "conversationId=" << conv.id
+                << "error=" << serviceError;
+        return true;
+    }
+
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    QString error;
+    const QJsonObject response = deleteConversation
+        ? ipc.deleteConversationOnService(
+              conv.platform,
+              conv.accountId,
+              conv.platformConversationId,
+              5000,
+              &status,
+              &error)
+        : ipc.clearConversationMessages(
+              conv.platform,
+              conv.accountId,
+              conv.platformConversationId,
+              5000,
+              &status,
+              &error);
+    const bool ok = status == Ipc::ResponseStatus::Success
+        && response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("success");
+    if (ok)
+        return true;
+
+    QString detail = error;
+    if (detail.isEmpty())
+        detail = response.value(QStringLiteral("error")).toString();
+    const QJsonObject result = response.value(QStringLiteral("result")).toObject();
+    if (detail == QLatin1String("observer_active")) {
+        detail = QStringLiteral("平台监听中，无法清空/删除。请先停止监听后再操作。");
+    } else if (detail == QLatin1String("recent_observation")) {
+        const int quietSeconds = qMax(1, int(result.value(QStringLiteral("quiet_seconds_required")).toDouble(3.0)));
+        detail = QStringLiteral("刚检测到平台消息观察事件。请停止监听并等待约 %1 秒后再操作。").arg(quietSeconds);
+    }
+    if (detail.isEmpty())
+        detail = QStringLiteral("unknown_error");
+
+    QMessageBox warnBox(this);
+    warnBox.setIcon(QMessageBox::Warning);
+    warnBox.setWindowTitle(QStringLiteral("Python 服务端"));
+    warnBox.setText(deleteConversation
+                        ? QStringLiteral("服务端删除会话失败，已取消本地删除。")
+                        : QStringLiteral("服务端清空聊天记录失败，已取消本地清空。"));
+    warnBox.setInformativeText(detail);
+    warnBox.setStandardButtons(QMessageBox::Ok);
+    warnBox.setStyleSheet(aggregateMessageBoxContrastStyle());
+    warnBox.exec();
+    return false;
 }
 
 void AggregateChatForm::updateAggregateAiControlsVisibility()
@@ -3336,58 +3793,28 @@ void AggregateChatForm::onGenerateAiDraftClicked()
 {
     if (m_currentConvId <= 0 || m_aggregateAiGenerating)
         return;
-
-    auto messages = ConversationManager::instance().messages(m_currentConvId);
-    if (messages.isEmpty()) {
-        showStatusMessage(QStringLiteral("当前会话没有可用于 AI 建议的消息"), 4000);
+    if (!m_aiChatService) {
+        showStatusMessage(QStringLiteral("AI 服务未初始化"), 4000);
         return;
     }
+
+    AggregateAiBuiltRequest built =
+        m_aiChatService->buildAggregateReplyRequest(m_currentConvId, m_aggregateAiSessionModelKey);
+    if (!handleAggregateBuildFailure(this, built, false, nullptr))
+        return;
 
     m_aggregateAiBaseline = m_inputEdit ? m_inputEdit->toPlainText() : QString();
     m_aggregateAiAccumulated.clear();
+    m_aggregateAiIpcRequestId.clear();
 
-    Ipc::AiSuggestionRequest request;
-    request.conversationId = m_currentConvId;
-    request.maxSuggestions = 3;
-    request.metadata.insert(QStringLiteral("session_model_key"), m_aggregateAiSessionModelKey);
-
-    if (m_conversationService) {
-        const auto conv = m_conversationService->conversationById(m_currentConvId);
-        if (conv) {
-            request.platformType = conv->platform;
-            request.customerContext = conv->customerName;
-        }
-    }
-    if (request.platformType.isEmpty())
-        request.platformType = QStringLiteral("unknown");
-
-    const int start = qMax(0, messages.size() - 8);
-    for (int i = start; i < messages.size(); ++i) {
-        const MessageRecord& msg = messages.at(i);
-        if (msg.content.trimmed().isEmpty())
-            continue;
-
-        QString role = QStringLiteral("user");
-        if (msg.direction == QLatin1String("out"))
-            role = QStringLiteral("assistant");
-        else if (msg.direction == QLatin1String("system"))
-            role = QStringLiteral("system");
-        request.recentMessages.append(QPair<QString, QString>(role, msg.content));
-    }
-
-    if (request.recentMessages.isEmpty()) {
-        showStatusMessage(QStringLiteral("当前会话没有可用于 AI 建议的文本消息"), 4000);
-        return;
-    }
-
-    QString error;
-    if (!Ipc::IpcService::instance().connectToConfiguredService(&error)) {
-        showStatusMessage(QStringLiteral("AI 服务不可用：%1").arg(error), 6000);
-        return;
-    }
-
+    built.request.extraRootFields.insert(QStringLiteral("max_tokens"), 512);
+    clearStreamingSession(m_aggregateAiSession);
+    m_aggregateAiSession = m_aiChatService->createSession(built.config, built.request, this);
+    connect(m_aggregateAiSession, &IAiStreamingSession::delta, this, &AggregateChatForm::onAggregateAiStreamDelta);
+    connect(m_aggregateAiSession, &IAiStreamingSession::completed, this, &AggregateChatForm::onAggregateAiCompleted);
+    connect(m_aggregateAiSession, &IAiStreamingSession::failed, this, &AggregateChatForm::onAggregateAiFailed);
     setAggregateAiBusy(true);
-    m_aggregateAiIpcRequestId = Ipc::IpcService::instance().requestAiSuggestion(request);
+    m_aggregateAiSession->start();
 }
 
 void AggregateChatForm::onIpcAiSuggestionReceived(const Ipc::AiSuggestionResponse& response)
@@ -3535,6 +3962,11 @@ void AggregateChatForm::onAggregateAiCompleted()
         return;
     clearStreamingSession(m_aggregateAiSession);
     setAggregateAiBusy(false);
+    if (m_aggregateAiAccumulated.trimmed().isEmpty()) {
+        showStatusMessage(QStringLiteral("AI 未返回可用草稿"), 5000);
+        return;
+    }
+    persistCurrentDraft();
     showStatusMessage(QStringLiteral("AI 草稿已生成，可直接发送或继续修改"), 4000);
 }
 
@@ -3549,6 +3981,7 @@ void AggregateChatForm::onAggregateAiFailed(const QString& reason)
             : QStringLiteral("\n\n（后续内容未能完成：%1）").arg(reason);
     if (m_inputEdit)
         m_inputEdit->setPlainText(m_aggregateAiBaseline + m_aggregateAiAccumulated + tail);
+    persistCurrentDraft();
     setAggregateAiBusy(false);
     showStatusMessage(QStringLiteral("AI 草稿生成失败：%1").arg(reason.left(120)), 6000);
 }
