@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .detector import WechatDetector
+from .media_extractor import WechatMediaExtractor
 from .reader import WechatVisibleMessageReader
 from .sender import WechatMessageSender
 from .stability import DebugArtifactWriter, FailureTracker, uia_guard
@@ -72,6 +73,13 @@ def _sha1(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def _content_type_from_kind(kind: Any) -> str:
+    value = clean(kind).lower()
+    if value in {"image", "emoji", "video", "file"}:
+        return value
+    return "text"
+
+
 def _conversation_key(account_id: str, display_name: str) -> str:
     safe_name = clean(display_name) or "current"
     return f"wechat:{account_id}:{safe_name}"
@@ -111,6 +119,7 @@ class WechatSidecarAdapter:
             cooldown_seconds=float(getattr(config, "failure_cooldown_seconds", 30.0) or 30.0),
         )
         self._debug_writer = DebugArtifactWriter.from_config(config)
+        self._media_extractor = WechatMediaExtractor.from_config(config)
 
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
         request_id = clean(payload.get("request_id"))
@@ -868,23 +877,33 @@ class WechatSidecarAdapter:
         direction_method = clean(getattr(sample, "direction_method", "")) or "bubble_position"
         confidence = _event_confidence(getattr(sample, "role_confidence", None), default=65)
         context_payload = _chat_context_payload(context)
+        kind = clean(getattr(sample, "kind", ""))
+        content_type = _content_type_from_kind(kind)
         raw_id = "|".join(
             [
                 PLATFORM_WECHAT,
                 self._account_id,
                 key,
                 direction,
+                content_type,
                 content,
-                clean(getattr(sample, "rect", "")),
             ]
         )
         platform_msg_id = "wechat_" + _sha1(raw_id)[:24]
+        media = self._media_extractor.extract(
+            content_type,
+            platform_msg_id,
+            sample,
+            file_copier=self._copy_media_file_if_available,
+            evidence_writer=self._media_evidence_writer,
+        )
         payload = {
             "platform_msg_id": platform_msg_id,
+            "display_name": display_name,
             "direction": "inbound" if direction == "in" else "outbound",
             "sender_role": "customer" if direction == "in" else "agent",
             "sender_name": display_name if direction == "in" else "",
-            "content_type": "text",
+            "content_type": content_type,
             "content": content,
             "source_type": "ui_observed",
             "confidence": confidence,
@@ -892,7 +911,7 @@ class WechatSidecarAdapter:
             "metadata": {
                 "observation_method": "uia",
                 "direction_method": direction_method,
-                "kind": clean(getattr(sample, "kind", "")),
+                "kind": kind,
                 "class_name": clean(getattr(sample, "class_name", "")),
                 "automation_id": clean(getattr(sample, "automation_id", "")),
                 "rect": clean(getattr(sample, "rect", "")),
@@ -902,7 +921,28 @@ class WechatSidecarAdapter:
                 "chat_context": context_payload,
             },
         }
+        payload["metadata"].update(media.metadata_fields)
+        payload.update(media.payload_fields)
         return self._event("message_observed", key, payload)
+
+    @property
+    def _media_evidence_writer(self) -> Any:
+        return self._media_extractor.evidence_writer
+
+    @_media_evidence_writer.setter
+    def _media_evidence_writer(self, value: Any) -> None:
+        self._media_extractor.evidence_writer = value
+
+    @property
+    def _media_artifact_dir(self) -> Any:
+        return self._media_extractor.root_dir
+
+    @_media_artifact_dir.setter
+    def _media_artifact_dir(self, value: Any) -> None:
+        self._media_extractor.root_dir = value
+
+    def _copy_media_file_if_available(self, content_type: str, platform_msg_id: str, sample: Any) -> Any | None:
+        return self._media_extractor._copy_media_file_if_available(content_type, platform_msg_id, sample)
 
     def _task_result_event(
         self,

@@ -48,6 +48,7 @@ INPUT_CLASS = "mmui::ChatInputField"
 SEND_CLASS = "mmui::XTextView"
 CHAT_TEXT_ITEM_CLASS = "mmui::ChatTextItemView"
 CHAT_BUBBLE_REFER_ITEM_CLASS = "mmui::ChatBubbleReferItemView"
+CHAT_BUBBLE_ITEM_CLASS = "mmui::ChatBubbleItemView"
 CONTACT_HEAD_CLASS = "mmui::ContactHeadView"
 
 SESSION_LIST_MAX_X_RATIO = 0.42
@@ -798,6 +799,7 @@ def collect_chat_layout_samples(
         if class_name not in (
             CHAT_TEXT_ITEM_CLASS,
             CHAT_BUBBLE_REFER_ITEM_CLASS,
+            CHAT_BUBBLE_ITEM_CLASS,
             CONTACT_HEAD_CLASS,
         ):
             return
@@ -808,16 +810,37 @@ def collect_chat_layout_samples(
             if not name:
                 return
             kind = "text" if class_name == CHAT_TEXT_ITEM_CLASS else "bubble_ref"
-            if name == "[图片]":
+            is_bubble_ref = class_name == CHAT_BUBBLE_REFER_ITEM_CLASS
+            if name in ("[图片]", "[Image]") or (is_bubble_ref and name in ("图片", "Image")):
                 kind = "image"
-            elif name in ("[动画表情]", "[表情]"):
+            elif name in ("[动画表情]", "[表情]", "[Emoji]") or (
+                is_bubble_ref and name in ("动画表情", "表情", "Emoji")
+            ):
                 kind = "emoji"
+            elif name in ("[视频]", "[Video]") or (is_bubble_ref and _is_video_card_name(name)):
+                kind = "video"
+            elif (
+                name in ("[文件]", "[File]")
+                or (is_bubble_ref and name in ("文件", "File"))
+                or _is_file_card_name(name)
+            ):
+                kind = "file"
             matched_message_count += 1
         found.append(_sample_from_control(ctrl, kind, name=name))
 
     _walk_controls(message_root, visit, max_visits=max_visits, max_depth=max_depth)
     found.sort(key=lambda item: (item.top, item.left, item.right, item.kind))
     return found
+
+
+def _is_file_card_name(name: str) -> bool:
+    normalized = " ".join(str(name or "").replace("\r", "\n").split())
+    return normalized in {"文件", "File"} or normalized.startswith("文件 ") or normalized.startswith("File ")
+
+
+def _is_video_card_name(name: str) -> bool:
+    normalized = " ".join(str(name or "").replace("\r", "\n").split())
+    return normalized in {"视频", "Video"} or normalized.startswith("视频 ") or normalized.startswith("Video ")
 
 
 def probe_contact_heads_by_hit_test(

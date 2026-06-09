@@ -116,6 +116,7 @@ class WechatVisibleMessageReader:
                 (time.perf_counter() - stage_started_at) * 1000.0,
                 len(samples),
             )
+        samples = _attach_window_hwnd_to_samples(samples, window_hwnd)
         if tail_only and len(samples) > limit:
             samples = samples[-limit:]
         stage_started_at = time.perf_counter()
@@ -454,6 +455,15 @@ def _attach_roles_to_samples(samples: list[Any], *, message_list: Any | None, wi
     ]
 
 
+def _attach_window_hwnd_to_samples(samples: list[Any], window_hwnd: int) -> list[Any]:
+    for sample in samples:
+        try:
+            object.__setattr__(sample, "window_hwnd", window_hwnd)
+        except Exception:
+            pass
+    return samples
+
+
 def _attach_role(sample: Any, role: MessageRoleJudgement) -> Any:
     try:
         object.__setattr__(sample, "direction", role.direction)
@@ -475,7 +485,7 @@ def _is_message_control(control: Any) -> bool:
         return False
     if "chat_bubble_item_view" in automation_id:
         return True
-    if "ChatTextItemView" in class_name or "ChatBubbleReferItemView" in class_name:
+    if "ChatTextItemView" in class_name or "ChatBubbleReferItemView" in class_name or "ChatBubbleItemView" in class_name:
         return True
     return "ListItem" in control_type and ("chat" in class_name.lower() or "chat" in automation_id.lower())
 
@@ -483,13 +493,33 @@ def _is_message_control(control: Any) -> bool:
 def _message_kind(control: Any) -> str:
     class_name = safe_prop(control, "ClassName")
     name = normalize_text(safe_prop(control, "Name"))
-    if name in {"[图片]", "[Image]"}:
+    is_bubble_ref = "ChatBubbleReferItemView" in class_name
+    is_bubble_item = "ChatBubbleItemView" in class_name
+    if name in {"[图片]", "[Image]"} or (is_bubble_ref and name in {"图片", "Image"}):
         return "image"
-    if name in {"[动画表情]", "[表情]", "[Emoji]"}:
+    if name in {"[动画表情]", "[表情]", "[Emoji]"} or (
+        is_bubble_ref and name in {"动画表情", "表情", "Emoji"}
+    ):
         return "emoji"
-    if "ChatBubbleReferItemView" in class_name:
+    if name in {"[视频]", "[Video]"} or (is_bubble_ref and _is_video_card_name(name)):
+        return "video"
+    if name in {"[文件]", "[File]"} or (is_bubble_ref and name in {"文件", "File"}) or (
+        is_bubble_item and _is_file_card_name(name)
+    ):
+        return "file"
+    if is_bubble_ref:
         return "bubble_ref"
     return "text"
+
+
+def _is_file_card_name(name: str) -> bool:
+    normalized = " ".join(str(name or "").replace("\r", "\n").split())
+    return normalized in {"文件", "File"} or normalized.startswith("文件 ") or normalized.startswith("File ")
+
+
+def _is_video_card_name(name: str) -> bool:
+    normalized = " ".join(str(name or "").replace("\r", "\n").split())
+    return normalized in {"视频", "Video"} or normalized.startswith("视频 ") or normalized.startswith("Video ")
 
 
 def _extract_text(control: Any) -> str:

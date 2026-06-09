@@ -49,6 +49,8 @@ class WechatAutomationConfig:
     debug_save_artifacts: bool = False
     debug_artifact_dir: str = "python/rpa/_debug/wechat"
     debug_save_window_png: bool = True
+    media_capture_evidence: bool = True
+    media_artifact_dir: str = "python/rpa/_media/wechat"
 
 
 def load_wechat_config(path: str | Path | None = None) -> WechatAutomationConfig:
