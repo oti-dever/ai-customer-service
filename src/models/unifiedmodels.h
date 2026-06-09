@@ -38,7 +38,9 @@ enum class MessageDirection {
 enum class MessageContentType {
     Text,
     Image,
+    Emoji,
     File,
+    Video,
     Link,
     OrderCard,
     ProductCard,

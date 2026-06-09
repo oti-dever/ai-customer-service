@@ -54,7 +54,9 @@ QString toString(MessageContentType value)
     switch (value) {
     case MessageContentType::Text: return QStringLiteral("text");
     case MessageContentType::Image: return QStringLiteral("image");
+    case MessageContentType::Emoji: return QStringLiteral("emoji");
     case MessageContentType::File: return QStringLiteral("file");
+    case MessageContentType::Video: return QStringLiteral("video");
     case MessageContentType::Link: return QStringLiteral("link");
     case MessageContentType::OrderCard: return QStringLiteral("order_card");
     case MessageContentType::ProductCard: return QStringLiteral("product_card");
@@ -153,7 +155,9 @@ MessageContentType messageContentTypeFromString(const QString& value)
     const QString v = normalized(value);
     if (v == QLatin1String("text")) return MessageContentType::Text;
     if (v == QLatin1String("image")) return MessageContentType::Image;
+    if (v == QLatin1String("emoji")) return MessageContentType::Emoji;
     if (v == QLatin1String("file")) return MessageContentType::File;
+    if (v == QLatin1String("video")) return MessageContentType::Video;
     if (v == QLatin1String("link")) return MessageContentType::Link;
     if (v == QLatin1String("order_card")) return MessageContentType::OrderCard;
     if (v == QLatin1String("product_card")) return MessageContentType::ProductCard;

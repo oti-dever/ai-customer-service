@@ -87,16 +87,39 @@ bool WechatMessageDao::createMessageExtension(int messageId,
     const QJsonObject meta = payloadMetadata(payload);
     QSqlQuery q(Database::getInstance().connection());
     q.prepare(QStringLiteral(
-        "INSERT OR IGNORE INTO wechat_messages ("
+        "INSERT INTO wechat_messages ("
         "message_id, conversation_id, wechat_account_id, wechat_conversation_key, "
-        "wechat_display_name, platform_msg_id, direction, sender_role, raw_control_name, raw_control_type, "
-        "role_method, role_confidence, bubble_rect, message_list_rect, observation_method, "
-        "evidence_ref, raw_payload_json"
+        "wechat_display_name, platform_message_id, direction, sender_role, source_type, confidence, "
+        "verification_status, original_timestamp, content_image_path, raw_control_name, raw_control_type, "
+        "role_method, role_confidence, bubble_rect, message_list_rect, observation_method, evidence_ref, "
+        "raw_payload_json"
         ") VALUES ("
-        ":mid, :cid, :account, :ckey, :display, :pmid, :direction, :sender_role, :raw_name, :raw_type, "
-        ":role_method, :role_confidence, :bubble_rect, :message_list_rect, :observation, "
-        ":evidence, :raw"
-        ")"));
+        ":mid, :cid, :account, :ckey, :display, :pmid, :direction, :sender_role, :source, :confidence, "
+        ":verification, :original_timestamp, :content_image_path, :raw_name, :raw_type, "
+        ":role_method, :role_confidence, :bubble_rect, :message_list_rect, :observation, :evidence, :raw"
+        ") "
+        "ON CONFLICT(message_id) DO UPDATE SET "
+        "conversation_id = excluded.conversation_id, "
+        "wechat_account_id = excluded.wechat_account_id, "
+        "wechat_conversation_key = excluded.wechat_conversation_key, "
+        "wechat_display_name = excluded.wechat_display_name, "
+        "platform_message_id = excluded.platform_message_id, "
+        "direction = excluded.direction, "
+        "sender_role = excluded.sender_role, "
+        "source_type = excluded.source_type, "
+        "confidence = excluded.confidence, "
+        "verification_status = excluded.verification_status, "
+        "original_timestamp = excluded.original_timestamp, "
+        "content_image_path = excluded.content_image_path, "
+        "raw_control_name = excluded.raw_control_name, "
+        "raw_control_type = excluded.raw_control_type, "
+        "role_method = excluded.role_method, "
+        "role_confidence = excluded.role_confidence, "
+        "bubble_rect = excluded.bubble_rect, "
+        "message_list_rect = excluded.message_list_rect, "
+        "observation_method = excluded.observation_method, "
+        "evidence_ref = excluded.evidence_ref, "
+        "raw_payload_json = excluded.raw_payload_json"));
     q.bindValue(QStringLiteral(":mid"), messageId);
     q.bindValue(QStringLiteral(":cid"), conversationId);
     const QString effectiveAccount = accountId.isEmpty()
@@ -111,6 +134,11 @@ bool WechatMessageDao::createMessageExtension(int messageId,
     q.bindValue(QStringLiteral(":pmid"), platformMsgId);
     q.bindValue(QStringLiteral(":direction"), payload.value(QStringLiteral("direction")).toString());
     q.bindValue(QStringLiteral(":sender_role"), payload.value(QStringLiteral("sender_role")).toString());
+    q.bindValue(QStringLiteral(":source"), payload.value(QStringLiteral("source_type")).toString(QStringLiteral("ui_observed")));
+    q.bindValue(QStringLiteral(":confidence"), payload.value(QStringLiteral("confidence")).toInt(70));
+    q.bindValue(QStringLiteral(":verification"), payload.value(QStringLiteral("verification_status")).toString(QStringLiteral("unverified")));
+    q.bindValue(QStringLiteral(":original_timestamp"), payload.value(QStringLiteral("original_timestamp")).toString());
+    q.bindValue(QStringLiteral(":content_image_path"), payload.value(QStringLiteral("content_image_path")).toString());
     q.bindValue(QStringLiteral(":raw_name"), payloadString(payload, QStringLiteral("content")));
     q.bindValue(QStringLiteral(":raw_type"), meta.value(QStringLiteral("class_name")).toString());
     q.bindValue(QStringLiteral(":role_method"), meta.value(QStringLiteral("direction_method")).toString());

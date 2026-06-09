@@ -164,11 +164,10 @@ bool Database::runMigrations()
         "  last_time DATETIME,"
         "  unread_count INTEGER DEFAULT 0,"
         "  status TEXT DEFAULT 'new',"
-        "  source_type TEXT NOT NULL DEFAULT 'mock',"
-        "  confidence INTEGER NOT NULL DEFAULT 100,"
         "  cache_scope TEXT NOT NULL DEFAULT 'local_cache',"
         "  cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime',"
         "  updated_at DATETIME,"
+        "  deleted_at DATETIME,"
         "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
         "  UNIQUE(platform, platform_conversation_id)"
         ")",
@@ -189,21 +188,19 @@ bool Database::runMigrations()
         "CREATE TABLE IF NOT EXISTS messages ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  conversation_id INTEGER NOT NULL,"
+        "  platform_message_id TEXT DEFAULT '',"
+        "  client_message_id TEXT DEFAULT '',"
         "  direction TEXT NOT NULL,"
-        "  content TEXT NOT NULL,"
         "  sender TEXT NOT NULL,"
         "  sender_name TEXT DEFAULT '',"
-        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
-        "  platform_msg_id TEXT,"
-        "  sync_status INTEGER NOT NULL DEFAULT 1,"
-        "  error_reason TEXT DEFAULT '',"
-        "  original_timestamp TEXT DEFAULT '',"
-        "  source_type TEXT NOT NULL DEFAULT 'mock',"
-        "  confidence INTEGER NOT NULL DEFAULT 100,"
-        "  verification_status TEXT NOT NULL DEFAULT 'unverified',"
         "  content_type TEXT NOT NULL DEFAULT 'text',"
-        "  observed_at DATETIME,"
-        "  client_message_id TEXT DEFAULT '',"
+        "  content TEXT NOT NULL,"
+        "  status TEXT NOT NULL DEFAULT 'observed',"
+        "  error_reason TEXT DEFAULT '',"
+        "  message_time DATETIME,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  deleted_at DATETIME,"
         "  cache_scope TEXT NOT NULL DEFAULT 'local_cache',"
         "  cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime',"
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
@@ -242,6 +239,23 @@ bool Database::runMigrations()
         "CREATE INDEX IF NOT EXISTS idx_wechat_conversations_key "
         "  ON wechat_conversations(wechat_account_id, wechat_conversation_key)",
 
+        "CREATE TABLE IF NOT EXISTS qianniu_conversations ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  conversation_id INTEGER NOT NULL UNIQUE,"
+        "  qianniu_account_id TEXT DEFAULT '',"
+        "  qianniu_conversation_key TEXT DEFAULT '',"
+        "  display_name TEXT DEFAULT '',"
+        "  last_unread_badge INTEGER DEFAULT 0,"
+        "  last_observed_at DATETIME,"
+        "  last_health_status TEXT DEFAULT '',"
+        "  raw_payload_json TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_qianniu_conversations_key "
+        "  ON qianniu_conversations(qianniu_account_id, qianniu_conversation_key)",
+
         "CREATE TABLE IF NOT EXISTS wechat_messages ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  message_id INTEGER NOT NULL UNIQUE,"
@@ -249,9 +263,14 @@ bool Database::runMigrations()
         "  wechat_account_id TEXT DEFAULT '',"
         "  wechat_conversation_key TEXT DEFAULT '',"
         "  wechat_display_name TEXT DEFAULT '',"
-        "  platform_msg_id TEXT DEFAULT '',"
+        "  platform_message_id TEXT DEFAULT '',"
         "  direction TEXT DEFAULT '',"
         "  sender_role TEXT DEFAULT '',"
+        "  source_type TEXT DEFAULT '',"
+        "  confidence INTEGER DEFAULT 0,"
+        "  verification_status TEXT DEFAULT '',"
+        "  original_timestamp TEXT DEFAULT '',"
+        "  content_image_path TEXT DEFAULT '',"
         "  raw_control_name TEXT DEFAULT '',"
         "  raw_control_type TEXT DEFAULT '',"
         "  role_method TEXT DEFAULT '',"
@@ -266,7 +285,36 @@ bool Database::runMigrations()
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
         ")",
         "CREATE INDEX IF NOT EXISTS idx_wechat_messages_conv_id ON wechat_messages(conversation_id)",
-        "CREATE INDEX IF NOT EXISTS idx_wechat_messages_platform_msg_id ON wechat_messages(platform_msg_id)",
+
+        "CREATE TABLE IF NOT EXISTS qianniu_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  message_id INTEGER NOT NULL UNIQUE,"
+        "  conversation_id INTEGER NOT NULL,"
+        "  qianniu_account_id TEXT DEFAULT '',"
+        "  qianniu_conversation_key TEXT DEFAULT '',"
+        "  qianniu_display_name TEXT DEFAULT '',"
+        "  platform_message_id TEXT DEFAULT '',"
+        "  direction TEXT DEFAULT '',"
+        "  sender_role TEXT DEFAULT '',"
+        "  raw_sender TEXT DEFAULT '',"
+        "  raw_timestamp_text TEXT DEFAULT '',"
+        "  parser_source TEXT DEFAULT '',"
+        "  source_type TEXT DEFAULT '',"
+        "  confidence INTEGER DEFAULT 0,"
+        "  verification_status TEXT DEFAULT '',"
+        "  original_timestamp TEXT DEFAULT '',"
+        "  content_image_path TEXT DEFAULT '',"
+        "  role_method TEXT DEFAULT '',"
+        "  role_confidence REAL DEFAULT 0,"
+        "  bubble_rect TEXT DEFAULT '',"
+        "  message_list_rect TEXT DEFAULT '',"
+        "  evidence_ref TEXT DEFAULT '',"
+        "  raw_payload_json TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_qianniu_messages_conv_id ON qianniu_messages(conversation_id)",
 
         "CREATE TABLE IF NOT EXISTS ai_assistant_sessions ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -293,30 +341,28 @@ bool Database::runMigrations()
     // 可选迁移（ALTER TABLE ADD COLUMN，列已存在时会失败，忽略错误）
     const char* optionalMigrations[] = {
         "ALTER TABLE messages ADD COLUMN sender_name TEXT DEFAULT ''",
-        "ALTER TABLE messages ADD COLUMN original_timestamp TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN avatar_path TEXT DEFAULT ''",
-        "ALTER TABLE messages ADD COLUMN content_image_path TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN sender_name TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN original_timestamp TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN content_image_path TEXT DEFAULT ''",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
-        "ALTER TABLE rpa_inbox_messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
         "ALTER TABLE conversations ADD COLUMN account_id TEXT DEFAULT ''",
-        "ALTER TABLE conversations ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
-        "ALTER TABLE conversations ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
         "ALTER TABLE conversations ADD COLUMN cache_scope TEXT NOT NULL DEFAULT 'local_cache'",
         "ALTER TABLE conversations ADD COLUMN cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime'",
         "ALTER TABLE conversations ADD COLUMN updated_at DATETIME",
-        "ALTER TABLE messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
-        "ALTER TABLE messages ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
-        "ALTER TABLE messages ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
+        "ALTER TABLE conversations ADD COLUMN deleted_at DATETIME",
+        "ALTER TABLE messages ADD COLUMN platform_message_id TEXT DEFAULT ''",
+        "UPDATE messages SET platform_message_id = COALESCE(NULLIF(platform_message_id, ''), platform_msg_id)",
+        "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'observed'",
+        "UPDATE messages SET status = CASE sync_status WHEN 10 THEN 'pending' WHEN 11 THEN 'sent' WHEN 12 THEN 'failed' ELSE 'observed' END WHERE status IS NULL OR status = '' OR status = 'observed'",
+        "ALTER TABLE messages ADD COLUMN message_time DATETIME",
+        "UPDATE messages SET message_time = COALESCE(NULLIF(message_time, ''), NULLIF(observed_at, ''), NULLIF(original_timestamp, ''), created_at)",
+        "UPDATE messages SET message_time = COALESCE(NULLIF(message_time, ''), created_at, datetime('now','localtime'))",
+        "ALTER TABLE messages ADD COLUMN updated_at DATETIME",
+        "UPDATE messages SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, datetime('now','localtime'))",
+        "ALTER TABLE messages ADD COLUMN deleted_at DATETIME",
         "ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
-        "ALTER TABLE messages ADD COLUMN observed_at DATETIME",
         "ALTER TABLE messages ADD COLUMN client_message_id TEXT DEFAULT ''",
+        "CREATE INDEX IF NOT EXISTS idx_messages_platform_message_id ON messages(platform_message_id)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_client_message_id ON messages(client_message_id)",
         "ALTER TABLE messages ADD COLUMN cache_scope TEXT NOT NULL DEFAULT 'local_cache'",
         "ALTER TABLE messages ADD COLUMN cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime'",
         "ALTER TABLE wechat_conversations ADD COLUMN session_control_hash TEXT DEFAULT ''",
@@ -326,11 +372,28 @@ bool Database::runMigrations()
         "ALTER TABLE wechat_conversations ADD COLUMN raw_payload_json TEXT DEFAULT ''",
         "ALTER TABLE wechat_conversations ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE wechat_conversations ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE qianniu_conversations ADD COLUMN qianniu_account_id TEXT DEFAULT ''",
+        "ALTER TABLE qianniu_conversations ADD COLUMN qianniu_conversation_key TEXT DEFAULT ''",
+        "ALTER TABLE qianniu_conversations ADD COLUMN display_name TEXT DEFAULT ''",
+        "ALTER TABLE qianniu_conversations ADD COLUMN last_unread_badge INTEGER DEFAULT 0",
+        "ALTER TABLE qianniu_conversations ADD COLUMN last_observed_at DATETIME",
+        "ALTER TABLE qianniu_conversations ADD COLUMN last_health_status TEXT DEFAULT ''",
+        "ALTER TABLE qianniu_conversations ADD COLUMN raw_payload_json TEXT DEFAULT ''",
+        "ALTER TABLE qianniu_conversations ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE qianniu_conversations ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE wechat_messages ADD COLUMN wechat_account_id TEXT DEFAULT ''",
         "ALTER TABLE wechat_messages ADD COLUMN wechat_conversation_key TEXT DEFAULT ''",
         "ALTER TABLE wechat_messages ADD COLUMN wechat_display_name TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN platform_message_id TEXT DEFAULT ''",
+        "UPDATE wechat_messages SET platform_message_id = COALESCE(NULLIF(platform_message_id, ''), platform_msg_id)",
+        "CREATE INDEX IF NOT EXISTS idx_wechat_messages_platform_message_id ON wechat_messages(platform_message_id)",
         "ALTER TABLE wechat_messages ADD COLUMN direction TEXT DEFAULT ''",
         "ALTER TABLE wechat_messages ADD COLUMN sender_role TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN source_type TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN confidence INTEGER DEFAULT 0",
+        "ALTER TABLE wechat_messages ADD COLUMN verification_status TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN original_timestamp TEXT DEFAULT ''",
+        "ALTER TABLE wechat_messages ADD COLUMN content_image_path TEXT DEFAULT ''",
         "ALTER TABLE wechat_messages ADD COLUMN raw_control_name TEXT DEFAULT ''",
         "ALTER TABLE wechat_messages ADD COLUMN raw_control_type TEXT DEFAULT ''",
         "ALTER TABLE wechat_messages ADD COLUMN role_method TEXT DEFAULT ''",
@@ -341,6 +404,22 @@ bool Database::runMigrations()
         "ALTER TABLE wechat_messages ADD COLUMN evidence_ref TEXT DEFAULT ''",
         "ALTER TABLE wechat_messages ADD COLUMN raw_payload_json TEXT DEFAULT ''",
         "ALTER TABLE wechat_messages ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE conversations DROP COLUMN source_type",
+        "ALTER TABLE conversations DROP COLUMN confidence",
+        "ALTER TABLE conversations DROP COLUMN canonical_conversation_id",
+        "ALTER TABLE conversations DROP COLUMN display_name",
+        "INSERT OR IGNORE INTO wechat_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'wechat'",
+        "INSERT OR IGNORE INTO qianniu_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'qianniu'",
+        "CREATE INDEX IF NOT EXISTS idx_qianniu_messages_platform_message_id ON qianniu_messages(platform_message_id)",
+        "ALTER TABLE messages DROP COLUMN platform_msg_id",
+        "ALTER TABLE messages DROP COLUMN sync_status",
+        "ALTER TABLE messages DROP COLUMN original_timestamp",
+        "ALTER TABLE messages DROP COLUMN content_image_path",
+        "ALTER TABLE messages DROP COLUMN source_type",
+        "ALTER TABLE messages DROP COLUMN confidence",
+        "ALTER TABLE messages DROP COLUMN verification_status",
+        "ALTER TABLE messages DROP COLUMN observed_at",
+        "DROP TABLE IF EXISTS rpa_inbox_messages",
     };
 
     for (const char* sql : requiredMigrations) {

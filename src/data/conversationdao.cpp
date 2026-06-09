@@ -1,5 +1,6 @@
 #include "conversationdao.h"
 #include "wechatmessagedao.h"
+#include "qianniuconversationdao.h"
 #include "database.h"
 #include <QDebug>
 #include <QJsonObject>
@@ -116,8 +117,8 @@ static ConversationInfo recordFromQuery(QSqlQuery& q)
     c.status = q.value("status").toString();
     c.createdAt = q.value("created_at").toDateTime();
     c.accountId = q.value("account_id").toString();
-    c.sourceType = q.value("source_type").toString();
-    c.confidence = q.value("confidence").isNull() ? 100 : q.value("confidence").toInt();
+    c.sourceType = QStringLiteral("ui_observed");
+    c.confidence = 100;
     c.updatedAt = q.value("updated_at").toDateTime();
     c.cacheScope = q.value("cache_scope").toString();
     if (c.cacheScope.isEmpty())
@@ -132,8 +133,8 @@ int ConversationDao::create(const QString& platform, const QString& platformConv
 {
     QSqlQuery q(Database::getInstance().connection());
     q.prepare("INSERT INTO conversations (platform, platform_conversation_id, account_id, customer_name, "
-              "status, source_type, confidence, cache_scope, cache_origin, last_time, updated_at) "
-              "VALUES (:platform, :pcid, :account, :name, :status, :source, :confidence, :cache_scope, :cache_origin, "
+              "status, cache_scope, cache_origin, last_time, updated_at) "
+              "VALUES (:platform, :pcid, :account, :name, :status, :cache_scope, :cache_origin, "
               "datetime('now','localtime'), datetime('now','localtime'))");
     const Models::PlatformType platformType = Models::platformTypeFromString(platform);
     const Models::SourceType sourceType = (platformType == Models::PlatformType::Mock)
@@ -144,8 +145,6 @@ int ConversationDao::create(const QString& platform, const QString& platformConv
     q.bindValue(":account", platform);
     q.bindValue(":name", customerName);
     q.bindValue(":status", QStringLiteral("new"));
-    q.bindValue(":source", Models::toString(sourceType));
-    q.bindValue(":confidence", Models::defaultConfidence(sourceType));
     q.bindValue(":cache_scope", conversationCacheScope());
     q.bindValue(":cache_origin", conversationCacheOriginForSourceType(sourceType));
 
@@ -162,16 +161,14 @@ int ConversationDao::create(const Models::Conversation& conversation)
 {
     QSqlQuery q(Database::getInstance().connection());
     q.prepare("INSERT INTO conversations (platform, platform_conversation_id, account_id, customer_name, "
-              "status, source_type, confidence, cache_scope, cache_origin, last_time, updated_at) "
-              "VALUES (:platform, :pcid, :account, :name, :status, :source, :confidence, :cache_scope, :cache_origin, "
+              "status, cache_scope, cache_origin, last_time, updated_at) "
+              "VALUES (:platform, :pcid, :account, :name, :status, :cache_scope, :cache_origin, "
               "datetime('now','localtime'), datetime('now','localtime'))");
     q.bindValue(":platform", Models::toString(conversation.platformType));
     q.bindValue(":pcid", conversation.platformConversationId);
     q.bindValue(":account", conversation.accountId);
     q.bindValue(":name", conversation.title);
     q.bindValue(":status", Models::toString(conversation.status));
-    q.bindValue(":source", Models::toString(conversation.sourceType));
-    q.bindValue(":confidence", conversation.confidence);
     q.bindValue(":cache_scope", conversationCacheScope());
     q.bindValue(":cache_origin", conversationCacheOriginForSourceType(conversation.sourceType));
 
@@ -209,8 +206,6 @@ int ConversationDao::upsertObservedCacheConversation(const Models::Conversation&
         "status = CASE "
         "  WHEN status = 'closed' THEN 'active' "
         "  ELSE status END, "
-        "source_type = :source, "
-        "confidence = :confidence, "
         "cache_scope = :cache_scope, "
         "cache_origin = :cache_origin, "
         "updated_at = datetime('now','localtime') "
@@ -218,8 +213,6 @@ int ConversationDao::upsertObservedCacheConversation(const Models::Conversation&
     q.bindValue(QStringLiteral(":pcid"), conversation.platformConversationId);
     q.bindValue(QStringLiteral(":account"), conversation.accountId);
     q.bindValue(QStringLiteral(":name"), conversation.title);
-    q.bindValue(QStringLiteral(":source"), Models::toString(conversation.sourceType));
-    q.bindValue(QStringLiteral(":confidence"), conversation.confidence);
     q.bindValue(QStringLiteral(":cache_scope"), conversationCacheScope());
     q.bindValue(QStringLiteral(":cache_origin"), QStringLiteral("platform_observed_cache"));
     q.bindValue(QStringLiteral(":id"), existing->id);
@@ -244,14 +237,11 @@ int ConversationDao::upsertSnapshotCacheConversation(const QJsonObject& conversa
     const QString status = jsonString(conversation, QStringLiteral("status")).isEmpty()
         ? QStringLiteral("active")
         : jsonString(conversation, QStringLiteral("status"));
-    const QString sourceType = jsonString(conversation, QStringLiteral("source_type")).isEmpty()
-        ? QStringLiteral("ui_observed")
-        : jsonString(conversation, QStringLiteral("source_type"));
-    const int confidence = jsonInt(conversation, QStringLiteral("confidence"),
-                                   Models::defaultConfidence(Models::sourceTypeFromString(sourceType)));
     const int unreadCount = jsonInt(conversation, QStringLiteral("unread_count"), 0);
     const QString lastTime = jsonString(conversation, QStringLiteral("last_time"));
+    const QString createdAt = jsonString(conversation, QStringLiteral("created_at"));
     const QString updatedAt = jsonString(conversation, QStringLiteral("updated_at"));
+    const QString deletedAt = jsonString(conversation, QStringLiteral("deleted_at"));
     auto existing = findByPlatformId(platform, platformConversationId);
     if (!existing)
         existing = findLegacyShortConversation(platform, platformConversationId);
@@ -266,24 +256,26 @@ int ConversationDao::upsertSnapshotCacheConversation(const QJsonObject& conversa
             "last_message = :last_message, "
             "unread_count = :unread, "
             "status = :status, "
-            "source_type = :source, "
-            "confidence = :confidence, "
             "cache_scope = 'local_cache', "
             "cache_origin = 'server_snapshot_cache', "
             "last_time = COALESCE(NULLIF(:last_time, ''), last_time), "
-            "updated_at = COALESCE(NULLIF(:updated_at, ''), datetime('now','localtime')) "
+            "created_at = COALESCE(NULLIF(:created_at, ''), created_at), "
+            "updated_at = COALESCE(NULLIF(:updated_at, ''), datetime('now','localtime')), "
+            "deleted_at = NULLIF(:deleted_at, '') "
             "WHERE id = :id"));
         q.bindValue(QStringLiteral(":id"), existing->id);
         q.bindValue(QStringLiteral(":pcid"), platformConversationId);
     } else {
         q.prepare(QStringLiteral(
             "INSERT INTO conversations (platform, platform_conversation_id, account_id, customer_name, "
-            "last_message, unread_count, status, source_type, confidence, cache_scope, cache_origin, "
-            "last_time, updated_at) "
-            "VALUES (:platform, :pcid, :account, :name, :last_message, :unread, :status, :source, "
-            ":confidence, 'local_cache', 'server_snapshot_cache', "
+            "last_message, unread_count, status, cache_scope, cache_origin, "
+            "last_time, created_at, updated_at, deleted_at) "
+            "VALUES (:platform, :pcid, :account, :name, :last_message, :unread, :status, "
+            "'local_cache', 'server_snapshot_cache', "
             "COALESCE(NULLIF(:last_time, ''), datetime('now','localtime')), "
-            "COALESCE(NULLIF(:updated_at, ''), datetime('now','localtime')))"));
+            "COALESCE(NULLIF(:created_at, ''), datetime('now','localtime')), "
+            "COALESCE(NULLIF(:updated_at, ''), datetime('now','localtime')), "
+            "NULLIF(:deleted_at, ''))"));
         q.bindValue(QStringLiteral(":platform"), platform);
         q.bindValue(QStringLiteral(":pcid"), platformConversationId);
     }
@@ -292,10 +284,10 @@ int ConversationDao::upsertSnapshotCacheConversation(const QJsonObject& conversa
     q.bindValue(QStringLiteral(":last_message"), lastMessage);
     q.bindValue(QStringLiteral(":unread"), unreadCount);
     q.bindValue(QStringLiteral(":status"), status);
-    q.bindValue(QStringLiteral(":source"), sourceType);
-    q.bindValue(QStringLiteral(":confidence"), confidence);
     q.bindValue(QStringLiteral(":last_time"), lastTime);
+    q.bindValue(QStringLiteral(":created_at"), createdAt);
     q.bindValue(QStringLiteral(":updated_at"), updatedAt);
+    q.bindValue(QStringLiteral(":deleted_at"), deletedAt);
     if (!q.exec()) {
         qWarning() << "ConversationDao::upsertSnapshotCacheConversation 失败:"
                    << q.lastError().text();
@@ -386,8 +378,10 @@ std::optional<ConversationInfo> ConversationDao::findByPlatformId(const QString&
     q.prepare("SELECT * FROM conversations WHERE platform = :p AND platform_conversation_id = :pcid");
     q.bindValue(":p", platform);
     q.bindValue(":pcid", platformConvId);
-    if (!q.exec() || !q.next())
+    if (!q.exec())
         return std::nullopt;
+    if (!q.next())
+        return findLegacyShortConversation(platform, platformConvId);
     return recordFromQuery(q);
 }
 
@@ -688,6 +682,9 @@ bool ConversationDao::remove(int id)
     if (ok && conv && conv->platform == QLatin1String("wechat")) {
         WechatMessageDao wechatDao;
         wechatDao.deleteForConversation(id);
+    } else if (ok && conv && conv->platform == QLatin1String("qianniu")) {
+        QianniuConversationDao qianniuDao;
+        qianniuDao.deleteForConversation(id);
     }
     return ok;
 }
