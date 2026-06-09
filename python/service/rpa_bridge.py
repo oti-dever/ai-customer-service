@@ -442,6 +442,8 @@ class _CommandWebSocketServer:
 class RpaBridge:
     def __init__(self, mode: str = "debug", command_ws_host: str = "127.0.0.1", command_ws_port: int = 8767) -> None:
         self._truth_store = PythonServiceTruthStore()
+        truth_db_path = self._truth_store.ensure_schema()
+        logging.info("Python service truth db schema ready: %s", truth_db_path)
         self.store = RpaEventStore(truth_store=self._truth_store)
         self._wechat = WechatSidecarAdapter(self.store)
         self._qianniu = QianniuSidecarAdapter(self.store)

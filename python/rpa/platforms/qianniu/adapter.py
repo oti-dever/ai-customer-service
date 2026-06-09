@@ -631,6 +631,7 @@ class QianniuSidecarAdapter:
         )
         payload = {
             "platform_msg_id": "qianniu_" + _sha1(raw_id)[:24],
+            "display_name": display_name,
             "direction": direction,
             "sender_role": sender_role,
             "sender_name": clean(item.sender),

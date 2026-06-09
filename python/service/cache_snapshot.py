@@ -40,6 +40,19 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+def _column_expr(columns: set[str], name: str, fallback: str = "''") -> str:
+    if name in columns:
+        return name
+    return f"{fallback} AS {name}"
+
+
+def _coalesce_nonempty_expr(terms: list[str], alias: str) -> str:
+    if not terms:
+        return f"'' AS {alias}"
+    nonempty_terms = ", ".join([f"NULLIF({term}, '')" for term in terms])
+    return f"COALESCE({nonempty_terms}, '') AS {alias}"
+
+
 def resolved_snapshot_db_path() -> Path:
     raw = (
         os.environ.get("AI_CUSTOMER_SERVICE_SERVER_DB")
@@ -100,12 +113,14 @@ def build_cache_snapshot(
         if clauses:
             where = "WHERE " + " AND ".join(clauses)
         params.append(conv_limit)
+        created_at_expr = "created_at" if "created_at" in conversation_columns else "'' AS created_at"
+        deleted_at_expr = "deleted_at" if "deleted_at" in conversation_columns else "NULL AS deleted_at"
 
         conversations = conn.execute(
             f"""
             SELECT id, platform, platform_conversation_id, account_id, customer_name,
-                   last_message, unread_count, status, source_type, confidence,
-                   cache_scope, cache_origin, last_time, updated_at
+                   last_message, unread_count, status, last_time, {created_at_expr},
+                   updated_at, {deleted_at_expr}
             FROM conversations
             {where}
             ORDER BY last_time DESC, id DESC
@@ -117,6 +132,69 @@ def build_cache_snapshot(
         snapshot_items: list[dict[str, Any]] = []
         total_messages = 0
         next_cursor = snapshot_cursor
+        message_columns = _table_columns(conn, "messages")
+        platform_message_id_expr = (
+            "m.platform_message_id AS platform_message_id"
+            if "platform_message_id" in message_columns
+            else "m.platform_msg_id AS platform_message_id"
+        )
+        message_status_expr = (
+            "m.status AS status"
+            if "status" in message_columns
+            else "CASE m.sync_status WHEN 10 THEN 'pending' WHEN 11 THEN 'sent' WHEN 12 THEN 'failed' ELSE 'observed' END AS status"
+        )
+        message_time_expr = (
+            "m.message_time AS message_time"
+            if "message_time" in message_columns
+            else "COALESCE(NULLIF(m.observed_at, ''), NULLIF(m.original_timestamp, ''), m.created_at) AS message_time"
+        )
+        client_message_id_expr = (
+            "m.client_message_id AS client_message_id"
+            if "client_message_id" in message_columns
+            else "'' AS client_message_id"
+        )
+        error_reason_expr = (
+            "m.error_reason AS error_reason" if "error_reason" in message_columns else "'' AS error_reason"
+        )
+        sender_name_expr = (
+            "m.sender_name AS sender_name" if "sender_name" in message_columns else "'' AS sender_name"
+        )
+        content_type_expr = (
+            "m.content_type AS content_type" if "content_type" in message_columns else "'text' AS content_type"
+        )
+        message_updated_at_expr = (
+            "m.updated_at AS updated_at" if "updated_at" in message_columns else "m.created_at AS updated_at"
+        )
+        message_deleted_at_expr = (
+            "m.deleted_at AS deleted_at" if "deleted_at" in message_columns else "NULL AS deleted_at"
+        )
+        message_content_image_terms: list[str] = []
+        message_evidence_terms: list[str] = []
+        message_joins: list[str] = []
+        if _table_exists(conn, "wechat_messages"):
+            wechat_columns = _table_columns(conn, "wechat_messages")
+            message_joins.append("LEFT JOIN wechat_messages wm ON wm.message_id = m.id")
+            if "content_image_path" in wechat_columns:
+                message_content_image_terms.append("wm.content_image_path")
+            if "evidence_ref" in wechat_columns:
+                message_evidence_terms.append("wm.evidence_ref")
+        if _table_exists(conn, "qianniu_messages"):
+            qianniu_columns = _table_columns(conn, "qianniu_messages")
+            message_joins.append("LEFT JOIN qianniu_messages qm ON qm.message_id = m.id")
+            if "content_image_path" in qianniu_columns:
+                message_content_image_terms.append("qm.content_image_path")
+            if "evidence_ref" in qianniu_columns:
+                message_evidence_terms.append("qm.evidence_ref")
+        if "content_image_path" in message_columns:
+            message_content_image_terms.append("m.content_image_path")
+        if "evidence_ref" in message_columns:
+            message_evidence_terms.append("m.evidence_ref")
+        content_image_expr = _coalesce_nonempty_expr(
+            message_content_image_terms + message_evidence_terms,
+            "content_image_path",
+        )
+        evidence_ref_expr = _coalesce_nonempty_expr(message_evidence_terms, "evidence_ref")
+        message_join_sql = "\n                ".join(message_joins)
         for conv in conversations:
             item = _row_to_dict(conv)
             for key in ("updated_at", "last_time"):
@@ -124,14 +202,17 @@ def build_cache_snapshot(
                 if value and value > next_cursor:
                     next_cursor = value
             messages = conn.execute(
-                """
-                SELECT id, conversation_id, direction, content, sender, sender_name,
-                       platform_msg_id, sync_status, error_reason, original_timestamp,
-                       content_image_path, source_type, confidence, verification_status,
-                       content_type, observed_at, client_message_id, cache_scope,
-                       cache_origin, created_at
-                FROM messages
-                WHERE conversation_id = ?
+                f"""
+                SELECT m.id AS id, m.conversation_id AS conversation_id,
+                       {platform_message_id_expr}, {client_message_id_expr},
+                       m.direction AS direction, m.sender AS sender, {sender_name_expr},
+                       {content_type_expr}, m.content AS content,
+                       {message_status_expr}, {error_reason_expr}, {message_time_expr},
+                       m.created_at AS created_at, {message_updated_at_expr}, {message_deleted_at_expr},
+                       {content_image_expr}, {evidence_ref_expr}
+                FROM messages m
+                {message_join_sql}
+                WHERE m.conversation_id = ?
                 ORDER BY id DESC
                 LIMIT ?
                 """,
@@ -139,7 +220,7 @@ def build_cache_snapshot(
             ).fetchall()
             ordered_messages = [_row_to_dict(row) for row in reversed(messages)]
             for row in ordered_messages:
-                for key in ("observed_at", "created_at"):
+                for key in ("updated_at", "message_time", "created_at"):
                     value = _clean(row.get(key))
                     if value and value > next_cursor:
                         next_cursor = value

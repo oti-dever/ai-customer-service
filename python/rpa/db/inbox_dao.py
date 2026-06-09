@@ -1,8 +1,11 @@
-"""RPA inbox and outbound send-status DAO."""
+"""Outbound send-status DAO.
+
+The legacy rpa_inbox_messages queue has been retired. Incoming platform data is
+persisted through service.truth_store and rpa_events instead.
+"""
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
 from typing import List, Optional
 
 
@@ -16,40 +19,8 @@ def write_inbox_batch(
     original_timestamp: str = "",
     at_time: Optional[str] = None,
 ) -> int:
-    """Insert a batch into rpa_inbox_messages using INSERT OR IGNORE."""
-    if not items:
-        return 0
-    now = at_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cur = conn.cursor()
-    count = 0
-    for item in items:
-        if len(item) >= 4:
-            content, platform_msg_id, item_sender_name, item_original_timestamp = item[:4]
-        else:
-            content, platform_msg_id = item[:2]
-            item_sender_name = sender_name
-            item_original_timestamp = original_timestamp
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO rpa_inbox_messages
-            (platform, platform_conversation_id, customer_name, content, created_at, platform_msg_id, consume_status, error_reason, sender_name, original_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?)
-            """,
-            (
-                platform,
-                platform_conversation_id,
-                customer_name,
-                content,
-                now,
-                platform_msg_id,
-                item_sender_name,
-                item_original_timestamp,
-            ),
-        )
-        if cur.rowcount > 0:
-            count += 1
-    conn.commit()
-    return count
+    """Deprecated: the legacy rpa_inbox_messages table is no longer used."""
+    return 0
 
 
 def write_inbox_message(
@@ -63,29 +34,8 @@ def write_inbox_message(
     original_timestamp: str = "",
     content_image_path: str = "",
 ) -> bool:
-    """Insert one message into rpa_inbox_messages."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO rpa_inbox_messages
-        (platform, platform_conversation_id, customer_name, content, created_at, platform_msg_id, consume_status, error_reason, sender_name, original_timestamp, content_image_path)
-        VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
-        """,
-        (
-            platform,
-            platform_conversation_id,
-            customer_name,
-            content,
-            now,
-            platform_msg_id,
-            sender_name,
-            original_timestamp,
-            content_image_path or "",
-        ),
-    )
-    conn.commit()
-    return cur.rowcount > 0
+    """Deprecated: the legacy rpa_inbox_messages table is no longer used."""
+    return False
 
 
 def fetch_pending_send(
@@ -101,7 +51,7 @@ def fetch_pending_send(
         FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
         WHERE m.direction = 'out'
-          AND m.sync_status = 10
+          AND m.status = 'pending'
           AND c.platform = ?
         ORDER BY m.id ASC
         LIMIT ?
@@ -120,7 +70,7 @@ def count_pending_send(conn: sqlite3.Connection, platform: str) -> int:
         FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
         WHERE m.direction = 'out'
-          AND m.sync_status = 10
+          AND m.status = 'pending'
           AND c.platform = ?
         """,
         (platform,),
@@ -132,7 +82,7 @@ def count_pending_send(conn: sqlite3.Connection, platform: str) -> int:
 def mark_sent_ok(conn: sqlite3.Connection, msg_id: int) -> None:
     cur = conn.cursor()
     cur.execute(
-        "UPDATE messages SET sync_status = 11, error_reason = '' WHERE id = ?",
+        "UPDATE messages SET status = 'sent', error_reason = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         (msg_id,),
     )
     conn.commit()
@@ -141,7 +91,7 @@ def mark_sent_ok(conn: sqlite3.Connection, msg_id: int) -> None:
 def mark_sent_failed(conn: sqlite3.Connection, msg_id: int, reason: str) -> None:
     cur = conn.cursor()
     cur.execute(
-        "UPDATE messages SET sync_status = 12, error_reason = ? WHERE id = ?",
+        "UPDATE messages SET status = 'failed', error_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         (reason[:500], msg_id),
     )
     conn.commit()

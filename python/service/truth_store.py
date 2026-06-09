@@ -16,6 +16,25 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _display_name_from_key(value: Any) -> str:
+    raw = _clean(value)
+    if ":" in raw:
+        return raw.rsplit(":", 1)[-1].strip()
+    return raw
+
+
+def _customer_display_name(payload: dict[str, Any], conversation_key: str) -> str:
+    explicit = _clean(payload.get("display_name"))
+    if explicit:
+        return explicit
+
+    sender_name = _clean(payload.get("sender_name"))
+    if sender_name and _direction(payload.get("direction"), payload.get("sender_role")) == "in":
+        return sender_name
+
+    return _display_name_from_key(conversation_key) or _clean(conversation_key)
+
+
 def _json(value: Any) -> str:
     return json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
 
@@ -81,6 +100,20 @@ def _sender(direction: str, sender_role: Any) -> str:
     return "customer"
 
 
+def _message_status_from_sync(value: Any) -> str:
+    try:
+        status = int(value)
+    except (TypeError, ValueError):
+        status = 1
+    if status == 10:
+        return "pending"
+    if status == 11:
+        return "sent"
+    if status == 12:
+        return "failed"
+    return "observed"
+
+
 def _message_fingerprint(direction: Any, sender_role: Any, content: Any) -> str:
     normalized_content = " ".join(_clean(content).split())
     return f"{_direction(direction, sender_role)}\n{normalized_content}"
@@ -108,6 +141,16 @@ class PythonServiceTruthStore:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path
+
+    def ensure_schema(self) -> Path:
+        path = self._db_path or resolved_snapshot_db_path()
+        conn = open_db(path)
+        try:
+            self._ensure_schema(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        return path
 
     def persist_event(self, event: dict[str, Any]) -> bool:
         event_type = _clean(event.get("event_type"))
@@ -310,9 +353,9 @@ class PythonServiceTruthStore:
                 placeholders = ",".join("?" for _ in ids)
                 rows = conn.execute(
                     f"""
-                    SELECT platform_msg_id FROM messages
+                    SELECT platform_message_id FROM messages
                     WHERE conversation_id = ?
-                      AND platform_msg_id IN ({placeholders})
+                      AND platform_message_id IN ({placeholders})
                     """,
                     [conversation_id, *ids],
                 ).fetchall()
@@ -402,6 +445,8 @@ class PythonServiceTruthStore:
                 "occurred_at": "",
                 "client_message_id": _clean(payload.get("client_message_id") or params.get("client_message_id")),
                 "payload": {
+                    "display_name": _clean(params.get("display_name"))
+                    or _display_name_from_key(params.get("conversation_key")),
                     "direction": "outbound",
                     "sender_role": "agent",
                     "sender_name": "",
@@ -414,7 +459,7 @@ class PythonServiceTruthStore:
                 },
             }
             conv_id = self._upsert_conversation(conn, event)
-            self._upsert_message(conn, conv_id, event, sync_status=10)
+            self._upsert_message(conn, conv_id, event, status="pending")
             conn.commit()
         finally:
             conn.close()
@@ -449,38 +494,120 @@ class PythonServiceTruthStore:
               last_time DATETIME,
               unread_count INTEGER DEFAULT 0,
               status TEXT DEFAULT 'new',
-              source_type TEXT NOT NULL DEFAULT 'mock',
-              confidence INTEGER NOT NULL DEFAULT 100,
-              cache_scope TEXT NOT NULL DEFAULT 'local_cache',
-              cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime',
               updated_at DATETIME,
+              deleted_at DATETIME,
               created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
               UNIQUE(platform, platform_conversation_id)
             );
             CREATE TABLE IF NOT EXISTS messages (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               conversation_id INTEGER NOT NULL,
+              platform_message_id TEXT DEFAULT '',
+              client_message_id TEXT DEFAULT '',
               direction TEXT NOT NULL,
-              content TEXT NOT NULL,
               sender TEXT NOT NULL,
               sender_name TEXT DEFAULT '',
-              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-              platform_msg_id TEXT,
-              sync_status INTEGER NOT NULL DEFAULT 1,
-              error_reason TEXT DEFAULT '',
-              original_timestamp TEXT DEFAULT '',
-              content_image_path TEXT DEFAULT '',
-              source_type TEXT NOT NULL DEFAULT 'mock',
-              confidence INTEGER NOT NULL DEFAULT 100,
-              verification_status TEXT NOT NULL DEFAULT 'unverified',
               content_type TEXT NOT NULL DEFAULT 'text',
-              observed_at DATETIME,
-              client_message_id TEXT DEFAULT '',
-              cache_scope TEXT NOT NULL DEFAULT 'local_cache',
-              cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime',
+              content TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'observed',
+              error_reason TEXT DEFAULT '',
+              message_time DATETIME,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              deleted_at DATETIME,
               FOREIGN KEY(conversation_id) REFERENCES conversations(id)
             );
             CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id);
+            CREATE TABLE IF NOT EXISTS wechat_conversations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              conversation_id INTEGER NOT NULL UNIQUE,
+              wechat_account_id TEXT DEFAULT '',
+              wechat_conversation_key TEXT DEFAULT '',
+              display_name TEXT DEFAULT '',
+              last_unread_badge INTEGER DEFAULT 0,
+              last_observed_at DATETIME,
+              last_health_status TEXT DEFAULT '',
+              raw_payload_json TEXT DEFAULT '',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_wechat_conversations_key
+              ON wechat_conversations(wechat_account_id, wechat_conversation_key);
+            CREATE TABLE IF NOT EXISTS qianniu_conversations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              conversation_id INTEGER NOT NULL UNIQUE,
+              qianniu_account_id TEXT DEFAULT '',
+              qianniu_conversation_key TEXT DEFAULT '',
+              display_name TEXT DEFAULT '',
+              last_unread_badge INTEGER DEFAULT 0,
+              last_observed_at DATETIME,
+              last_health_status TEXT DEFAULT '',
+              raw_payload_json TEXT DEFAULT '',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_qianniu_conversations_key
+              ON qianniu_conversations(qianniu_account_id, qianniu_conversation_key);
+            CREATE TABLE IF NOT EXISTS wechat_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              message_id INTEGER NOT NULL UNIQUE,
+              conversation_id INTEGER NOT NULL,
+              wechat_account_id TEXT DEFAULT '',
+              wechat_conversation_key TEXT DEFAULT '',
+              wechat_display_name TEXT DEFAULT '',
+              platform_message_id TEXT DEFAULT '',
+              direction TEXT DEFAULT '',
+              sender_role TEXT DEFAULT '',
+              source_type TEXT DEFAULT '',
+              confidence INTEGER DEFAULT 0,
+              verification_status TEXT DEFAULT '',
+              original_timestamp TEXT DEFAULT '',
+              content_image_path TEXT DEFAULT '',
+              raw_control_name TEXT DEFAULT '',
+              raw_control_type TEXT DEFAULT '',
+              role_method TEXT DEFAULT '',
+              role_confidence REAL DEFAULT 0,
+              bubble_rect TEXT DEFAULT '',
+              message_list_rect TEXT DEFAULT '',
+              observation_method TEXT DEFAULT '',
+              evidence_ref TEXT DEFAULT '',
+              raw_payload_json TEXT DEFAULT '',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_wechat_messages_conv_id ON wechat_messages(conversation_id);
+            CREATE TABLE IF NOT EXISTS qianniu_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              message_id INTEGER NOT NULL UNIQUE,
+              conversation_id INTEGER NOT NULL,
+              qianniu_account_id TEXT DEFAULT '',
+              qianniu_conversation_key TEXT DEFAULT '',
+              qianniu_display_name TEXT DEFAULT '',
+              platform_message_id TEXT DEFAULT '',
+              direction TEXT DEFAULT '',
+              sender_role TEXT DEFAULT '',
+              raw_sender TEXT DEFAULT '',
+              raw_timestamp_text TEXT DEFAULT '',
+              parser_source TEXT DEFAULT '',
+              source_type TEXT DEFAULT '',
+              confidence INTEGER DEFAULT 0,
+              verification_status TEXT DEFAULT '',
+              original_timestamp TEXT DEFAULT '',
+              content_image_path TEXT DEFAULT '',
+              role_method TEXT DEFAULT '',
+              role_confidence REAL DEFAULT 0,
+              bubble_rect TEXT DEFAULT '',
+              message_list_rect TEXT DEFAULT '',
+              evidence_ref TEXT DEFAULT '',
+              raw_payload_json TEXT DEFAULT '',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_qianniu_messages_conv_id ON qianniu_messages(conversation_id);
             CREATE TABLE IF NOT EXISTS rpa_events (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               event_id TEXT UNIQUE,
@@ -508,27 +635,88 @@ class PythonServiceTruthStore:
             );
             CREATE INDEX IF NOT EXISTS idx_conversation_mutations_target
               ON conversation_mutations(platform, conversation_key, id);
+            DROP TABLE IF EXISTS rpa_inbox_messages;
             """
         )
         optional_migrations = [
             "ALTER TABLE conversations ADD COLUMN account_id TEXT DEFAULT ''",
-            "ALTER TABLE conversations ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
-            "ALTER TABLE conversations ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
-            "ALTER TABLE conversations ADD COLUMN cache_scope TEXT NOT NULL DEFAULT 'local_cache'",
-            "ALTER TABLE conversations ADD COLUMN cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime'",
             "ALTER TABLE conversations ADD COLUMN updated_at DATETIME",
-            "ALTER TABLE messages ADD COLUMN sender_name TEXT DEFAULT ''",
-            "ALTER TABLE messages ADD COLUMN original_timestamp TEXT DEFAULT ''",
-            "ALTER TABLE messages ADD COLUMN content_image_path TEXT DEFAULT ''",
-            "ALTER TABLE messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'mock'",
-            "ALTER TABLE messages ADD COLUMN confidence INTEGER NOT NULL DEFAULT 100",
-            "ALTER TABLE messages ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'",
-            "ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
-            "ALTER TABLE messages ADD COLUMN observed_at DATETIME",
-            "ALTER TABLE messages ADD COLUMN client_message_id TEXT DEFAULT ''",
-            "ALTER TABLE messages ADD COLUMN cache_scope TEXT NOT NULL DEFAULT 'local_cache'",
-            "ALTER TABLE messages ADD COLUMN cache_origin TEXT NOT NULL DEFAULT 'legacy_runtime'",
             "ALTER TABLE conversations ADD COLUMN deleted_at DATETIME",
+            "ALTER TABLE messages ADD COLUMN platform_message_id TEXT DEFAULT ''",
+            "UPDATE messages SET platform_message_id = COALESCE(NULLIF(platform_message_id, ''), platform_msg_id)",
+            "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'observed'",
+            "UPDATE messages SET status = CASE sync_status WHEN 10 THEN 'pending' WHEN 11 THEN 'sent' WHEN 12 THEN 'failed' ELSE 'observed' END WHERE status IS NULL OR status = '' OR status = 'observed'",
+            "ALTER TABLE messages ADD COLUMN message_time DATETIME",
+            "UPDATE messages SET message_time = COALESCE(NULLIF(message_time, ''), NULLIF(observed_at, ''), NULLIF(original_timestamp, ''), created_at)",
+            "UPDATE messages SET message_time = COALESCE(NULLIF(message_time, ''), created_at, CURRENT_TIMESTAMP)",
+            "ALTER TABLE messages ADD COLUMN updated_at DATETIME",
+            "UPDATE messages SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CURRENT_TIMESTAMP)",
+            "ALTER TABLE messages ADD COLUMN deleted_at DATETIME",
+            "ALTER TABLE messages ADD COLUMN sender_name TEXT DEFAULT ''",
+            "ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
+            "ALTER TABLE messages ADD COLUMN client_message_id TEXT DEFAULT ''",
+            "CREATE INDEX IF NOT EXISTS idx_messages_platform_message_id ON messages(platform_message_id)",
+            "CREATE INDEX IF NOT EXISTS idx_messages_client_message_id ON messages(client_message_id)",
+            "ALTER TABLE wechat_conversations ADD COLUMN wechat_account_id TEXT DEFAULT ''",
+            "ALTER TABLE wechat_conversations ADD COLUMN wechat_conversation_key TEXT DEFAULT ''",
+            "ALTER TABLE wechat_conversations ADD COLUMN display_name TEXT DEFAULT ''",
+            "ALTER TABLE wechat_conversations ADD COLUMN last_unread_badge INTEGER DEFAULT 0",
+            "ALTER TABLE wechat_conversations ADD COLUMN last_observed_at DATETIME",
+            "ALTER TABLE wechat_conversations ADD COLUMN last_health_status TEXT DEFAULT ''",
+            "ALTER TABLE wechat_conversations ADD COLUMN raw_payload_json TEXT DEFAULT ''",
+            "ALTER TABLE wechat_conversations ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE wechat_conversations ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE qianniu_conversations ADD COLUMN qianniu_account_id TEXT DEFAULT ''",
+            "ALTER TABLE qianniu_conversations ADD COLUMN qianniu_conversation_key TEXT DEFAULT ''",
+            "ALTER TABLE qianniu_conversations ADD COLUMN display_name TEXT DEFAULT ''",
+            "ALTER TABLE qianniu_conversations ADD COLUMN last_unread_badge INTEGER DEFAULT 0",
+            "ALTER TABLE qianniu_conversations ADD COLUMN last_observed_at DATETIME",
+            "ALTER TABLE qianniu_conversations ADD COLUMN last_health_status TEXT DEFAULT ''",
+            "ALTER TABLE qianniu_conversations ADD COLUMN raw_payload_json TEXT DEFAULT ''",
+            "ALTER TABLE qianniu_conversations ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE qianniu_conversations ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE wechat_messages ADD COLUMN wechat_account_id TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN wechat_conversation_key TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN wechat_display_name TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN platform_message_id TEXT DEFAULT ''",
+            "UPDATE wechat_messages SET platform_message_id = COALESCE(NULLIF(platform_message_id, ''), platform_msg_id)",
+            "CREATE INDEX IF NOT EXISTS idx_wechat_messages_platform_message_id ON wechat_messages(platform_message_id)",
+            "ALTER TABLE wechat_messages ADD COLUMN direction TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN sender_role TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN source_type TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN confidence INTEGER DEFAULT 0",
+            "ALTER TABLE wechat_messages ADD COLUMN verification_status TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN original_timestamp TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN content_image_path TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN raw_control_name TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN raw_control_type TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN role_method TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN role_confidence REAL DEFAULT 0",
+            "ALTER TABLE wechat_messages ADD COLUMN bubble_rect TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN message_list_rect TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN observation_method TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN evidence_ref TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN raw_payload_json TEXT DEFAULT ''",
+            "ALTER TABLE wechat_messages ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "INSERT OR IGNORE INTO wechat_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'wechat'",
+            "INSERT OR IGNORE INTO qianniu_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'qianniu'",
+            "CREATE INDEX IF NOT EXISTS idx_qianniu_messages_platform_message_id ON qianniu_messages(platform_message_id)",
+            "ALTER TABLE conversations DROP COLUMN source_type",
+            "ALTER TABLE conversations DROP COLUMN confidence",
+            "ALTER TABLE conversations DROP COLUMN cache_scope",
+            "ALTER TABLE conversations DROP COLUMN cache_origin",
+            "ALTER TABLE conversations DROP COLUMN canonical_conversation_id",
+            "ALTER TABLE conversations DROP COLUMN display_name",
+            "ALTER TABLE messages DROP COLUMN platform_msg_id",
+            "ALTER TABLE messages DROP COLUMN sync_status",
+            "ALTER TABLE messages DROP COLUMN original_timestamp",
+            "ALTER TABLE messages DROP COLUMN content_image_path",
+            "ALTER TABLE messages DROP COLUMN source_type",
+            "ALTER TABLE messages DROP COLUMN confidence",
+            "ALTER TABLE messages DROP COLUMN verification_status",
+            "ALTER TABLE messages DROP COLUMN observed_at",
+            "ALTER TABLE messages DROP COLUMN cache_scope",
+            "ALTER TABLE messages DROP COLUMN cache_origin",
         ]
         for migration in optional_migrations:
             try:
@@ -733,10 +921,8 @@ class PythonServiceTruthStore:
         platform = _clean(event.get("platform")).lower()
         conversation_key = _clean(event.get("conversation_key"))
         account_id = _clean(event.get("account_id"))
-        display_name = _clean(payload.get("display_name") or payload.get("sender_name") or conversation_key)
+        display_name = _customer_display_name(payload, conversation_key)
         observed_at = _sqlite_time(event.get("occurred_at"))
-        source_type = _clean(payload.get("source_type")) or "ui_observed"
-        confidence = int(payload.get("confidence") or 70)
         content = _clean(payload.get("content"))
 
         row = conn.execute(
@@ -758,10 +944,6 @@ class PythonServiceTruthStore:
                     last_time = COALESCE(NULLIF(?, ''), last_time),
                     status = 'active',
                     deleted_at = NULL,
-                    source_type = ?,
-                    confidence = ?,
-                    cache_scope = 'local_cache',
-                    cache_origin = 'python_service_truth',
                     updated_at = COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
                 WHERE id = ?
                 """,
@@ -770,22 +952,20 @@ class PythonServiceTruthStore:
                     display_name,
                     content,
                     observed_at,
-                    source_type,
-                    confidence,
                     observed_at,
                     conv_id,
                 ),
             )
+            self._upsert_platform_conversation(conn, conv_id, event, display_name)
             return conv_id
 
         cur = conn.execute(
             """
             INSERT INTO conversations
             (platform, platform_conversation_id, account_id, customer_name,
-             last_message, last_time, unread_count, status, source_type, confidence,
-             cache_scope, cache_origin, updated_at)
-            VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), 0, 'active', ?, ?,
-                    'local_cache', 'python_service_truth', COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+             last_message, last_time, unread_count, status, updated_at)
+            VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), 0, 'active',
+                    COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
             """,
             (
                 platform,
@@ -794,12 +974,57 @@ class PythonServiceTruthStore:
                 display_name or conversation_key,
                 content,
                 observed_at,
-                source_type,
-                confidence,
                 observed_at,
             ),
         )
-        return int(cur.lastrowid)
+        conv_id = int(cur.lastrowid)
+        self._upsert_platform_conversation(conn, conv_id, event, display_name)
+        return conv_id
+
+    def _upsert_platform_conversation(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: int,
+        event: dict[str, Any],
+        display_name: str,
+    ) -> None:
+        platform = _clean(event.get("platform")).lower()
+        if platform not in {"wechat", "qianniu"} or conversation_id <= 0:
+            return
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        account_id = _clean(event.get("account_id"))
+        conversation_key = _clean(event.get("conversation_key"))
+        table_prefix = "wechat" if platform == "wechat" else "qianniu"
+        conn.execute(
+            f"""
+            INSERT INTO {table_prefix}_conversations
+            (conversation_id, {table_prefix}_account_id, {table_prefix}_conversation_key,
+             display_name, last_unread_badge, last_observed_at, last_health_status,
+             raw_payload_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP), ?, ?,
+                    COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+            ON CONFLICT(conversation_id) DO UPDATE SET
+              {table_prefix}_account_id = excluded.{table_prefix}_account_id,
+              {table_prefix}_conversation_key = excluded.{table_prefix}_conversation_key,
+              display_name = excluded.display_name,
+              last_unread_badge = excluded.last_unread_badge,
+              last_observed_at = excluded.last_observed_at,
+              last_health_status = excluded.last_health_status,
+              raw_payload_json = excluded.raw_payload_json,
+              updated_at = excluded.updated_at
+            """,
+            (
+                conversation_id,
+                account_id,
+                conversation_key,
+                display_name,
+                int(payload.get("unread_count") or 0),
+                _sqlite_time(event.get("occurred_at")),
+                _clean(payload.get("status")),
+                _json(payload),
+                _sqlite_time(event.get("occurred_at")),
+            ),
+        )
 
     def _upsert_message(
         self,
@@ -807,7 +1032,7 @@ class PythonServiceTruthStore:
         conversation_id: int,
         event: dict[str, Any],
         *,
-        sync_status: int = 1,
+        status: str = "observed",
     ) -> None:
         payload = event.get("payload") or {}
         platform_msg_id = _clean(payload.get("platform_msg_id"))
@@ -818,16 +1043,16 @@ class PythonServiceTruthStore:
 
         direction = _direction(payload.get("direction"), payload.get("sender_role"))
         sender = _sender(direction, payload.get("sender_role"))
-        observed_at = _sqlite_time(event.get("occurred_at"))
+        message_time = _sqlite_time(event.get("occurred_at"))
         content = _clean(payload.get("content"))
-        source_type = _clean(payload.get("source_type")) or "ui_observed"
-        confidence = int(payload.get("confidence") or 70)
         sender_name = _clean(payload.get("sender_name"))
+        content_type = _clean(payload.get("content_type")) or "text"
+        normalized_status = _clean(status) or "observed"
 
         existing = None
         if platform_msg_id:
             existing = conn.execute(
-                "SELECT id FROM messages WHERE platform_msg_id = ? LIMIT 1",
+                "SELECT id FROM messages WHERE platform_message_id = ? LIMIT 1",
                 (platform_msg_id,),
             ).fetchone()
         if existing is None and client_message_id:
@@ -845,20 +1070,16 @@ class PythonServiceTruthStore:
                     content = ?,
                     sender = ?,
                     sender_name = ?,
-                    platform_msg_id = COALESCE(NULLIF(?, ''), platform_msg_id),
-                    original_timestamp = COALESCE(NULLIF(?, ''), original_timestamp),
-                    source_type = ?,
-                    confidence = ?,
-                    verification_status = ?,
+                    platform_message_id = COALESCE(NULLIF(?, ''), platform_message_id),
                     content_type = ?,
-                    observed_at = COALESCE(NULLIF(?, ''), observed_at),
+                    message_time = COALESCE(NULLIF(?, ''), message_time),
                     client_message_id = COALESCE(NULLIF(?, ''), client_message_id),
-                    cache_scope = 'local_cache',
-                    sync_status = CASE
-                        WHEN ? = 1 AND sync_status IN (10, 11, 12) THEN sync_status
+                    status = CASE
+                        WHEN ? = 'observed' AND status IN ('pending', 'sent', 'failed') THEN status
                         ELSE ?
                     END,
-                    cache_origin = 'python_service_truth'
+                    updated_at = CURRENT_TIMESTAMP,
+                    deleted_at = NULL
                 WHERE id = ?
                 """,
                 (
@@ -868,48 +1089,163 @@ class PythonServiceTruthStore:
                     sender,
                     sender_name,
                     platform_msg_id,
-                    observed_at,
-                    source_type,
-                    confidence,
-                    _clean(payload.get("verification_status")) or "unverified",
-                    _clean(payload.get("content_type")) or "text",
-                    observed_at,
+                    content_type,
+                    message_time,
                     client_message_id,
-                    sync_status,
-                    sync_status,
+                    normalized_status,
+                    normalized_status,
                     int(existing[0]),
                 ),
             )
+            self._upsert_platform_message(conn, int(existing[0]), conversation_id, event)
             return
 
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO messages
-            (conversation_id, direction, content, sender, sender_name, platform_msg_id,
-             sync_status, error_reason, original_timestamp, content_image_path,
-             source_type, confidence, verification_status, content_type, observed_at,
-             client_message_id, cache_scope, cache_origin, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, NULLIF(?, ''),
-                    ?, 'local_cache', 'python_service_truth', COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+            (conversation_id, platform_message_id, client_message_id, direction,
+             sender, sender_name, content_type, content, status, error_reason,
+             message_time, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULLIF(?, ''),
+                    COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP),
+                    COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
             """,
             (
                 conversation_id,
+                platform_msg_id,
+                client_message_id,
                 direction,
-                content,
                 sender,
                 sender_name,
-                platform_msg_id,
-                sync_status,
-                observed_at,
-                _clean(payload.get("content_image_path") or payload.get("evidence_ref")),
-                source_type,
-                confidence,
-                _clean(payload.get("verification_status")) or "unverified",
-                _clean(payload.get("content_type")) or "text",
-                observed_at,
-                client_message_id,
-                observed_at,
+                content_type,
+                content,
+                normalized_status,
+                message_time,
+                message_time,
+                message_time,
             ),
+        )
+        self._upsert_platform_message(conn, int(cur.lastrowid), conversation_id, event)
+
+    def _upsert_platform_message(
+        self,
+        conn: sqlite3.Connection,
+        message_id: int,
+        conversation_id: int,
+        event: dict[str, Any],
+    ) -> None:
+        platform = _clean(event.get("platform")).lower()
+        if platform not in {"wechat", "qianniu"} or message_id <= 0 or conversation_id <= 0:
+            return
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        account_id = _clean(event.get("account_id"))
+        conversation_key = _clean(event.get("conversation_key"))
+        platform_message_id = _clean(payload.get("platform_msg_id"))
+        evidence_ref = _clean(payload.get("evidence_ref") or payload.get("content_image_path"))
+        table_prefix = "wechat" if platform == "wechat" else "qianniu"
+        display_column = f"{table_prefix}_display_name"
+        account_column = f"{table_prefix}_account_id"
+        key_column = f"{table_prefix}_conversation_key"
+        base_columns = (
+            f"message_id, conversation_id, {account_column}, {key_column}, {display_column}, "
+            "platform_message_id, direction, sender_role, source_type, confidence, "
+            "verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json"
+        )
+        base_values = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+        update_columns = f"""
+              {account_column} = excluded.{account_column},
+              {key_column} = excluded.{key_column},
+              {display_column} = excluded.{display_column},
+              platform_message_id = excluded.platform_message_id,
+              direction = excluded.direction,
+              sender_role = excluded.sender_role,
+              source_type = excluded.source_type,
+              confidence = excluded.confidence,
+              verification_status = excluded.verification_status,
+              original_timestamp = excluded.original_timestamp,
+              content_image_path = excluded.content_image_path,
+              evidence_ref = excluded.evidence_ref,
+              raw_payload_json = excluded.raw_payload_json
+        """
+        params: list[Any] = [
+            message_id,
+            conversation_id,
+            account_id,
+            conversation_key,
+            _clean(payload.get("display_name")) or _display_name_from_key(conversation_key),
+            platform_message_id,
+            _clean(payload.get("direction")),
+            _clean(payload.get("sender_role")),
+            _clean(payload.get("source_type")) or "ui_observed",
+            int(payload.get("confidence") or 70),
+            _clean(payload.get("verification_status")) or "unverified",
+            _clean(payload.get("original_timestamp")) or _sqlite_time(event.get("occurred_at")),
+            _clean(payload.get("content_image_path")),
+            evidence_ref,
+            _json(payload),
+        ]
+        if platform == "wechat":
+            meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            columns = base_columns + (
+                ", raw_control_name, raw_control_type, role_method, role_confidence, "
+                "bubble_rect, message_list_rect, observation_method"
+            )
+            values = base_values + ", ?, ?, ?, ?, ?, ?, ?"
+            update_columns += """
+              , raw_control_name = excluded.raw_control_name,
+              raw_control_type = excluded.raw_control_type,
+              role_method = excluded.role_method,
+              role_confidence = excluded.role_confidence,
+              bubble_rect = excluded.bubble_rect,
+              message_list_rect = excluded.message_list_rect,
+              observation_method = excluded.observation_method
+            """
+            params.extend(
+                [
+                    _clean(payload.get("content")),
+                    _clean(meta.get("class_name")),
+                    _clean(meta.get("direction_method")),
+                    float(meta.get("role_confidence") or 0),
+                    _clean(meta.get("rect")),
+                    _json(meta.get("chat_context") if isinstance(meta.get("chat_context"), dict) else {}),
+                    _clean(meta.get("observation_method")),
+                ]
+            )
+        else:
+            meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            columns = base_columns + (
+                ", raw_sender, raw_timestamp_text, parser_source, role_method, "
+                "role_confidence, bubble_rect, message_list_rect"
+            )
+            values = base_values + ", ?, ?, ?, ?, ?, ?, ?"
+            update_columns += """
+              , raw_sender = excluded.raw_sender,
+              raw_timestamp_text = excluded.raw_timestamp_text,
+              parser_source = excluded.parser_source,
+              role_method = excluded.role_method,
+              role_confidence = excluded.role_confidence,
+              bubble_rect = excluded.bubble_rect,
+              message_list_rect = excluded.message_list_rect
+            """
+            params.extend(
+                [
+                    _clean(payload.get("sender_name")),
+                    _clean(payload.get("original_timestamp")) or _sqlite_time(event.get("occurred_at")),
+                    _clean(meta.get("parser_source") or meta.get("observation_method")),
+                    _clean(meta.get("direction_method")),
+                    float(meta.get("role_confidence") or 0),
+                    _clean(meta.get("rect")),
+                    _json(meta.get("chat_context") if isinstance(meta.get("chat_context"), dict) else {}),
+                ]
+            )
+        conn.execute(
+            f"""
+            INSERT INTO {table_prefix}_messages ({columns})
+            VALUES ({values})
+            ON CONFLICT(message_id) DO UPDATE SET
+            {update_columns}
+            """,
+            params,
         )
 
     def _mark_outbound_result(self, conn: sqlite3.Connection, event: dict[str, Any], *, sent: bool) -> None:
@@ -918,18 +1254,17 @@ class PythonServiceTruthStore:
         if not client_message_id:
             return
 
-        sync_status = 11 if sent else 12
+        status = "sent" if sent else "failed"
         reason = "" if sent else (_clean(payload.get("error_message")) or _clean(payload.get("status")) or "send_failed")
         conn.execute(
             """
             UPDATE messages
-            SET sync_status = ?,
+            SET status = ?,
                 error_reason = ?,
-                cache_scope = 'local_cache',
-                cache_origin = 'python_service_truth'
+                updated_at = CURRENT_TIMESTAMP
             WHERE client_message_id = ?
             """,
-            (sync_status, reason[:500], client_message_id),
+            (status, reason[:500], client_message_id),
         )
 
 
