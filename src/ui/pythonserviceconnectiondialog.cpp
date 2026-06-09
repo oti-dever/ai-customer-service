@@ -2,12 +2,15 @@
 #include "mainwindow.h"
 #include "../ipc/ipcservice.h"
 #include "../utils/applystyle.h"
+#include "../utils/appsettings.h"
 
+#include <QCheckBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QVBoxLayout>
 
 PythonServiceConnectionDialog::PythonServiceConnectionDialog(MainWindow* mainWindow, QWidget* parent)
@@ -20,7 +23,7 @@ PythonServiceConnectionDialog::PythonServiceConnectionDialog(MainWindow* mainWin
                                                       : ApplyStyle::MainWindowTheme::Default;
         setStyleSheet(ApplyStyle::addWindowDialogStyle(th));
     }
-    resize(520, 180);
+    resize(560, 220);
     setupUI();
 }
 
@@ -47,6 +50,14 @@ void PythonServiceConnectionDialog::setupUI()
     serviceRow->addWidget(m_btnTestService);
     mainLayout->addLayout(serviceRow);
 
+    QSettings settings = AppSettings::create();
+    m_startupBackfillCheck = new QCheckBox(QStringLiteral("连接后同步服务端历史数据到本地缓存"), this);
+    m_startupBackfillCheck->setChecked(
+        settings.value(QStringLiteral("pythonService/startupBackfillEnabled"), false).toBool());
+    m_startupBackfillCheck->setToolTip(
+        QStringLiteral("默认关闭。当前历史同步链路仍在优化，开启后会从 Python 服务拉取 replay/snapshot 并写入客户端缓存。"));
+    mainLayout->addWidget(m_startupBackfillCheck);
+
     auto* bottom = new QHBoxLayout();
     bottom->setSpacing(10);
     m_btnClose = new QPushButton(QStringLiteral("关闭"), this);
@@ -66,6 +77,10 @@ void PythonServiceConnectionDialog::onSaveServiceClicked()
     auto& ipc = Ipc::IpcService::instance();
     ipc.setServiceEndpoint(m_serviceEndpointEdit ? m_serviceEndpointEdit->text() : QString());
     ipc.saveConnectionSettings();
+    QSettings settings = AppSettings::create();
+    settings.setValue(
+        QStringLiteral("pythonService/startupBackfillEnabled"),
+        m_startupBackfillCheck ? m_startupBackfillCheck->isChecked() : false);
     QMessageBox::information(this, QStringLiteral("Python 服务端"), QStringLiteral("服务端配置已保存。"));
 }
 

@@ -5,6 +5,7 @@
 
 class QLineEdit;
 class QPushButton;
+class QCheckBox;
 class MainWindow;
 
 /**
@@ -25,6 +26,7 @@ private:
 
     MainWindow* m_main = nullptr;
     QLineEdit* m_serviceEndpointEdit = nullptr;
+    QCheckBox* m_startupBackfillCheck = nullptr;
     QPushButton* m_btnSaveService = nullptr;
     QPushButton* m_btnTestService = nullptr;
     QPushButton* m_btnClose = nullptr;

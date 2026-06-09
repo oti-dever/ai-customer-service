@@ -96,6 +96,7 @@ private:
     void showCenterEmptyState();
     void showRightEmptyState();
     void showStatusMessage(const QString& text, int timeoutMs);
+    void openMessageMedia(const MessageRecord& msg);
     bool applyServiceConversationMutation(const ConversationInfo& conv, bool deleteConversation);
     void updateAggregateAiControlsVisibility();
     void refreshAggregateAiModelButtonUi();

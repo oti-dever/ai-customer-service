@@ -9,6 +9,8 @@
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
 #include "../data/messagesendeventdao.h"
+#include "../data/qianniuconversationdao.h"
+#include "../data/wechatmessagedao.h"
 #include "../services/app/aichatappservice.h"
 #include "../services/app/conversationappservice.h"
 #include "../services/ai/aiprovidercatalog.h"
@@ -20,6 +22,8 @@
 #include "../utils/svgresourcepixmap.h"
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QAudioOutput>
+#include <QMediaPlayer>
 #include <QSettings>
 #include <QSet>
 #include <QStringList>
@@ -29,6 +33,8 @@
 #include <QApplication>
 #include <QCursor>
 #include <QDateTime>
+#include <QDesktopServices>
+#include <QDialog>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -51,7 +57,10 @@
 #include <QPainterPath>
 #include <QPalette>
 #include <QPixmap>
+#include <QRegularExpression>
+#include <QResizeEvent>
 #include <QScrollBar>
+#include <QScrollArea>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSplitter>
@@ -61,8 +70,11 @@
 #include <QTextDocument>
 #include <QTimer>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
+#include <QVideoWidget>
 #include <QShowEvent>
+#include <QSlider>
 #include <QSizePolicy>
 #include <QColor>
 #include <QGridLayout>
@@ -679,21 +691,105 @@ private:
         return (!msg.senderName.isEmpty() || msg.createdAt.isValid() || !msg.originalTimestamp.isEmpty()) ? 18 : 0;
     }
 
-    static QSize messageImageSize(const MessageRecord& msg, int bubbleWidth)
+    static QString normalizedContentType(const MessageRecord& msg)
+    {
+        return msg.contentType.trimmed().toLower();
+    }
+
+    static bool isImageLikeMessage(const MessageRecord& msg)
+    {
+        const QString type = normalizedContentType(msg);
+        return type == QLatin1String("image") || type == QLatin1String("emoji");
+    }
+
+    static bool isEmojiMessage(const MessageRecord& msg)
+    {
+        return normalizedContentType(msg) == QLatin1String("emoji");
+    }
+
+    static bool isFileMessage(const MessageRecord& msg)
+    {
+        return normalizedContentType(msg) == QLatin1String("file");
+    }
+
+    static bool isVideoMessage(const MessageRecord& msg)
+    {
+        return normalizedContentType(msg) == QLatin1String("video");
+    }
+
+    static bool isMediaCardMessage(const MessageRecord& msg)
+    {
+        return isFileMessage(msg) || isVideoMessage(msg);
+    }
+
+    static QStringList contentParts(const MessageRecord& msg)
+    {
+        return msg.content.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+    }
+
+    static QString mediaTitle(const MessageRecord& msg)
+    {
+        const QStringList parts = contentParts(msg);
+        if (isFileMessage(msg) && parts.size() >= 2)
+            return parts.at(1);
+        if (isVideoMessage(msg))
+            return QStringLiteral("视频");
+        const QFileInfo info(msg.contentImagePath);
+        if (info.exists() && !info.fileName().isEmpty())
+            return info.fileName();
+        if (!msg.content.trimmed().isEmpty())
+            return msg.content.trimmed();
+        return isFileMessage(msg) ? QStringLiteral("文件") : QStringLiteral("视频");
+    }
+
+    static QString mediaDetail(const MessageRecord& msg)
+    {
+        const QStringList parts = contentParts(msg);
+        if (isFileMessage(msg) && parts.size() >= 3) {
+            QStringList detail = parts.mid(2);
+            return detail.join(QStringLiteral(" "));
+        }
+        if (isVideoMessage(msg) && parts.size() >= 2)
+            return parts.mid(1).join(QStringLiteral(" "));
+        const QFileInfo info(msg.contentImagePath);
+        if (info.exists() && info.isFile()) {
+            const qint64 bytes = info.size();
+            if (bytes >= 1024 * 1024)
+                return QStringLiteral("%1 MB").arg(QString::number(bytes / 1024.0 / 1024.0, 'f', 1));
+            if (bytes >= 1024)
+                return QStringLiteral("%1 KB").arg(QString::number(bytes / 1024.0, 'f', 1));
+        }
+        return msg.content.trimmed();
+    }
+
+    static QPixmap loadPreviewPixmap(const MessageRecord& msg)
     {
         if (msg.contentImagePath.isEmpty() || !QFile::exists(msg.contentImagePath))
             return {};
         QPixmap pm(msg.contentImagePath);
+        return pm.isNull() ? QPixmap() : pm;
+    }
+
+    static QSize messageImageSize(const MessageRecord& msg, int bubbleWidth)
+    {
+        if (!isImageLikeMessage(msg))
+            return {};
+        QPixmap pm = loadPreviewPixmap(msg);
         if (pm.isNull())
             return {};
-        const int maxW = qMin(336, qMax(1, bubbleWidth - 24));
-        if (pm.width() <= maxW)
-            return pm.size();
-        return { maxW, qMax(1, qRound(pm.height() * (qreal(maxW) / qreal(pm.width())))) };
+        const int maxW = isEmojiMessage(msg) ? qMin(180, qMax(1, bubbleWidth - 24))
+                                             : qMin(336, qMax(1, bubbleWidth - 24));
+        const int maxH = isEmojiMessage(msg) ? 180 : 260;
+        const QSize bounded = pm.size().scaled(maxW, maxH, Qt::KeepAspectRatio);
+        return { qMax(1, bounded.width()), qMax(1, bounded.height()) };
     }
 
     static QString messageDisplayText(const MessageRecord& msg)
     {
+        if (isMediaCardMessage(msg))
+            return {};
+        if (isImageLikeMessage(msg) && !loadPreviewPixmap(msg).isNull())
+            return {};
         if (!msg.content.trimmed().isEmpty())
             return msg.content;
         if (msg.contentImagePath.isEmpty())
@@ -708,7 +804,7 @@ private:
 
     static bool messageDisplayTextIsHint(const MessageRecord& msg)
     {
-        return msg.content.trimmed().isEmpty();
+        return !isMediaCardMessage(msg) && msg.content.trimmed().isEmpty();
     }
 
     static int textHeightForWidth(const QString& text, int width, const QFont& font)
@@ -731,6 +827,11 @@ private:
 
     static int messageBubbleWidth(const MessageRecord& msg, int bubbleMax, const QFont& bodyFont)
     {
+        if (isFileMessage(msg))
+            return qMin(bubbleMax, qMax(240, qMin(320, bubbleMax)));
+        if (isVideoMessage(msg))
+            return qMin(bubbleMax, qMax(220, qMin(300, bubbleMax)));
+
         const int innerMax = qMax(1, bubbleMax - 24);
         const QString displayText = messageDisplayText(msg);
         const QSize imageSize = messageImageSize(msg, bubbleMax);
@@ -744,10 +845,19 @@ private:
     {
         const QString displayText = messageDisplayText(msg);
         const QSize imageSize = messageImageSize(msg, bubbleWidth);
-        const int textH = textHeightForWidth(displayText, bubbleWidth - 24, bodyFont);
+        if (isFileMessage(msg))
+            return (msg.direction == QLatin1String("out") ? 84 : 76)
+                   + messageStatusBlockHeight(msg, statusFont);
+        if (isVideoMessage(msg)) {
+            const QPixmap preview = loadPreviewPixmap(msg);
+            const int previewH = preview.isNull() ? 112 : 150;
+            return previewH + 44 + messageStatusBlockHeight(msg, statusFont);
+        }
+
+        const int textH = displayText.isEmpty() ? 0 : textHeightForWidth(displayText, bubbleWidth - 24, bodyFont);
         int h = 8;
         if (imageSize.height() > 0)
-            h += imageSize.height() + 6;
+            h += imageSize.height() + (displayText.isEmpty() ? 0 : 6);
         h += textH;
         if (msg.direction == QLatin1String("out"))
             h += messageStatusBlockHeight(msg, statusFont);
@@ -837,6 +947,15 @@ private:
                              const MessageRecord& msg, bool outgoing,
                              const QFont& bodyFont, const QFont& statusFont) const
     {
+        if (isFileMessage(msg)) {
+            paintFileCard(painter, bubbleRect, bubbleW, msg, outgoing, bodyFont, statusFont);
+            return;
+        }
+        if (isVideoMessage(msg)) {
+            paintVideoCard(painter, bubbleRect, bubbleW, msg, outgoing, bodyFont, statusFont);
+            return;
+        }
+
         int contentY = bubbleRect.top() + 8;
         const QSize imageSize = messageImageSize(msg, bubbleW);
         if (imageSize.height() > 0) {
@@ -857,6 +976,92 @@ private:
         painter->drawText(textRect,
                           Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap | Qt::TextExpandTabs,
                           messageDisplayText(msg));
+    }
+
+    void paintFileCard(QPainter* painter, const QRect& bubbleRect, int bubbleW,
+                       const MessageRecord& msg, bool outgoing,
+                       const QFont& bodyFont, const QFont& statusFont) const
+    {
+        const QRect contentRect = bubbleRect.adjusted(12, 10, -12, -(outgoing ? messageStatusBlockHeight(msg, statusFont) + 7 : 10));
+        const QRect iconRect(contentRect.left(), contentRect.top() + 4, 38, 44);
+
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(outgoing ? QColor(QStringLiteral("#DFF7FF")) : QColor(QStringLiteral("#E0F2FE")));
+        painter->drawRoundedRect(iconRect, 6, 6);
+        painter->setBrush(outgoing ? QColor(QStringLiteral("#0EA5E9")) : QColor(QStringLiteral("#0284C7")));
+        painter->drawRect(QRect(iconRect.left() + 8, iconRect.top() + 10, iconRect.width() - 16, 4));
+        painter->drawRect(QRect(iconRect.left() + 8, iconRect.top() + 20, iconRect.width() - 16, 4));
+        painter->drawRect(QRect(iconRect.left() + 8, iconRect.top() + 30, iconRect.width() - 22, 4));
+
+        const QRect textRect(iconRect.right() + 12, contentRect.top(),
+                             qMax(1, contentRect.right() - iconRect.right() - 12),
+                             contentRect.height());
+        QFont titleFont(bodyFont);
+        titleFont.setBold(true);
+        painter->setFont(titleFont);
+        painter->setPen(outgoing ? QColor(QStringLiteral("#FFFFFF")) : QColor(QStringLiteral("#111827")));
+        const QFontMetrics titleFm(titleFont);
+        painter->drawText(QRect(textRect.left(), textRect.top() + 2, textRect.width(), titleFm.height() + 2),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          titleFm.elidedText(mediaTitle(msg), Qt::ElideMiddle, textRect.width()));
+
+        const QString detail = mediaDetail(msg);
+        if (!detail.isEmpty()) {
+            painter->setFont(statusFont);
+            painter->setPen(outgoing ? QColor(QStringLiteral("#E0F2FE")) : QColor(QStringLiteral("#6B7280")));
+            const QFontMetrics detailFm(statusFont);
+            painter->drawText(QRect(textRect.left(), textRect.top() + titleFm.height() + 8,
+                                    textRect.width(), detailFm.height() + 2),
+                              Qt::AlignLeft | Qt::AlignVCenter,
+                              detailFm.elidedText(detail, Qt::ElideRight, textRect.width()));
+        }
+    }
+
+    void paintVideoCard(QPainter* painter, const QRect& bubbleRect, int bubbleW,
+                        const MessageRecord& msg, bool outgoing,
+                        const QFont& bodyFont, const QFont& statusFont) const
+    {
+        const int statusReserve = outgoing ? messageStatusBlockHeight(msg, statusFont) : 0;
+        const QRect previewRect = bubbleRect.adjusted(10, 10, -10, -(44 + statusReserve));
+        QPixmap preview = loadPreviewPixmap(msg);
+
+        painter->setPen(Qt::NoPen);
+        if (!preview.isNull()) {
+            preview = preview.scaled(previewRect.size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+            const QRect src((preview.width() - previewRect.width()) / 2,
+                            (preview.height() - previewRect.height()) / 2,
+                            previewRect.width(),
+                            previewRect.height());
+            painter->drawPixmap(previewRect, preview, src);
+            painter->fillRect(previewRect, QColor(17, 24, 39, 80));
+        } else {
+            painter->setBrush(outgoing ? QColor(QStringLiteral("#DFF7FF")) : QColor(QStringLiteral("#F3F4F6")));
+            painter->drawRoundedRect(previewRect, 8, 8);
+        }
+
+        const QPoint center = previewRect.center();
+        QPolygon play;
+        play << QPoint(center.x() - 8, center.y() - 12)
+             << QPoint(center.x() - 8, center.y() + 12)
+             << QPoint(center.x() + 14, center.y());
+        painter->setBrush(!preview.isNull() || outgoing ? QColor(QStringLiteral("#FFFFFF"))
+                                                         : QColor(QStringLiteral("#0EA5E9")));
+        painter->drawPolygon(play);
+
+        const QRect textRect(bubbleRect.left() + 12, previewRect.bottom() + 6,
+                             bubbleW - 24, 32);
+        QFont titleFont(bodyFont);
+        titleFont.setBold(true);
+        painter->setFont(titleFont);
+        painter->setPen(outgoing ? QColor(QStringLiteral("#FFFFFF")) : QColor(QStringLiteral("#111827")));
+        const QFontMetrics titleFm(titleFont);
+        const QString detail = mediaDetail(msg);
+        QString title = mediaTitle(msg);
+        if (!detail.isEmpty() && detail != title)
+            title += QStringLiteral("  ") + detail;
+        painter->drawText(textRect,
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          titleFm.elidedText(title, Qt::ElideRight, textRect.width()));
     }
 
     void paintSendStatus(QPainter* painter, const QRect& bubbleRect, int bubbleW,
@@ -984,6 +1189,273 @@ void showAggregateWarning(QWidget* parent, const QString& title, const QString& 
     box.exec();
 }
 
+bool pythonServiceStartupBackfillEnabled()
+{
+    QSettings settings = AppSettings::create();
+    return settings.value(QStringLiteral("pythonService/startupBackfillEnabled"), false).toBool();
+}
+
+bool isImageFilePath(const QString& path)
+{
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    return suffix == QLatin1String("png")
+        || suffix == QLatin1String("jpg")
+        || suffix == QLatin1String("jpeg")
+        || suffix == QLatin1String("webp")
+        || suffix == QLatin1String("bmp")
+        || suffix == QLatin1String("gif");
+}
+
+bool openLocalFileWithDefaultApp(QWidget* parent, const QString& path, const QString& failureTitle)
+{
+    if (path.trimmed().isEmpty() || !QFile::exists(path)) {
+        showAggregateWarning(parent, failureTitle, QStringLiteral("文件不存在或已被移动。"));
+        return false;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        showAggregateWarning(parent, failureTitle, QStringLiteral("无法打开该文件，请检查系统默认打开程序。"));
+        return false;
+    }
+    return true;
+}
+
+class ImagePreviewDialog final : public QDialog
+{
+public:
+    explicit ImagePreviewDialog(const QString& imagePath, QWidget* parent = nullptr)
+        : QDialog(parent)
+        , m_imagePath(imagePath)
+    {
+        const QString fileName = QFileInfo(imagePath).fileName();
+        setWindowTitle(fileName.isEmpty() ? QStringLiteral("图片预览") : fileName);
+        resize(860, 620);
+        setMinimumSize(420, 320);
+
+        m_original = QPixmap(imagePath);
+
+        auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(12, 12, 12, 12);
+        root->setSpacing(10);
+
+        auto* toolbar = new QHBoxLayout();
+        toolbar->setContentsMargins(0, 0, 0, 0);
+        toolbar->setSpacing(8);
+
+        auto* fitBtn = new QToolButton(this);
+        fitBtn->setText(QStringLiteral("适配"));
+        auto* actualBtn = new QToolButton(this);
+        actualBtn->setText(QStringLiteral("1:1"));
+        auto* zoomOutBtn = new QToolButton(this);
+        zoomOutBtn->setText(QStringLiteral("-"));
+        auto* zoomInBtn = new QToolButton(this);
+        zoomInBtn->setText(QStringLiteral("+"));
+        auto* openBtn = new QToolButton(this);
+        openBtn->setText(QStringLiteral("系统打开"));
+        auto* closeBtn = new QToolButton(this);
+        closeBtn->setText(QStringLiteral("关闭"));
+
+        toolbar->addWidget(fitBtn);
+        toolbar->addWidget(actualBtn);
+        toolbar->addWidget(zoomOutBtn);
+        toolbar->addWidget(zoomInBtn);
+        toolbar->addStretch(1);
+        toolbar->addWidget(openBtn);
+        toolbar->addWidget(closeBtn);
+        root->addLayout(toolbar);
+
+        m_scrollArea = new QScrollArea(this);
+        m_scrollArea->setWidgetResizable(false);
+        m_scrollArea->setAlignment(Qt::AlignCenter);
+        m_scrollArea->setFrameShape(QFrame::NoFrame);
+        m_imageLabel = new QLabel(m_scrollArea);
+        m_imageLabel->setAlignment(Qt::AlignCenter);
+        m_scrollArea->setWidget(m_imageLabel);
+        root->addWidget(m_scrollArea, 1);
+
+        connect(fitBtn, &QToolButton::clicked, this, [this]() { fitToWindow(); });
+        connect(actualBtn, &QToolButton::clicked, this, [this]() {
+            m_fitMode = false;
+            m_scale = 1.0;
+            updatePixmap();
+        });
+        connect(zoomOutBtn, &QToolButton::clicked, this, [this]() {
+            m_fitMode = false;
+            m_scale = qMax<qreal>(0.1, m_scale * 0.8);
+            updatePixmap();
+        });
+        connect(zoomInBtn, &QToolButton::clicked, this, [this]() {
+            m_fitMode = false;
+            m_scale = qMin<qreal>(8.0, m_scale * 1.25);
+            updatePixmap();
+        });
+        connect(openBtn, &QToolButton::clicked, this, [this]() {
+            openLocalFileWithDefaultApp(this, m_imagePath, QStringLiteral("打开图片失败"));
+        });
+        connect(closeBtn, &QToolButton::clicked, this, &QDialog::accept);
+
+        if (m_original.isNull()) {
+            m_imageLabel->setText(QStringLiteral("图片不可预览"));
+            m_imageLabel->setMinimumSize(360, 220);
+        } else {
+            m_fitMode = true;
+            QTimer::singleShot(0, this, [this]() { fitToWindow(); });
+        }
+    }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QDialog::resizeEvent(event);
+        if (m_fitMode)
+            fitToWindow();
+    }
+
+private:
+    void fitToWindow()
+    {
+        if (m_original.isNull() || !m_scrollArea)
+            return;
+        m_fitMode = true;
+        const QSize viewport = m_scrollArea->viewport()->size();
+        const QSize fitted = m_original.size().scaled(qMax(1, viewport.width() - 8),
+                                                      qMax(1, viewport.height() - 8),
+                                                      Qt::KeepAspectRatio);
+        m_scale = qMin(qreal(fitted.width()) / qreal(qMax(1, m_original.width())),
+                       qreal(fitted.height()) / qreal(qMax(1, m_original.height())));
+        updatePixmap();
+    }
+
+    void updatePixmap()
+    {
+        if (m_original.isNull() || !m_imageLabel)
+            return;
+        const QSize target(qMax(1, qRound(m_original.width() * m_scale)),
+                           qMax(1, qRound(m_original.height() * m_scale)));
+        m_imageLabel->setPixmap(m_original.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        m_imageLabel->resize(target);
+    }
+
+    QString m_imagePath;
+    QPixmap m_original;
+    QLabel* m_imageLabel = nullptr;
+    QScrollArea* m_scrollArea = nullptr;
+    qreal m_scale = 1.0;
+    bool m_fitMode = false;
+};
+
+QString mediaTimeText(qint64 ms)
+{
+    const qint64 totalSeconds = qMax<qint64>(0, ms / 1000);
+    return QStringLiteral("%1:%2")
+        .arg(totalSeconds / 60)
+        .arg(totalSeconds % 60, 2, 10, QLatin1Char('0'));
+}
+
+class VideoPreviewDialog final : public QDialog
+{
+public:
+    explicit VideoPreviewDialog(const QString& videoPath, QWidget* parent = nullptr)
+        : QDialog(parent)
+        , m_videoPath(videoPath)
+    {
+        const QString fileName = QFileInfo(videoPath).fileName();
+        setWindowTitle(fileName.isEmpty() ? QStringLiteral("视频预览") : fileName);
+        resize(860, 620);
+        setMinimumSize(420, 320);
+
+        auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(12, 12, 12, 12);
+        root->setSpacing(10);
+
+        m_videoWidget = new QVideoWidget(this);
+        m_videoWidget->setMinimumSize(360, 220);
+        root->addWidget(m_videoWidget, 1);
+
+        auto* controls = new QHBoxLayout();
+        controls->setContentsMargins(0, 0, 0, 0);
+        controls->setSpacing(8);
+
+        m_playButton = new QToolButton(this);
+        m_playButton->setText(QStringLiteral("播放"));
+        m_positionSlider = new QSlider(Qt::Horizontal, this);
+        m_positionSlider->setRange(0, 0);
+        m_timeLabel = new QLabel(QStringLiteral("0:00 / 0:00"), this);
+        auto* openButton = new QToolButton(this);
+        openButton->setText(QStringLiteral("系统打开"));
+        auto* closeButton = new QToolButton(this);
+        closeButton->setText(QStringLiteral("关闭"));
+
+        controls->addWidget(m_playButton);
+        controls->addWidget(m_positionSlider, 1);
+        controls->addWidget(m_timeLabel);
+        controls->addWidget(openButton);
+        controls->addWidget(closeButton);
+        root->addLayout(controls);
+
+        m_player = new QMediaPlayer(this);
+        m_audioOutput = new QAudioOutput(this);
+        m_audioOutput->setVolume(0.7);
+        m_player->setAudioOutput(m_audioOutput);
+        m_player->setVideoOutput(m_videoWidget);
+        m_player->setSource(QUrl::fromLocalFile(videoPath));
+
+        connect(m_playButton, &QToolButton::clicked, this, [this]() {
+            if (m_player->playbackState() == QMediaPlayer::PlayingState)
+                m_player->pause();
+            else
+                m_player->play();
+        });
+        connect(m_player, &QMediaPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState state) {
+            m_playButton->setText(state == QMediaPlayer::PlayingState ? QStringLiteral("暂停") : QStringLiteral("播放"));
+        });
+        connect(m_player, &QMediaPlayer::durationChanged, this, [this](qint64 duration) {
+            m_durationMs = qMax<qint64>(0, duration);
+            m_positionSlider->setRange(0, qMax(0, int(m_durationMs / 1000)));
+            updateTimeLabel(m_player->position());
+        });
+        connect(m_player, &QMediaPlayer::positionChanged, this, [this](qint64 position) {
+            if (!m_sliderPressed)
+                m_positionSlider->setValue(qBound(0, int(position / 1000), m_positionSlider->maximum()));
+            updateTimeLabel(position);
+        });
+        connect(m_positionSlider, &QSlider::sliderPressed, this, [this]() { m_sliderPressed = true; });
+        connect(m_positionSlider, &QSlider::sliderReleased, this, [this]() {
+            m_sliderPressed = false;
+            m_player->setPosition(qint64(m_positionSlider->value()) * 1000);
+        });
+        connect(m_positionSlider, &QSlider::sliderMoved, this, [this](int value) {
+            updateTimeLabel(qint64(value) * 1000);
+        });
+        connect(openButton, &QToolButton::clicked, this, [this]() {
+            openLocalFileWithDefaultApp(this, m_videoPath, QStringLiteral("打开视频失败"));
+        });
+        connect(closeButton, &QToolButton::clicked, this, &QDialog::accept);
+    }
+
+    ~VideoPreviewDialog() override
+    {
+        if (m_player)
+            m_player->stop();
+    }
+
+private:
+    void updateTimeLabel(qint64 position)
+    {
+        if (m_timeLabel)
+            m_timeLabel->setText(QStringLiteral("%1 / %2").arg(mediaTimeText(position), mediaTimeText(m_durationMs)));
+    }
+
+    QString m_videoPath;
+    QMediaPlayer* m_player = nullptr;
+    QAudioOutput* m_audioOutput = nullptr;
+    QVideoWidget* m_videoWidget = nullptr;
+    QToolButton* m_playButton = nullptr;
+    QSlider* m_positionSlider = nullptr;
+    QLabel* m_timeLabel = nullptr;
+    qint64 m_durationMs = 0;
+    bool m_sliderPressed = false;
+};
+
 bool handleAggregateBuildFailure(QWidget* parent,
                                  const AggregateAiBuiltRequest& built,
                                  bool silent,
@@ -1049,7 +1521,7 @@ AggregateChatForm::AggregateChatForm(const QString& loginUsername, QWidget* pare
         auto& ipc = Ipc::IpcService::instance();
         m_pythonServiceAvailable = ipc.isServiceAvailable();
         refreshPlatformListenStateFromService();
-        if (m_pythonServiceAvailable)
+        if (m_pythonServiceAvailable && pythonServiceStartupBackfillEnabled())
             backfillFromPythonService();
     });
     QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
@@ -1180,6 +1652,10 @@ void AggregateChatForm::setupStyles()
 
 void AggregateChatForm::backfillFromPythonService()
 {
+    if (!pythonServiceStartupBackfillEnabled()) {
+        qInfo() << "[AggregateChatForm] python service startup backfill disabled by settings";
+        return;
+    }
     if (m_pythonBackfillInProgress)
         return;
 
@@ -1453,7 +1929,7 @@ void AggregateChatForm::connectSignals()
     connect(&ipc, &Ipc::IpcService::serviceStatusChanged, this, [this](bool available) {
         m_pythonServiceAvailable = available;
         refreshPlatformListenStateFromService();
-        if (available)
+        if (available && pythonServiceStartupBackfillEnabled())
             backfillFromPythonService();
     });
 
@@ -1996,6 +2472,10 @@ QWidget* AggregateChatForm::buildCenterPanel()
         vp->setObjectName(QStringLiteral("messageScrollViewport"));
     if (QWidget* vp = m_messageView->viewport())
         vp->setAutoFillBackground(false);
+    connect(m_messageView, &QListView::clicked, this, [this](const QModelIndex& index) {
+        const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
+        openMessageMedia(msg);
+    });
 
     m_chatInputPanel = new QWidget(m_chatInputOverlayHost);
     m_chatInputPanel->setObjectName(QStringLiteral("aggregateChatInputPanel"));
@@ -3000,12 +3480,40 @@ void AggregateChatForm::applyCacheSnapshotToLocalCache(const QJsonObject& snapsh
             conversationId,
             keepPlatformMessageIds,
             keepClientMessageIds);
+        const QString conversationPlatform = conversation.value(QStringLiteral("platform")).toString().trimmed().toLower();
+        const QString accountId = conversation.value(QStringLiteral("account_id")).toString().trimmed();
+        const QString displayName = conversation.value(QStringLiteral("customer_name")).toString().trimmed();
         for (const QJsonValue& messageValue : messages) {
             const QJsonObject message = messageValue.toObject();
             if (message.isEmpty())
                 continue;
-            if (messageDao.upsertSnapshotCacheMessage(conversationId, message) > 0)
+            const int messageId = messageDao.upsertSnapshotCacheMessage(conversationId, message);
+            if (messageId > 0) {
                 ++appliedMessages;
+                if (conversationPlatform == QLatin1String("wechat")) {
+                    WechatMessageDao wechatDao;
+                    wechatDao.createMessageExtension(
+                        messageId,
+                        conversationId,
+                        accountId,
+                        platformConversationId,
+                        displayName,
+                        message.value(QStringLiteral("platform_message_id")).toString(
+                            message.value(QStringLiteral("platform_msg_id")).toString()),
+                        message);
+                } else if (conversationPlatform == QLatin1String("qianniu")) {
+                    QianniuConversationDao qianniuDao;
+                    qianniuDao.createMessageExtension(
+                        messageId,
+                        conversationId,
+                        accountId,
+                        platformConversationId,
+                        displayName,
+                        message.value(QStringLiteral("platform_message_id")).toString(
+                            message.value(QStringLiteral("platform_msg_id")).toString()),
+                        message);
+                }
+            }
         }
     }
 
@@ -3614,6 +4122,58 @@ void AggregateChatForm::showStatusMessage(const QString& text, int timeoutMs)
                 m_statusLabel->setVisible(false);
             }
         });
+    }
+}
+
+void AggregateChatForm::openMessageMedia(const MessageRecord& msg)
+{
+    const QString type = msg.contentType.trimmed().toLower();
+    if (type != QLatin1String("image")
+        && type != QLatin1String("emoji")
+        && type != QLatin1String("file")
+        && type != QLatin1String("video")) {
+        return;
+    }
+
+    const QString path = msg.contentImagePath.trimmed();
+    if (path.isEmpty() || !QFile::exists(path)) {
+        showAggregateWarning(this, QStringLiteral("媒体不可用"), QStringLiteral("本地媒体文件不存在或已被移动。"));
+        return;
+    }
+
+    const bool imagePath = isImageFilePath(path);
+    if (type == QLatin1String("image") || type == QLatin1String("emoji")) {
+        if (!imagePath) {
+            showAggregateWarning(this, QStringLiteral("图片不可预览"), QStringLiteral("该消息没有可预览的图片文件。"));
+            return;
+        }
+        ImagePreviewDialog dlg(path, this);
+        dlg.exec();
+        return;
+    }
+
+    if (type == QLatin1String("file")) {
+        if (imagePath) {
+            ImagePreviewDialog dlg(path, this);
+            dlg.setWindowTitle(QStringLiteral("文件截图证据"));
+            dlg.exec();
+            showStatusMessage(QStringLiteral("当前仅有文件消息截图证据，未获取到原始文件"), 5000);
+            return;
+        }
+        openLocalFileWithDefaultApp(this, path, QStringLiteral("打开文件失败"));
+        return;
+    }
+
+    if (type == QLatin1String("video")) {
+        if (imagePath) {
+            ImagePreviewDialog dlg(path, this);
+            dlg.setWindowTitle(QStringLiteral("视频截图证据"));
+            dlg.exec();
+            showStatusMessage(QStringLiteral("当前仅有视频消息截图证据，未获取到可播放视频"), 5000);
+            return;
+        }
+        VideoPreviewDialog dlg(path, this);
+        dlg.exec();
     }
 }
 
