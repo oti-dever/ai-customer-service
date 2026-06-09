@@ -1,6 +1,7 @@
 ﻿#include "messagerouter.h"
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
+#include "../data/qianniuconversationdao.h"
 #include "../data/wechatmessagedao.h"
 #include "../services/platforms/iplatformadapter.h"
 #include "types.h"
@@ -40,6 +41,7 @@ Models::Message MessageRouter::createUnifiedMessage(const PlatformMessage& msg, 
     unified.evidenceRef = msg.contentImagePath;
     unified.metadata.insert(QStringLiteral("senderName"), msg.senderName);
     unified.metadata.insert(QStringLiteral("originalTimestamp"), msg.originalTimestamp);
+    unified.metadata.insert(QStringLiteral("payload"), msg.metadata);
     return unified;
 }
 
@@ -196,6 +198,14 @@ void MessageRouter::onConversationObserved(const ConversationInfo& conv)
     const auto existing = dao.findByPlatformId(conv.platform, conv.platformConversationId);
     const int id = dao.upsertObservedCacheConversation(unified);
     if (id > 0) {
+        if (conv.platform == QLatin1String("qianniu")) {
+            QianniuConversationDao qianniuDao;
+            qianniuDao.upsertConversation(
+                id,
+                conv.accountId,
+                conv.platformConversationId,
+                conv.customerName);
+        }
         auto persisted = dao.findById(id);
         if (persisted) {
             if (!existing) {
@@ -308,6 +318,14 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
             msg.platformConversationId,
             msg.customerName,
             msg.metadata);
+    } else if (msg.platform == QLatin1String("qianniu")) {
+        QianniuConversationDao qianniuDao;
+        qianniuDao.upsertConversation(
+            convId,
+            QString(),
+            msg.platformConversationId,
+            msg.customerName,
+            msg.metadata);
     }
     stageTimer.restart();
     convDao.updateLastMessage(convId, msg.content, now);
@@ -324,6 +342,16 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
         if (msg.platform == QLatin1String("wechat")) {
             WechatMessageDao wechatDao;
             wechatDao.createMessageExtension(
+                msgId,
+                convId,
+                QString(),
+                msg.platformConversationId,
+                msg.customerName,
+                msg.platformMsgId,
+                msg.metadata);
+        } else if (msg.platform == QLatin1String("qianniu")) {
+            QianniuConversationDao qianniuDao;
+            qianniuDao.createMessageExtension(
                 msgId,
                 convId,
                 QString(),
@@ -484,6 +512,19 @@ int MessageRouter::ensureConversation(const PlatformMessage& msg)
             if (reopened)
                 emit conversationCreated(*reopened);
         }
+        if (existing->platformConversationId != msg.platformConversationId) {
+            Models::Conversation observedConversation;
+            observedConversation.platformType = Models::platformTypeFromString(msg.platform);
+            observedConversation.platformConversationId = msg.platformConversationId;
+            observedConversation.accountId = msg.platform;
+            observedConversation.title = msg.customerName;
+            observedConversation.status = Models::ConversationStatus::Active;
+            observedConversation.sourceType = Models::sourceTypeFromString(msg.sourceType);
+            observedConversation.confidence = msg.confidence;
+            observedConversation.createdAt = msg.createdAt.isValid() ? msg.createdAt : QDateTime::currentDateTime();
+            observedConversation.updatedAt = observedConversation.createdAt;
+            dao.upsertObservedCacheConversation(observedConversation);
+        }
         return existing->id;
     }
 
@@ -503,6 +544,14 @@ int MessageRouter::ensureConversation(const PlatformMessage& msg)
         if (msg.platform == QLatin1String("wechat")) {
             WechatMessageDao wechatDao;
             wechatDao.upsertConversation(
+                id,
+                msg.platform,
+                msg.platformConversationId,
+                msg.customerName,
+                msg.metadata);
+        } else if (msg.platform == QLatin1String("qianniu")) {
+            QianniuConversationDao qianniuDao;
+            qianniuDao.upsertConversation(
                 id,
                 msg.platform,
                 msg.platformConversationId,

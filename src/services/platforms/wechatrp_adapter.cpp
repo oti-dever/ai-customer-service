@@ -40,6 +40,15 @@ QString normalizedDirection(const QString& direction, const QString& senderRole,
 
     return QStringLiteral("in");
 }
+
+QString displayNameFromConversationKey(const QString& conversationKey)
+{
+    const QString trimmed = conversationKey.trimmed();
+    const int lastSep = trimmed.lastIndexOf(QLatin1Char(':'));
+    if (lastSep >= 0 && lastSep + 1 < trimmed.size())
+        return trimmed.mid(lastSep + 1).trimmed();
+    return trimmed;
+}
 } // namespace
 
 WechatRPAAdapter::WechatRPAAdapter(QObject* parent)
@@ -124,9 +133,10 @@ void WechatRPAAdapter::sendMessage(const QString& conversationId, const QString&
     request.taskId = clientMessageId.isEmpty()
         ? QUuid::createUuid().toString(QUuid::WithoutBraces)
         : clientMessageId;
+    const QString displayName = displayNameFromConversationKey(conversationId);
     request.parameters.insert(QStringLiteral("client_message_id"), request.taskId);
     request.parameters.insert(QStringLiteral("conversation_key"), conversationId);
-    request.parameters.insert(QStringLiteral("display_name"), conversationId);
+    request.parameters.insert(QStringLiteral("display_name"), displayName);
     request.parameters.insert(QStringLiteral("text"), text);
     request.parameters.insert(QStringLiteral("require_target_verification"), true);
     request.parameters.insert(QStringLiteral("prefer_background"), true);
@@ -284,11 +294,13 @@ void WechatRPAAdapter::emitConversationObserved(const QJsonObject& event)
     const QString normalizedConversation = normalizeConversationKey(conversationKey);
     if (normalizedConversation.isEmpty())
         return;
+    const QString displayName = payload.value(QStringLiteral("display_name")).toString(
+        displayNameFromConversationKey(conversationKey));
 
     ConversationInfo info;
     info.platform = platformName();
     info.platformConversationId = normalizedConversation;
-    info.customerName = payload.value(QStringLiteral("display_name")).toString(normalizedConversation);
+    info.customerName = displayName.isEmpty() ? normalizedConversation : displayName;
     info.status = QStringLiteral("active");
     info.accountId = event.value(QStringLiteral("account_id")).toString();
     info.sourceType = payload.value(QStringLiteral("source_type")).toString(QStringLiteral("ui_observed"));
@@ -306,7 +318,13 @@ PlatformMessage WechatRPAAdapter::platformMessageFromEvent(const QJsonObject& ev
     const QJsonObject payload = event.value(QStringLiteral("payload")).toObject();
     const QString conversationKey = event.value(QStringLiteral("conversation_key")).toString();
     const QString normalizedConversation = normalizeConversationKey(conversationKey);
-    const QString displayName = payload.value(QStringLiteral("sender_name")).toString(normalizedConversation);
+    QString displayName = payload.value(QStringLiteral("display_name")).toString().trimmed();
+    if (displayName.isEmpty())
+        displayName = payload.value(QStringLiteral("sender_name")).toString().trimmed();
+    if (displayName.isEmpty())
+        displayName = displayNameFromConversationKey(conversationKey);
+    if (displayName.isEmpty())
+        displayName = normalizedConversation;
     const QString content = payload.value(QStringLiteral("content")).toString();
     const QString rawDirection = payload.value(QStringLiteral("direction")).toString();
     const QString rawSenderRole = payload.value(QStringLiteral("sender_role")).toString();
@@ -349,10 +367,5 @@ PlatformMessage WechatRPAAdapter::platformMessageFromEvent(const QJsonObject& ev
 
 QString WechatRPAAdapter::normalizeConversationKey(const QString& conversationKey) const
 {
-    if (conversationKey.startsWith(QStringLiteral("wechat:"))) {
-        const int lastSep = conversationKey.lastIndexOf(QLatin1Char(':'));
-        if (lastSep >= 0 && lastSep + 1 < conversationKey.size())
-            return conversationKey.mid(lastSep + 1);
-    }
-    return conversationKey;
+    return conversationKey.trimmed();
 }
