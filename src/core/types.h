@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QMetaType>
 #include <QString>
+#include <QVector>
 #include "../models/unifiedmodels.h"
 
 struct PlatformMessage {
@@ -68,6 +69,26 @@ struct MessageRecord {
     QString cacheOrigin = QStringLiteral("legacy_runtime");
 };
 
+enum class OutgoingPartType {
+    Text,
+    Image,
+    Video,
+    File,
+};
+
+struct OutgoingMessagePart {
+    OutgoingPartType type = OutgoingPartType::Text;
+    QString text;
+    QString localPath;
+    QString fileName;
+    qint64 sizeBytes = 0;
+    QString mimeType;
+};
+
+struct OutgoingMessagePayload {
+    QVector<OutgoingMessagePart> parts;
+};
+
 /** 聚合「生成本条回复」：最后一条有效入站文本与可选聊天区截图路径。 */
 struct LatestInboundSnapshot {
     QString content;
@@ -85,5 +106,7 @@ Models::ConversationEvent toMessageObservedEvent(const PlatformMessage& value);
 Q_DECLARE_METATYPE(PlatformMessage)
 Q_DECLARE_METATYPE(ConversationInfo)
 Q_DECLARE_METATYPE(MessageRecord)
+Q_DECLARE_METATYPE(OutgoingMessagePart)
+Q_DECLARE_METATYPE(OutgoingMessagePayload)
 
 #endif // TYPES_H

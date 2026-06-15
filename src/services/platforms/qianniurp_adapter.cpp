@@ -42,6 +42,49 @@ QString normalizedDirection(const QString& direction, const QString& senderRole,
 
     return QStringLiteral("in");
 }
+
+QString displayNameFromConversationKey(const QString& conversationKey)
+{
+    const QString trimmed = conversationKey.trimmed();
+    if (trimmed.startsWith(QStringLiteral("qianniu:"))) {
+        const int lastSep = trimmed.lastIndexOf(QLatin1Char(':'));
+        if (lastSep >= 0 && lastSep + 1 < trimmed.size())
+            return trimmed.mid(lastSep + 1).trimmed();
+    }
+    return trimmed;
+}
+
+QString firstNonEmpty(const QStringList& values)
+{
+    for (const QString& value : values) {
+        const QString trimmed = value.trimmed();
+        if (!trimmed.isEmpty())
+            return trimmed;
+    }
+    return QString();
+}
+
+QString outgoingContentType(const OutgoingMessagePart& part)
+{
+    switch (part.type) {
+    case OutgoingPartType::Image: return QStringLiteral("image");
+    case OutgoingPartType::Video: return QStringLiteral("video");
+    case OutgoingPartType::File: return QStringLiteral("file");
+    case OutgoingPartType::Text:
+    default: return QStringLiteral("text");
+    }
+}
+
+QString outgoingContent(const OutgoingMessagePart& part)
+{
+    if (part.type == OutgoingPartType::Text)
+        return part.text;
+    if (part.type == OutgoingPartType::Image)
+        return QStringLiteral("[图片]");
+    if (part.type == OutgoingPartType::Video)
+        return QStringLiteral("[视频] %1").arg(part.fileName);
+    return QStringLiteral("[文件] %1").arg(part.fileName);
+}
 } // namespace
 
 QianniuRPAAdapter::QianniuRPAAdapter(QObject* parent)
@@ -117,12 +160,23 @@ void QianniuRPAAdapter::stopListening()
 
 void QianniuRPAAdapter::sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId)
 {
+    OutgoingMessagePart part;
+    part.type = OutgoingPartType::Text;
+    part.text = text;
+    sendMessagePart(conversationId, part, clientMessageId);
+}
+
+void QianniuRPAAdapter::sendMessagePart(const QString& conversationId,
+                                        const OutgoingMessagePart& part,
+                                        const QString& clientMessageId)
+{
+    const QString content = outgoingContent(part);
     QElapsedTimer totalTimer;
     totalTimer.start();
     if (m_commandInFlight) {
         qInfo() << "[QianniuRPAAdapter] sendMessage delayed: command already in flight";
-        QTimer::singleShot(200, this, [this, conversationId, text, clientMessageId]() {
-            sendMessage(conversationId, text, clientMessageId);
+        QTimer::singleShot(200, this, [this, conversationId, part, clientMessageId]() {
+            sendMessagePart(conversationId, part, clientMessageId);
         });
         return;
     }
@@ -137,8 +191,13 @@ void QianniuRPAAdapter::sendMessage(const QString& conversationId, const QString
         : clientMessageId;
     request.parameters.insert(QStringLiteral("client_message_id"), request.taskId);
     request.parameters.insert(QStringLiteral("conversation_key"), conversationId);
-    request.parameters.insert(QStringLiteral("display_name"), conversationId);
-    request.parameters.insert(QStringLiteral("text"), text);
+    request.parameters.insert(QStringLiteral("display_name"), displayNameFromConversationKey(conversationId));
+    request.parameters.insert(QStringLiteral("content_type"), outgoingContentType(part));
+    request.parameters.insert(QStringLiteral("text"), part.text);
+    request.parameters.insert(QStringLiteral("file_path"), part.localPath);
+    request.parameters.insert(QStringLiteral("file_name"), part.fileName);
+    request.parameters.insert(QStringLiteral("mime_type"), part.mimeType);
+    request.parameters.insert(QStringLiteral("size_bytes"), double(part.sizeBytes));
     request.parameters.insert(QStringLiteral("confirm_token"), QStringLiteral("manual_confirmed_by_agent"));
 
     QElapsedTimer commandTimer;
@@ -168,8 +227,8 @@ void QianniuRPAAdapter::sendMessage(const QString& conversationId, const QString
             return;
         }
         if (!m_eventSocketConnected) {
-            QTimer::singleShot(300, this, [this, conversationId, text, clientMessageId = request.taskId]() {
-                emit messageSent(conversationId, text, clientMessageId);
+            QTimer::singleShot(300, this, [this, conversationId, content, clientMessageId = request.taskId]() {
+                emit messageSent(conversationId, content, clientMessageId);
             });
         }
         return;
@@ -338,11 +397,16 @@ void QianniuRPAAdapter::emitConversationObserved(const QJsonObject& event)
     const QString normalizedConversation = normalizeConversationKey(conversationKey);
     if (normalizedConversation.isEmpty())
         return;
+    const QString displayName = firstNonEmpty({
+        payload.value(QStringLiteral("display_name")).toString(),
+        payload.value(QStringLiteral("sender_name")).toString(),
+        displayNameFromConversationKey(normalizedConversation),
+    });
 
     ConversationInfo info;
     info.platform = platformName();
     info.platformConversationId = normalizedConversation;
-    info.customerName = payload.value(QStringLiteral("display_name")).toString(normalizedConversation);
+    info.customerName = displayName;
     info.status = QStringLiteral("active");
     info.accountId = event.value(QStringLiteral("account_id")).toString();
     info.sourceType = payload.value(QStringLiteral("source_type")).toString(QStringLiteral("ui_observed"));
@@ -360,7 +424,15 @@ PlatformMessage QianniuRPAAdapter::platformMessageFromEvent(const QJsonObject& e
     const QJsonObject payload = event.value(QStringLiteral("payload")).toObject();
     const QString conversationKey = event.value(QStringLiteral("conversation_key")).toString();
     const QString normalizedConversation = normalizeConversationKey(conversationKey);
-    const QString displayName = payload.value(QStringLiteral("sender_name")).toString(normalizedConversation);
+    const QString conversationDisplayName = firstNonEmpty({
+        payload.value(QStringLiteral("display_name")).toString(),
+        payload.value(QStringLiteral("sender_name")).toString(),
+        displayNameFromConversationKey(normalizedConversation),
+    });
+    const QString senderName = firstNonEmpty({
+        payload.value(QStringLiteral("sender_name")).toString(),
+        conversationDisplayName,
+    });
     const QString content = payload.value(QStringLiteral("content")).toString();
     const QString rawDirection = payload.value(QStringLiteral("direction")).toString();
     const QString rawSenderRole = payload.value(QStringLiteral("sender_role")).toString();
@@ -369,7 +441,7 @@ PlatformMessage QianniuRPAAdapter::platformMessageFromEvent(const QJsonObject& e
     PlatformMessage msg;
     msg.platform = platformName();
     msg.platformConversationId = normalizedConversation;
-    msg.customerName = normalizedConversation;
+    msg.customerName = conversationDisplayName;
     msg.content = content;
     msg.direction = direction;
     msg.sender = msg.direction == QLatin1String("in")
@@ -379,7 +451,7 @@ PlatformMessage QianniuRPAAdapter::platformMessageFromEvent(const QJsonObject& e
     if (!msg.createdAt.isValid())
         msg.createdAt = QDateTime::currentDateTime();
     msg.platformMsgId = payload.value(QStringLiteral("platform_msg_id")).toString();
-    msg.senderName = displayName;
+    msg.senderName = senderName;
     msg.originalTimestamp = payload.value(QStringLiteral("metadata")).toObject().value(QStringLiteral("timestamp")).toString();
     msg.contentImagePath = payload.value(QStringLiteral("evidence_ref")).toString();
     msg.sourceType = payload.value(QStringLiteral("source_type")).toString(QStringLiteral("ui_observed"));
@@ -397,11 +469,6 @@ PlatformMessage QianniuRPAAdapter::platformMessageFromEvent(const QJsonObject& e
 
 QString QianniuRPAAdapter::normalizeConversationKey(const QString& conversationKey) const
 {
-    if (conversationKey.startsWith(QStringLiteral("qianniu:"))) {
-        const int lastSep = conversationKey.lastIndexOf(QLatin1Char(':'));
-        if (lastSep >= 0 && lastSep + 1 < conversationKey.size())
-            return conversationKey.mid(lastSep + 1);
-    }
-    return conversationKey;
+    return conversationKey.trimmed();
 }
 

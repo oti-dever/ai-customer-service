@@ -221,6 +221,52 @@ bool Database::runMigrations()
         "CREATE INDEX IF NOT EXISTS idx_send_events_conv_id ON message_send_events(conversation_id)",
         "CREATE INDEX IF NOT EXISTS idx_send_events_message_id ON message_send_events(message_id)",
 
+        "CREATE TABLE IF NOT EXISTS ai_request_events ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  source TEXT NOT NULL,"
+        "  conversation_id INTEGER,"
+        "  message_id INTEGER,"
+        "  session_model_key TEXT DEFAULT '',"
+        "  model TEXT DEFAULT '',"
+        "  status TEXT NOT NULL DEFAULT 'started',"
+        "  trigger_tag TEXT DEFAULT '',"
+        "  started_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  completed_at DATETIME,"
+        "  duration_ms INTEGER DEFAULT 0,"
+        "  first_token_ms INTEGER DEFAULT 0,"
+        "  output_chars INTEGER DEFAULT 0,"
+        "  error_reason TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
+        "  FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE SET NULL"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_ai_request_events_started_at ON ai_request_events(started_at)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_request_events_session_status "
+        "  ON ai_request_events(session_model_key, status, id)",
+        "CREATE TABLE IF NOT EXISTS ai_request_stage_events ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  request_event_id INTEGER NOT NULL,"
+        "  conversation_id INTEGER NOT NULL,"
+        "  stage TEXT NOT NULL,"
+        "  detail TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(request_event_id) REFERENCES ai_request_events(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_ai_request_stage_events_conv_id "
+        "  ON ai_request_stage_events(conversation_id, id)",
+
+        "CREATE TABLE IF NOT EXISTS conversation_customer_profiles ("
+        "  conversation_id INTEGER PRIMARY KEY,"
+        "  profile_json TEXT NOT NULL DEFAULT '{}',"
+        "  source_model_key TEXT DEFAULT '',"
+        "  source_request_event_id INTEGER,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(source_request_event_id) REFERENCES ai_request_events(id) ON DELETE SET NULL"
+        ")",
+
         "CREATE TABLE IF NOT EXISTS wechat_conversations ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  conversation_id INTEGER NOT NULL UNIQUE,"

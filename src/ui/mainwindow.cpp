@@ -3623,7 +3623,7 @@ void MainWindow::openAggregateChatForm()
         auto* w = new QMainWindow(nullptr);
         w->setAttribute(Qt::WA_DeleteOnClose, true);
         w->setWindowTitle(QStringLiteral("聚合接待"));
-        w->setMinimumSize(1000, 650);
+        w->setMinimumSize(620, 650);
         w->resize(1280, 820);
         m_aggregateReceptionWindow = w;
         m_aggregateChatForm = new AggregateChatForm(m_username, w);

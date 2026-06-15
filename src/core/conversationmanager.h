@@ -29,6 +29,8 @@ public:
 
     void selectConversation(int conversationId);
     void sendMessage(int conversationId, const QString& text, const QString& clientMessageId = QString());
+    void sendMessage(int conversationId, const OutgoingMessagePart& part, const QString& clientMessageId = QString());
+    void sendPayload(int conversationId, const OutgoingMessagePayload& payload);
     void closeConversation(int conversationId);
     bool clearConversationMessages(int conversationId);
     void deleteConversation(int conversationId);

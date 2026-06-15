@@ -51,6 +51,10 @@
         <file>aggregate_reception_icons/deepseek_logo_icon.svg</file>
         <file>aggregate_reception_icons/doubao_logo_icon.svg</file>
         <file>aggregate_reception_icons/tongyi_qianwen_logo_icon.svg</file>
+        <file>aggregate_reception_icons/send_icon.svg</file>
+        <file>aggregate_reception_icons/generate_reply_icon.svg</file>
+        <file>aggregate_reception_icons/turn_on_auto_reply_icon.svg</file>
+        <file>aggregate_reception_icons/stop_auto_reply_icon.svg</file>
         <file>aggregate_reception_icons/customer_default_avatar.png</file>
         <file>question_mark_icon.svg</file>
         <file>bug_log_icon.svg</file>

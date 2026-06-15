@@ -106,10 +106,7 @@ int rowInt(const QSqlQuery& q, const QString& name, int fallback = 0)
 
 QDateTime rowDateTime(const QSqlQuery& q, const QString& name)
 {
-    const QDateTime parsed = rowValue(q, name).toDateTime();
-    if (!parsed.isValid())
-        return parsed;
-    return QDateTime(parsed.date(), parsed.time(), Qt::UTC).toLocalTime();
+    return rowValue(q, name).toDateTime();
 }
 
 int existingSnapshotMessageId(int conversationId,
@@ -166,15 +163,6 @@ QString messageSelectProjection()
 }
 
 } // namespace
-
-/** SQLite DEFAULT CURRENT_TIMESTAMP 为 UTC；Qt 对无时区 DATETIME 常按 LocalTime 解析，会少时区偏移。 */
-static QDateTime messageRowCreatedAtToLocal(const QVariant& v)
-{
-    const QDateTime parsed = v.toDateTime();
-    if (!parsed.isValid())
-        return parsed;
-    return QDateTime(parsed.date(), parsed.time(), Qt::UTC).toLocalTime();
-}
 
 static MessageRecord messageRecordFromQuery(QSqlQuery& q)
 {

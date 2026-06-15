@@ -1,26 +1,31 @@
 #include "aggregatechatform.h"
-#include "foldarrowcombobox.h"
 #include "../core/conversationmanager.h"
 #include "../core/messagerouter.h"
 #include "../ipc/ipcservice.h"
 #include "conversationlistmodel.h"
 #include "messagelistmodel.h"
 #include <QButtonGroup>
+#include "../data/appdatauistatedao.h"
 #include "../data/conversationdao.h"
+#include "../data/airequesteventdao.h"
+#include "../data/customerprofiledao.h"
 #include "../data/messagedao.h"
 #include "../data/messagesendeventdao.h"
 #include "../data/qianniuconversationdao.h"
 #include "../data/wechatmessagedao.h"
 #include "../services/app/aichatappservice.h"
 #include "../services/app/conversationappservice.h"
+#include "../services/app/pythonservicecontroller.h"
 #include "../services/ai/aiprovidercatalog.h"
 #include "../services/ai/aistreamingsession.h"
 #include "../services/platforms/simplatformadapter.h"
 #include "../services/ai/aiprovidercatalog.h"
 #include "../utils/appsettings.h"
 #include "../utils/applystyle.h"
+#include "../utils/runtimemode.h"
 #include "../utils/svgresourcepixmap.h"
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QAudioOutput>
 #include <QMediaPlayer>
@@ -28,17 +33,21 @@
 #include <QSet>
 #include <QStringList>
 #include <algorithm>
+#include <utility>
 #include <QAbstractItemView>
 #include <QStyledItemDelegate>
 #include <QApplication>
+#include <QClipboard>
 #include <QCursor>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QHash>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -47,6 +56,8 @@
 #include <QIcon>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
+#include <QMimeDatabase>
 #include <QMouseEvent>
 #include <QAction>
 #include <QAbstractButton>
@@ -64,6 +75,7 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QStyle>
 #include <QSvgRenderer>
@@ -71,6 +83,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <QVideoWidget>
 #include <QShowEvent>
@@ -83,12 +96,44 @@
 #include <QListWidgetItem>
 #include <QVariantAnimation>
 #include <QEasingCurve>
+#include <functional>
 
 namespace {
 
 /** 右栏「展示模型」图标区，与布局中 model 块一致。 */
 constexpr int kAggregateRightBarModelIconBoxSide = 58;
 constexpr int kAggregateRightBarModelIconDrawSide = 56;
+constexpr int kAggregateConversationPanelDefaultWidth = 248;
+constexpr int kAggregateConversationPanelMinWidth = 236;
+constexpr int kAggregateConversationPanelMaxWidth = 320;
+constexpr int kAggregateConversationPanelHideBreakpoint = 740;
+constexpr int kAggregateConversationPanelShowBreakpoint = 860;
+constexpr int kAggregateConversationPanelCollapseSlop = 2;
+constexpr int kAggregateRightPanelMinWidth = 208;
+constexpr int kAggregateRightPanelPreferredMinWidth = 240;
+constexpr int kAggregateRightPanelMaxWidth = 288;
+constexpr int kAggregateChatWithRightMinWidth = 430;
+constexpr int kAggregateRightPanelAutoHideBreakpoint = 700;
+constexpr int kAggregateMetricSingleColumnBreakpoint = 252;
+
+class ComposeTextEdit final : public QPlainTextEdit
+{
+public:
+    explicit ComposeTextEdit(QWidget* parent = nullptr)
+        : QPlainTextEdit(parent)
+    {
+    }
+
+    std::function<bool(const QMimeData*)> mimeHandler;
+
+protected:
+    void insertFromMimeData(const QMimeData* source) override
+    {
+        if (mimeHandler && mimeHandler(source))
+            return;
+        QPlainTextEdit::insertFromMimeData(source);
+    }
+};
 
 void applySolidBackground(QWidget* widget, const QColor& color)
 {
@@ -101,43 +146,69 @@ void applySolidBackground(QWidget* widget, const QColor& color)
     widget->setAutoFillBackground(true);
 }
 
-QString phaseDisplayName(const QString& phase)
+QString formatProcessingTime(const QDateTime& createdAt)
 {
-    if (phase == QLatin1String("dequeued"))
-        return QStringLiteral("已取出待发");
-    if (phase == QLatin1String("lock_acquired"))
-        return QStringLiteral("已获得窗口锁");
-    if (phase == QLatin1String("lock_timeout"))
-        return QStringLiteral("窗口锁超时");
-    if (phase == QLatin1String("switch_chat"))
-        return QStringLiteral("切换会话");
-    if (phase == QLatin1String("send_text"))
-        return QStringLiteral("输入并发送");
-    if (phase == QLatin1String("receipt_check"))
-        return QStringLiteral("回执校验");
-    if (phase == QLatin1String("receipt_result"))
-        return QStringLiteral("回执结果");
-    if (phase == QLatin1String("send_attempt"))
-        return QStringLiteral("发送尝试");
-    if (phase == QLatin1String("success"))
-        return QStringLiteral("成功");
-    if (phase == QLatin1String("failed"))
-        return QStringLiteral("失败");
-    return phase;
+    return createdAt.isValid()
+        ? createdAt.toString(QStringLiteral("HH:mm:ss"))
+        : QStringLiteral("--:--:--");
 }
 
 QString formatSendEventLine(const MessageSendEventRecord& e)
 {
-    const QString t = e.createdAt.isValid()
-                          ? e.createdAt.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
-                          : QStringLiteral("-");
-    QString detail = e.detail.trimmed();
-    if (detail.size() > 200)
-        detail = detail.left(197) + QStringLiteral("...");
-    return QStringLiteral("[%1] %2 消息#%3 %4")
-        .arg(t, phaseDisplayName(e.phase))
-        .arg(e.messageId)
-        .arg(detail.isEmpty() ? QStringLiteral("-") : detail);
+    QString text;
+    if (e.phase == QLatin1String("send_attempt")) {
+        text = QStringLiteral("正在向客户发送回复");
+    } else if (e.phase == QLatin1String("success")) {
+        text = QStringLiteral("客户平台已确认发送成功");
+    } else if (e.phase == QLatin1String("failed")
+               || e.phase == QLatin1String("lock_timeout")) {
+        text = QStringLiteral("回复发送失败，请检查客户平台");
+    } else if (e.phase == QLatin1String("receipt_result")) {
+        text = e.detail.contains(QStringLiteral("success"), Qt::CaseInsensitive)
+            ? QStringLiteral("客户平台已确认发送成功")
+            : QStringLiteral("正在等待客户平台确认发送结果");
+    }
+    if (text.isEmpty())
+        return QString();
+    return QStringLiteral("%1  %2").arg(formatProcessingTime(e.createdAt), text);
+}
+
+QString formatAiStageEventLine(const AiRequestStageEventRecord& e)
+{
+    QString text;
+    const QString detail = e.detail.trimmed();
+    if (e.stage == QLatin1String("manual_started"))
+        text = QStringLiteral("开始生成回复草稿");
+    else if (e.stage == QLatin1String("auto_started"))
+        text = QStringLiteral("开始生成自动回复");
+    else if (e.stage == QLatin1String("profile_started"))
+        text = QStringLiteral("开始整理客户信息");
+    else if (e.stage == QLatin1String("context_ready"))
+        text = QStringLiteral("已整理当前会话的最近聊天记录");
+    else if (e.stage == QLatin1String("request_sent"))
+        text = detail.isEmpty() ? QStringLiteral("正在请求 AI 模型")
+                                : QStringLiteral("正在请求 %1").arg(detail);
+    else if (e.stage == QLatin1String("first_token"))
+        text = detail.isEmpty() ? QStringLiteral("模型开始返回回复内容")
+                                : QStringLiteral("模型开始返回内容，等待 %1").arg(detail);
+    else if (e.stage == QLatin1String("completed"))
+        text = detail.isEmpty() ? QStringLiteral("回复内容已生成")
+                                : QStringLiteral("回复内容已生成，%1").arg(detail);
+    else if (e.stage == QLatin1String("profile_completed"))
+        text = detail.isEmpty() ? QStringLiteral("客户信息已整理完成")
+                                : QStringLiteral("客户信息已整理完成，%1").arg(detail);
+    else if (e.stage == QLatin1String("failed"))
+        text = detail.isEmpty() ? QStringLiteral("未能生成回复")
+                                : QStringLiteral("未能生成回复：%1").arg(detail);
+    else if (e.stage == QLatin1String("canceled"))
+        text = QStringLiteral("AI 生成已由用户停止");
+    else if (e.stage == QLatin1String("send_submitted"))
+        text = QStringLiteral("自动回复已提交发送");
+    else if (e.stage == QLatin1String("profile_saved"))
+        text = QStringLiteral("客户信息已更新");
+    if (text.isEmpty())
+        return QString();
+    return QStringLiteral("%1  %2").arg(formatProcessingTime(e.createdAt), text);
 }
 
 MessageRecord messageRecordFromUnified(const Models::Message& msg)
@@ -1156,10 +1227,6 @@ static QPixmap roundedAggregateAvatarPixmap(const QPixmap& source, int logicalSi
     return out;
 }
 
-/** 与 `m_modeCombo` 项顺序一致：0 人工接待，1 AI 辅助，2 AI 自动回复（全自动发送能力待实现）。 */
-constexpr int kAggregateModeIndexAiAssist = 1;
-constexpr int kAggregateModeIndexAutoReply = 2;
-
 QString aggregateAiMvpSystemPrompt()
 {
     return QStringLiteral(
@@ -1173,6 +1240,55 @@ QString aggregateAiMvpSystemPrompt()
 static QString aggregateModelMenuLabel(const QString& sessionModelKey)
 {
     return aiPresetLabel(sessionModelKey);
+}
+
+QString aggregateMetricDurationLabel(int durationMs)
+{
+    if (durationMs <= 0)
+        return QStringLiteral("—");
+    if (durationMs < 1000)
+        return QStringLiteral("%1ms").arg(durationMs);
+    return QStringLiteral("%1s").arg(QString::number(durationMs / 1000.0, 'f', 1));
+}
+
+QStringList jsonArrayStrings(const QJsonObject& object, const QString& key, int maxItems = 3)
+{
+    QStringList out;
+    const QJsonArray arr = object.value(key).toArray();
+    for (const QJsonValue& value : arr) {
+        const QString text = value.toString().trimmed();
+        if (!text.isEmpty())
+            out.append(text);
+        if (out.size() >= maxItems)
+            break;
+    }
+    return out;
+}
+
+QString customerProfileDisplayText(const QJsonObject& profile, const QDateTime& updatedAt)
+{
+    QStringList lines;
+    const QString summary = profile.value(QStringLiteral("summary")).toString().trimmed();
+    const QString currentNeed = profile.value(QStringLiteral("current_need")).toString().trimmed();
+    if (!summary.isEmpty())
+        lines.append(QStringLiteral("概况：%1").arg(summary));
+    if (!currentNeed.isEmpty())
+        lines.append(QStringLiteral("当前诉求：%1").arg(currentNeed));
+
+    const auto appendArrayLine = [&lines, &profile](const QString& label, const QString& key) {
+        const QStringList items = jsonArrayStrings(profile, key);
+        if (!items.isEmpty())
+            lines.append(QStringLiteral("%1：%2").arg(label, items.join(QStringLiteral("、"))));
+    };
+    appendArrayLine(QStringLiteral("关注点"), QStringLiteral("concerns"));
+    appendArrayLine(QStringLiteral("偏好"), QStringLiteral("preferences"));
+    appendArrayLine(QStringLiteral("注意"), QStringLiteral("risks"));
+
+    if (updatedAt.isValid())
+        lines.append(QStringLiteral("更新时间：%1").arg(updatedAt.toString(QStringLiteral("MM-dd HH:mm"))));
+    if (lines.isEmpty())
+        return QStringLiteral("暂无客户信息");
+    return lines.join(QLatin1Char('\n'));
 }
 
 void showAggregateInfo(QWidget* parent, const QString& title, const QString& text)
@@ -1192,7 +1308,8 @@ void showAggregateWarning(QWidget* parent, const QString& title, const QString& 
 bool pythonServiceStartupBackfillEnabled()
 {
     QSettings settings = AppSettings::create();
-    return settings.value(QStringLiteral("pythonService/startupBackfillEnabled"), false).toBool();
+    return settings.value(QStringLiteral("pythonService/startupBackfillEnabled"),
+                          RuntimeMode::ownsBusinessDatabase()).toBool();
 }
 
 bool isImageFilePath(const QString& path)
@@ -1204,6 +1321,96 @@ bool isImageFilePath(const QString& path)
         || suffix == QLatin1String("webp")
         || suffix == QLatin1String("bmp")
         || suffix == QLatin1String("gif");
+}
+
+QDateTime serviceDateTime(const QJsonObject& object, const QString& key)
+{
+    const QString raw = object.value(key).toString().trimmed();
+    if (raw.isEmpty())
+        return {};
+    QDateTime dt = QDateTime::fromString(raw, Qt::ISODate);
+    if (dt.isValid())
+        return dt.toLocalTime();
+    dt = QDateTime::fromString(raw, QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    if (dt.isValid())
+        return dt;
+    return {};
+}
+
+int syncStatusFromServiceStatus(const QString& status)
+{
+    const QString normalized = status.trimmed().toLower();
+    if (normalized == QLatin1String("pending"))
+        return 10;
+    if (normalized == QLatin1String("sent"))
+        return 11;
+    if (normalized == QLatin1String("failed"))
+        return 12;
+    return 1;
+}
+
+MessageRecord serviceMessageRecord(const QJsonObject& object, int localConversationId)
+{
+    MessageRecord record;
+    record.id = object.value(QStringLiteral("id")).toInt();
+    record.conversationId = localConversationId;
+    record.direction = object.value(QStringLiteral("direction")).toString(QStringLiteral("in"));
+    record.sender = object.value(QStringLiteral("sender")).toString(
+        record.direction == QLatin1String("out") ? QStringLiteral("agent") : QStringLiteral("customer"));
+    record.senderName = object.value(QStringLiteral("sender_name")).toString();
+    record.content = object.value(QStringLiteral("content")).toString();
+    record.platformMsgId = object.value(QStringLiteral("platform_message_id")).toString(
+        object.value(QStringLiteral("platform_msg_id")).toString());
+    record.clientMessageId = object.value(QStringLiteral("client_message_id")).toString();
+    record.status = object.value(QStringLiteral("status")).toString(QStringLiteral("observed"));
+    record.syncStatus = syncStatusFromServiceStatus(record.status);
+    record.errorReason = object.value(QStringLiteral("error_reason")).toString();
+    record.contentType = object.value(QStringLiteral("content_type")).toString(QStringLiteral("text"));
+    record.contentImagePath = object.value(QStringLiteral("content_image_path")).toString(
+        object.value(QStringLiteral("evidence_ref")).toString());
+    record.originalTimestamp = object.value(QStringLiteral("original_timestamp")).toString();
+    record.createdAt = serviceDateTime(object, QStringLiteral("message_time"));
+    if (!record.createdAt.isValid())
+        record.createdAt = serviceDateTime(object, QStringLiteral("created_at"));
+    record.observedAt = record.createdAt;
+    record.cacheScope = QStringLiteral("service_db");
+    record.cacheOrigin = QStringLiteral("python_service_db");
+    return record;
+}
+
+bool isVideoFilePath(const QString& path)
+{
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    return suffix == QLatin1String("mp4")
+        || suffix == QLatin1String("mov")
+        || suffix == QLatin1String("avi")
+        || suffix == QLatin1String("mkv")
+        || suffix == QLatin1String("wmv");
+}
+
+QString readableFileSize(qint64 bytes)
+{
+    if (bytes >= 1024 * 1024)
+        return QStringLiteral("%1 MB").arg(QString::number(bytes / 1024.0 / 1024.0, 'f', 1));
+    if (bytes >= 1024)
+        return QStringLiteral("%1 KB").arg(QString::number(bytes / 1024.0, 'f', 1));
+    return QStringLiteral("%1 B").arg(qMax<qint64>(0, bytes));
+}
+
+QString saveComposeImageToCache(const QImage& image)
+{
+    if (image.isNull())
+        return QString();
+    QString root = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (root.isEmpty())
+        root = QDir::tempPath();
+    const QString folder = root + QStringLiteral("/compose-media/")
+        + QDate::currentDate().toString(QStringLiteral("yyyyMMdd"));
+    QDir().mkpath(folder);
+    const QString path = folder + QLatin1Char('/')
+        + QUuid::createUuid().toString(QUuid::WithoutBraces)
+        + QStringLiteral(".png");
+    return image.save(path, "PNG") ? path : QString();
 }
 
 bool openLocalFileWithDefaultApp(QWidget* parent, const QString& path, const QString& failureTitle)
@@ -1456,6 +1663,100 @@ private:
     bool m_sliderPressed = false;
 };
 
+class PythonServiceStatusDialog final : public QDialog
+{
+public:
+    explicit PythonServiceStatusDialog(QWidget* parent = nullptr)
+        : QDialog(parent)
+    {
+        setWindowTitle(QStringLiteral("Python 服务状态"));
+        resize(620, 420);
+
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(10);
+
+        m_stateLabel = new QLabel(this);
+        m_stateLabel->setWordWrap(true);
+        layout->addWidget(m_stateLabel);
+
+        m_logView = new QPlainTextEdit(this);
+        m_logView->setReadOnly(true);
+        m_logView->setPlaceholderText(QStringLiteral("暂无服务日志。"));
+        layout->addWidget(m_logView, 1);
+
+        auto* row = new QHBoxLayout();
+        row->setSpacing(8);
+        m_startStopButton = new QPushButton(this);
+        auto* refreshButton = new QPushButton(QStringLiteral("刷新状态"), this);
+        auto* closeButton = new QPushButton(QStringLiteral("关闭"), this);
+        row->addWidget(m_startStopButton);
+        row->addWidget(refreshButton);
+        row->addStretch(1);
+        row->addWidget(closeButton);
+        layout->addLayout(row);
+
+        auto& controller = PythonServiceController::instance();
+        connect(&controller, &PythonServiceController::stateChanged,
+                this, [this]() { refresh(); });
+        connect(&controller, &PythonServiceController::logAppended,
+                this, [this](const QString& line) {
+                    if (m_logView) {
+                        m_logView->appendPlainText(line);
+                        m_logView->verticalScrollBar()->setValue(m_logView->verticalScrollBar()->maximum());
+                    }
+                    refresh();
+                });
+        connect(m_startStopButton, &QPushButton::clicked, this, []() {
+            auto& c = PythonServiceController::instance();
+            if (c.isManagedServiceRunning() || c.state() == PythonServiceController::State::ExternalRunning)
+                c.stopService();
+            else
+                c.startService();
+        });
+        connect(refreshButton, &QPushButton::clicked, this, []() {
+            PythonServiceController::instance().refreshConnectionState();
+        });
+        connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
+
+        setLogs(controller.humanLogs());
+        refresh();
+    }
+
+private:
+    void setLogs(const QStringList& logs)
+    {
+        if (!m_logView)
+            return;
+        m_logView->setPlainText(logs.join(QStringLiteral("\n")));
+        m_logView->verticalScrollBar()->setValue(m_logView->verticalScrollBar()->maximum());
+    }
+
+    void refresh()
+    {
+        auto& controller = PythonServiceController::instance();
+        if (m_stateLabel)
+            m_stateLabel->setText(controller.stateText());
+        if (!m_startStopButton)
+            return;
+        if (controller.isBusy()) {
+            m_startStopButton->setEnabled(false);
+            m_startStopButton->setText(QStringLiteral("处理中"));
+            return;
+        }
+        m_startStopButton->setEnabled(true);
+        m_startStopButton->setText(
+            (controller.isManagedServiceRunning()
+             || controller.state() == PythonServiceController::State::ExternalRunning)
+                ? QStringLiteral("停止服务")
+                : QStringLiteral("启动服务"));
+    }
+
+    QLabel* m_stateLabel = nullptr;
+    QPlainTextEdit* m_logView = nullptr;
+    QPushButton* m_startStopButton = nullptr;
+};
+
 bool handleAggregateBuildFailure(QWidget* parent,
                                  const AggregateAiBuiltRequest& built,
                                  bool silent,
@@ -1520,13 +1821,13 @@ AggregateChatForm::AggregateChatForm(const QString& loginUsername, QWidget* pare
     QTimer::singleShot(0, this, [this]() {
         auto& ipc = Ipc::IpcService::instance();
         m_pythonServiceAvailable = ipc.isServiceAvailable();
+        PythonServiceController::instance().refreshConnectionState();
+        refreshPythonServiceButtonUi();
         refreshPlatformListenStateFromService();
         if (m_pythonServiceAvailable && pythonServiceStartupBackfillEnabled())
             backfillFromPythonService();
     });
-    QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
-    if (m_modeCombo)
-        m_lastAggregateModeIndex = m_modeCombo->currentIndex();
+    scheduleChatInputRelayout();
 }
 
 void AggregateChatForm::loadSelfBubbleIdentity()
@@ -1625,16 +1926,25 @@ void AggregateChatForm::setupUI()
     m_hSplitter->addWidget(buildLeftPanel());
     m_hSplitter->addWidget(buildCenterPanel());
     m_hSplitter->addWidget(buildRightPanel());
-    m_hSplitter->setSizes({248, 576, 296});
+    m_hSplitter->setSizes({kAggregateConversationPanelDefaultWidth, 576, 296});
     m_hSplitter->setStretchFactor(0, 0);
     m_hSplitter->setStretchFactor(1, 1);
     m_hSplitter->setStretchFactor(2, 0);
-    m_hSplitter->setCollapsible(0, false);
+    m_hSplitter->setCollapsible(0, true);
     m_hSplitter->setCollapsible(1, false);
     m_hSplitter->setCollapsible(2, true);
     m_hSplitter->setHandleWidth(1);
     bodyLay->addWidget(m_hSplitter, 1);
-    setupRightBarToggleButton();
+    if (m_hSplitter) {
+        connect(m_hSplitter, &QSplitter::splitterMoved, this, [this]() {
+            if (!m_rightBarHidden) {
+                const QList<int> sizes = m_hSplitter->sizes();
+                if (sizes.size() >= 3 && sizes[2] > 0)
+                    m_lastRightBarWidth = sizes[2];
+            }
+            scheduleAdaptiveRelayout(true);
+        });
+    }
 
     outerLayout->addWidget(body, 1);
 
@@ -1642,6 +1952,21 @@ void AggregateChatForm::setupUI()
     m_messageRefreshTimer->setInterval(500);
     m_sendTimelineTimer = new QTimer(this);
     m_sendTimelineTimer->setInterval(900);
+    m_pythonBackfillTimer = new QTimer(this);
+    m_pythonBackfillTimer->setSingleShot(true);
+    m_pythonBackfillTimer->setInterval(250);
+    connect(m_pythonBackfillTimer, &QTimer::timeout,
+            this, &AggregateChatForm::backfillFromPythonService);
+    m_adaptiveRelayoutTimer = new QTimer(this);
+    m_adaptiveRelayoutTimer->setSingleShot(true);
+    m_adaptiveRelayoutTimer->setInterval(16);
+    connect(m_adaptiveRelayoutTimer, &QTimer::timeout,
+            this, &AggregateChatForm::runScheduledAdaptiveRelayout);
+    m_chatInputRelayoutTimer = new QTimer(this);
+    m_chatInputRelayoutTimer->setSingleShot(true);
+    m_chatInputRelayoutTimer->setInterval(16);
+    connect(m_chatInputRelayoutTimer, &QTimer::timeout,
+            this, &AggregateChatForm::relayoutChatInputOverlay);
 }
 
 void AggregateChatForm::setupStyles()
@@ -1717,85 +2042,260 @@ void AggregateChatForm::backfillFromPythonService()
     m_pythonBackfillInProgress = false;
 }
 
+void AggregateChatForm::schedulePythonServiceBackfill(int delayMs)
+{
+    if (!RuntimeMode::ownsBusinessDatabase())
+        return;
+    if (!m_pythonServiceAvailable)
+        return;
+    if (!pythonServiceStartupBackfillEnabled())
+        return;
+    if (!m_pythonBackfillTimer)
+        return;
+    m_pythonBackfillTimer->start(qMax(0, delayMs));
+}
+
 void AggregateChatForm::applyTheme(ApplyStyle::MainWindowTheme theme)
 {
     Q_UNUSED(theme)
     setStyleSheet(ApplyStyle::aggregateChatFormStyle());
     syncSolidBackgrounds();
     updateAggregateAiControlsVisibility();
-    QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
+    scheduleChatInputRelayout();
 }
 
 void AggregateChatForm::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
-    QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
-    QTimer::singleShot(0, this, &AggregateChatForm::updateRightBarToggleButtonGeometry);
+    scheduleChatInputRelayout();
+    scheduleAdaptiveRelayout(false);
+}
+
+void AggregateChatForm::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    scheduleAdaptiveRelayout(false);
 }
 
 bool AggregateChatForm::eventFilter(QObject* watched, QEvent* event)
 {
     if (watched == m_chatInputOverlayHost
         && (event->type() == QEvent::Resize || event->type() == QEvent::Show))
-        relayoutChatInputOverlay();
-    if (event->type() == QEvent::Resize || event->type() == QEvent::Show)
-        updateRightBarToggleButtonGeometry();
-    if (event->type() == QEvent::MouseMove) {
-        auto* mouseEvent = static_cast<QMouseEvent*>(event);
-        updateRightBarToggleButtonVisibility(mouseEvent->globalPosition().toPoint());
-    } else if (event->type() == QEvent::Leave) {
-        updateRightBarToggleButtonVisibility(QCursor::pos());
+        scheduleChatInputRelayout();
+    if (event->type() == QEvent::Resize || event->type() == QEvent::Show) {
+        scheduleAdaptiveRelayout(false);
     }
     return QWidget::eventFilter(watched, event);
 }
 
-void AggregateChatForm::installRightBarToggleEventFilter(QWidget* widget)
+void AggregateChatForm::setChatHeaderTitle(const QString& title)
 {
-    if (!widget)
-        return;
-    widget->setMouseTracking(true);
-    widget->installEventFilter(this);
+    if (m_chatHeader)
+        m_chatHeader->setText(title);
 }
 
-void AggregateChatForm::setupRightBarToggleButton()
+void AggregateChatForm::scheduleAdaptiveRelayout(bool fromUserSplitter)
 {
-    if (m_rightBarToggleButton)
+    m_pendingAdaptiveRelayoutFromUserSplitter =
+        m_pendingAdaptiveRelayoutFromUserSplitter || fromUserSplitter;
+    if (m_adaptiveRelayoutTimer && !m_adaptiveRelayoutTimer->isActive())
+        m_adaptiveRelayoutTimer->start();
+}
+
+void AggregateChatForm::runScheduledAdaptiveRelayout()
+{
+    const bool fromUserSplitter = m_pendingAdaptiveRelayoutFromUserSplitter;
+    m_pendingAdaptiveRelayoutFromUserSplitter = false;
+    updateAdaptiveConversationLayout(fromUserSplitter);
+}
+
+void AggregateChatForm::scheduleChatInputRelayout()
+{
+    if (m_chatInputRelayoutTimer && !m_chatInputRelayoutTimer->isActive())
+        m_chatInputRelayoutTimer->start();
+}
+
+void AggregateChatForm::updateComposeInputHeight()
+{
+    if (!m_inputEdit)
         return;
 
-    m_rightBarToggleButton = new QToolButton(this);
-    m_rightBarToggleButton->setObjectName(QStringLiteral("aggregateRightBarToggleButton"));
-    m_rightBarToggleButton->setCursor(Qt::PointingHandCursor);
-    m_rightBarToggleButton->setAutoRaise(false);
-    m_rightBarToggleButton->setFixedSize(24, 54);
-    m_rightBarToggleButton->hide();
-    installRightBarToggleEventFilter(m_rightBarToggleButton);
-    connect(m_rightBarToggleButton, &QToolButton::clicked, this, [this]() {
-        setRightBarHidden(!m_rightBarHidden);
-    });
+    constexpr int kMinLines = 2;
+    constexpr int kMaxLines = 8;
+    constexpr int kVerticalPadding = 12;
+    const QFontMetrics fm(m_inputEdit->font());
+    const int minH = fm.lineSpacing() * kMinLines + kVerticalPadding;
+    const int maxH = fm.lineSpacing() * kMaxLines + kVerticalPadding;
 
-    installRightBarToggleEventFilter(this);
-    installRightBarToggleEventFilter(m_hSplitter);
-    installRightBarToggleEventFilter(m_centerPanel);
-    installRightBarToggleEventFilter(m_centerStack);
-    installRightBarToggleEventFilter(m_centerEmptyState);
-    installRightBarToggleEventFilter(m_chatArea);
-    installRightBarToggleEventFilter(m_chatHeader);
-    installRightBarToggleEventFilter(m_chatInputOverlayHost);
-    installRightBarToggleEventFilter(m_messageView);
-    if (m_messageView)
-        installRightBarToggleEventFilter(m_messageView->viewport());
-    installRightBarToggleEventFilter(m_rightPanel);
-    if (m_hSplitter) {
-        connect(m_hSplitter, &QSplitter::splitterMoved, this, [this]() {
-            if (!m_rightBarHidden) {
-                const QList<int> sizes = m_hSplitter->sizes();
-                if (sizes.size() >= 3 && sizes[2] > 0)
-                    m_lastRightBarWidth = sizes[2];
-            }
-            updateRightBarToggleButtonGeometry();
-        });
+    int textWidth = m_inputEdit->viewport() ? m_inputEdit->viewport()->width() : m_inputEdit->width();
+    if (textWidth <= 0)
+        textWidth = m_inputEdit->width();
+    if (textWidth > 0)
+        m_inputEdit->document()->setTextWidth(textWidth);
+
+    const int contentH = m_inputEdit->toPlainText().isEmpty()
+                             ? fm.lineSpacing()
+                             : int(m_inputEdit->document()->size().height() + 0.5);
+    const int wantedH = contentH + kVerticalPadding;
+    const int nextH = qBound(minH, wantedH, maxH);
+
+    m_inputEdit->setVerticalScrollBarPolicy(wantedH > maxH ? Qt::ScrollBarAsNeeded
+                                                           : Qt::ScrollBarAlwaysOff);
+    if (m_inputEdit->height() != nextH) {
+        m_inputEdit->setFixedHeight(nextH);
+        m_inputEdit->updateGeometry();
     }
-    updateRightBarToggleButtonGeometry();
+}
+
+AggregateAdaptiveLayoutMode AggregateChatForm::desiredAdaptiveLayoutMode() const
+{
+    if (!m_hSplitter)
+        return AggregateAdaptiveLayoutMode::Unknown;
+    const int totalWidth = m_hSplitter->width();
+    if (totalWidth >= kAggregateConversationPanelShowBreakpoint)
+        return AggregateAdaptiveLayoutMode::Wide;
+    if (totalWidth >= kAggregateRightPanelAutoHideBreakpoint)
+        return AggregateAdaptiveLayoutMode::Medium;
+    return AggregateAdaptiveLayoutMode::Compact;
+}
+
+void AggregateChatForm::updateAdaptiveConversationLayout(bool fromUserSplitter)
+{
+    if (!m_hSplitter || !m_leftPanel)
+        return;
+
+    const AggregateAdaptiveLayoutMode desiredMode = desiredAdaptiveLayoutMode();
+    if (desiredMode == AggregateAdaptiveLayoutMode::Unknown)
+        return;
+
+    const bool modeChanged = desiredMode != m_adaptiveLayoutMode;
+    m_adaptiveLayoutMode = desiredMode;
+
+    updateRightBarAdaptiveLayout();
+
+    if (desiredMode == AggregateAdaptiveLayoutMode::Wide) {
+        m_compactConversationListForced = false;
+        if (m_leftPanelHidden && modeChanged)
+            setConversationPanelHidden(false);
+        else
+            updateCompactHeaderControls();
+        return;
+    }
+
+    if (m_compactConversationListForced) {
+        updateCompactHeaderControls();
+        return;
+    }
+
+    const QList<int> sizes = m_hSplitter->sizes();
+    const int leftWidth = sizes.value(0, 0);
+    const bool draggedToMinimum =
+        fromUserSplitter
+        && leftWidth <= kAggregateConversationPanelMinWidth + kAggregateConversationPanelCollapseSlop;
+    const bool shouldHideLeft =
+        desiredMode != AggregateAdaptiveLayoutMode::Wide || draggedToMinimum;
+    if (!m_leftPanelHidden && (modeChanged || draggedToMinimum) && shouldHideLeft) {
+        setConversationPanelHidden(true);
+        return;
+    }
+
+    updateCompactHeaderControls();
+}
+
+void AggregateChatForm::updateRightBarAdaptiveLayout()
+{
+    if (!m_hSplitter || !m_rightPanel)
+        return;
+
+    if (m_rightBarMetricsGrid) {
+        const int panelWidth = m_rightPanel->width();
+        const bool singleColumn = panelWidth > 0 && panelWidth < kAggregateMetricSingleColumnBreakpoint;
+        const int columns = singleColumn ? 1 : 2;
+        if (columns != m_rightBarMetricColumnCount) {
+            m_rightBarMetricColumnCount = columns;
+            for (int i = 0; i < 4; ++i) {
+                if (!m_rightBarMetricCards[i])
+                    continue;
+                m_rightBarMetricsGrid->removeWidget(m_rightBarMetricCards[i]);
+                m_rightBarMetricsGrid->addWidget(m_rightBarMetricCards[i], i / columns, i % columns);
+            }
+            m_rightBarMetricsGrid->setColumnStretch(0, 1);
+            m_rightBarMetricsGrid->setColumnStretch(1, singleColumn ? 0 : 1);
+            if (m_rightBarMetricsWrap)
+                m_rightBarMetricsWrap->updateGeometry();
+        }
+    }
+
+    const QList<int> sizes = m_hSplitter->sizes();
+    if (sizes.size() < 3)
+        return;
+
+    if (!m_rightBarHidden) {
+        const int centerWidth = sizes[1];
+        const int rightWidth = sizes[2];
+        if (rightWidth > 0
+            && (m_hSplitter->width() < kAggregateRightPanelAutoHideBreakpoint
+                || centerWidth < kAggregateChatWithRightMinWidth)) {
+            m_rightBarAutoHidden = true;
+            setRightBarHidden(true);
+            return;
+        }
+    }
+
+    if (m_rightBarAutoHidden
+        && m_rightBarHidden
+        && m_hSplitter->width() >= kAggregateConversationPanelShowBreakpoint + kAggregateRightPanelPreferredMinWidth) {
+        m_rightBarAutoHidden = false;
+        setRightBarHidden(false);
+    }
+}
+
+void AggregateChatForm::setConversationPanelHidden(bool hidden)
+{
+    if (!m_hSplitter || !m_leftPanel)
+        return;
+    if (m_leftPanelHidden == hidden) {
+        updateCompactHeaderControls();
+        return;
+    }
+
+    const QList<int> sizes = m_hSplitter->sizes();
+    const int leftWidth = sizes.value(0, m_lastLeftPanelWidth);
+    const int centerWidth = qMax(240, sizes.value(1, 360));
+    int rightWidth = qMax(0, sizes.value(2, 0));
+
+    if (hidden) {
+        if (leftWidth > 24)
+            m_lastLeftPanelWidth = qBound(kAggregateConversationPanelMinWidth,
+                                          leftWidth,
+                                          kAggregateConversationPanelMaxWidth);
+        m_compactConversationListForced = false;
+        m_leftPanelHidden = true;
+        m_leftPanel->hide();
+        m_hSplitter->setSizes({0, centerWidth + qMax(0, leftWidth), rightWidth});
+    } else {
+        const int totalWidth = qMax(m_hSplitter->width(), centerWidth + rightWidth + m_lastLeftPanelWidth);
+        const int restoreLeft = qBound(kAggregateConversationPanelMinWidth,
+                                       m_lastLeftPanelWidth,
+                                       kAggregateConversationPanelMaxWidth);
+        if (totalWidth - restoreLeft - rightWidth < 320)
+            rightWidth = qMax(0, totalWidth - restoreLeft - 320);
+        const int restoreCenter = qMax(240, totalWidth - restoreLeft - rightWidth);
+        m_leftPanelHidden = false;
+        m_leftPanel->show();
+        m_hSplitter->setSizes({restoreLeft, restoreCenter, rightWidth});
+    }
+
+    updateCompactHeaderControls();
+    scheduleChatInputRelayout();
+}
+
+void AggregateChatForm::updateCompactHeaderControls()
+{
+    if (!m_btnBackToConversationList)
+        return;
+    const bool onChat = m_centerStack && m_centerStack->currentWidget() == m_chatArea;
+    m_btnBackToConversationList->setVisible(m_leftPanelHidden && onChat);
 }
 
 void AggregateChatForm::setRightBarHidden(bool hidden)
@@ -1806,7 +2306,7 @@ void AggregateChatForm::setRightBarHidden(bool hidden)
     if (sizes.size() < 3)
         return;
 
-    const int leftWidth = qMax(180, sizes[0]);
+    const int leftWidth = qMax(0, sizes[0]);
     const int centerWidth = qMax(240, sizes[1]);
     const int rightWidth = qMax(0, sizes[2]);
     if (hidden) {
@@ -1817,56 +2317,26 @@ void AggregateChatForm::setRightBarHidden(bool hidden)
     } else {
         const int totalWidth = qMax(leftWidth + centerWidth + rightWidth, m_hSplitter->width());
         const int availableForCenterAndRight = qMax(0, totalWidth - leftWidth);
-        int restoreRight = qBound(240, m_lastRightBarWidth, qMax(240, availableForCenterAndRight - 320));
-        if (availableForCenterAndRight < 560)
-            restoreRight = qMax(180, availableForCenterAndRight / 3);
-        const int restoreCenter = qMax(240, availableForCenterAndRight - restoreRight);
+        if (availableForCenterAndRight < kAggregateChatWithRightMinWidth + kAggregateRightPanelMinWidth) {
+            m_rightBarHidden = true;
+            m_rightBarAutoHidden = true;
+            showStatusMessage(QStringLiteral("窗口宽度不足，右栏已保持隐藏"), 3000);
+            scheduleChatInputRelayout();
+            return;
+        }
+        int restoreRight = qBound(kAggregateRightPanelMinWidth,
+                                  m_lastRightBarWidth,
+                                  qMax(kAggregateRightPanelMinWidth,
+                                       availableForCenterAndRight - kAggregateChatWithRightMinWidth));
+        restoreRight = qMin(restoreRight, kAggregateRightPanelMaxWidth);
+        const int restoreCenter = qMax(kAggregateChatWithRightMinWidth,
+                                       availableForCenterAndRight - restoreRight);
         m_rightBarHidden = false;
+        m_rightBarAutoHidden = false;
         m_hSplitter->setSizes({leftWidth, restoreCenter, restoreRight});
     }
 
-    if (m_rightBarToggleButton) {
-        m_rightBarToggleButton->setText(m_rightBarHidden ? QStringLiteral("‹") : QStringLiteral("›"));
-        m_rightBarToggleButton->setToolTip(m_rightBarHidden ? QStringLiteral("显示右栏") : QStringLiteral("隐藏右栏"));
-    }
-    updateRightBarToggleButtonGeometry();
-    updateRightBarToggleButtonVisibility(QCursor::pos());
-    QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
-}
-
-void AggregateChatForm::updateRightBarToggleButtonGeometry()
-{
-    if (!m_rightBarToggleButton || !m_centerPanel)
-        return;
-    const QPoint centerTopLeft = m_centerPanel->mapTo(this, QPoint(0, 0));
-    const int boundaryX = centerTopLeft.x() + m_centerPanel->width();
-    const int y = centerTopLeft.y() + qMax(0, (m_centerPanel->height() - m_rightBarToggleButton->height()) / 2);
-    const int x = boundaryX - m_rightBarToggleButton->width() / 2;
-    m_rightBarToggleButton->move(x, y);
-    m_rightBarToggleButton->setText(m_rightBarHidden ? QStringLiteral("‹") : QStringLiteral("›"));
-    m_rightBarToggleButton->setToolTip(m_rightBarHidden ? QStringLiteral("显示右栏") : QStringLiteral("隐藏右栏"));
-    m_rightBarToggleButton->raise();
-}
-
-void AggregateChatForm::updateRightBarToggleButtonVisibility(const QPoint& globalPos)
-{
-    if (!m_rightBarToggleButton || !m_centerPanel || !m_hSplitter)
-        return;
-    updateRightBarToggleButtonGeometry();
-
-    const QPoint centerTopLeft = m_centerPanel->mapToGlobal(QPoint(0, 0));
-    const QRect centerGlobalRect(centerTopLeft, m_centerPanel->size());
-    const int boundaryX = centerGlobalRect.right() + 1;
-    const bool inVerticalRange = globalPos.y() >= centerGlobalRect.top() && globalPos.y() <= centerGlobalRect.bottom();
-    const int activeDistance = m_rightBarHidden ? 32 : 24;
-    const bool nearBoundary = inVerticalRange && qAbs(globalPos.x() - boundaryX) <= activeDistance;
-    const QRect buttonGlobalRect(m_rightBarToggleButton->mapToGlobal(QPoint(0, 0)),
-                                 m_rightBarToggleButton->size());
-
-    const bool shouldShow = nearBoundary || buttonGlobalRect.adjusted(-6, -6, 6, 6).contains(globalPos);
-    m_rightBarToggleButton->setVisible(shouldShow);
-    if (shouldShow)
-        m_rightBarToggleButton->raise();
+    scheduleChatInputRelayout();
 }
 
 void AggregateChatForm::relayoutChatInputOverlay()
@@ -1879,6 +2349,7 @@ void AggregateChatForm::relayoutChatInputOverlay()
         return;
 
     m_chatInputPanel->setFixedWidth(w);
+    updateComposeInputHeight();
     m_chatInputPanel->adjustSize();
     int ih = m_chatInputPanel->sizeHint().height();
     ih = qBound(72, ih, qMax(72, h - 16));
@@ -1928,10 +2399,24 @@ void AggregateChatForm::connectSignals()
             this, &AggregateChatForm::onIpcRequestFailed);
     connect(&ipc, &Ipc::IpcService::serviceStatusChanged, this, [this](bool available) {
         m_pythonServiceAvailable = available;
+        PythonServiceController::instance().refreshConnectionState();
+        refreshPythonServiceButtonUi();
         refreshPlatformListenStateFromService();
         if (available && pythonServiceStartupBackfillEnabled())
             backfillFromPythonService();
     });
+    connect(&ipc, &Ipc::IpcService::platformEventReceived, this, [this](const QJsonObject& event) {
+        const QString eventType = event.value(QStringLiteral("event_type")).toString();
+        if (eventType == QLatin1String("message_observed")
+            || eventType == QLatin1String("message_sent")
+            || eventType == QLatin1String("send_failed")) {
+            schedulePythonServiceBackfill(200);
+        }
+    });
+    connect(&PythonServiceController::instance(), &PythonServiceController::stateChanged,
+            this, [this]() {
+                refreshPythonServiceButtonUi();
+            });
 
     auto* shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     connect(shortcut, &QShortcut::activated, this, &AggregateChatForm::onSendClicked);
@@ -1948,8 +2433,6 @@ void AggregateChatForm::connectSignals()
             this, &AggregateChatForm::pollSendTimeline);
     m_sendTimelineTimer->start();
 
-    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            &AggregateChatForm::onModeComboChanged);
 }
 
 // ===================== Left tool bar =====================
@@ -1997,6 +2480,22 @@ QWidget* AggregateChatForm::buildLeftToolBar()
             &AggregateChatForm::onPlatformFilterButtonIdClicked);
     updatePlatformToolBarButtonIcons();
 
+    m_btnPythonService = new QToolButton(bar);
+    m_btnPythonService->setObjectName(QStringLiteral("aggregateToolBarButton"));
+    m_btnPythonService->setCheckable(true);
+    m_btnPythonService->setIcon(QIcon(QStringLiteral(":/aggregate_reception_icons/runtime_icon.svg")));
+    m_btnPythonService->setIconSize(QSize(24, 24));
+    m_btnPythonService->setFixedSize(40, 40);
+    m_btnPythonService->setAutoRaise(true);
+    m_btnPythonService->setCursor(Qt::PointingHandCursor);
+    m_btnPythonService->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_btnPythonService->setAccessibleName(QStringLiteral("Python 服务"));
+    connect(m_btnPythonService, &QToolButton::clicked,
+            this, &AggregateChatForm::onPythonServiceButtonClicked);
+    connect(m_btnPythonService, &QToolButton::customContextMenuRequested,
+            this, &AggregateChatForm::onPythonServiceButtonContextMenu);
+    lay->addWidget(m_btnPythonService, 0, Qt::AlignHCenter);
+
     m_btnSimulateMessage = new QToolButton(bar);
     m_btnSimulateMessage->setObjectName(QStringLiteral("aggregateToolBarButton"));
     m_btnSimulateMessage->setText(QStringLiteral("测"));
@@ -2010,6 +2509,7 @@ QWidget* AggregateChatForm::buildLeftToolBar()
     lay->addWidget(m_btnSimulateMessage, 0, Qt::AlignHCenter);
 
     lay->addStretch(1);
+    refreshPythonServiceButtonUi();
     return bar;
 }
 
@@ -2056,6 +2556,59 @@ void AggregateChatForm::onSimulateMessageClicked()
 
     adapter->simulateRandomPlatformIncomingMessage();
     showStatusMessage(QStringLiteral("已模拟一条买家消息"), 2500);
+}
+
+void AggregateChatForm::refreshPythonServiceButtonUi()
+{
+    if (!m_btnPythonService)
+        return;
+
+    auto& controller = PythonServiceController::instance();
+    const bool available = Ipc::IpcService::instance().isServiceAvailable();
+    const bool active = available || controller.isManagedServiceRunning()
+                        || controller.state() == PythonServiceController::State::ExternalRunning;
+    m_btnPythonService->setChecked(active);
+    m_btnPythonService->setEnabled(!controller.isBusy());
+
+    QString tip = controller.stateText();
+    if (controller.state() == PythonServiceController::State::ExternalRunning) {
+        tip += QStringLiteral("\n左键：尝试停止（外部服务不会被强制关闭）\n右键：查看服务状态和运行日志");
+    } else if (active) {
+        tip += QStringLiteral("\n左键：停止由当前客户端启动的服务\n右键：查看服务状态和运行日志");
+    } else {
+        tip += QStringLiteral("\n左键：启动本机 Python 服务（debug 模式）\n右键：查看服务状态和运行日志");
+    }
+    m_btnPythonService->setToolTip(tip);
+}
+
+void AggregateChatForm::onPythonServiceButtonClicked()
+{
+    auto& controller = PythonServiceController::instance();
+    if (controller.isManagedServiceRunning()
+        || controller.state() == PythonServiceController::State::ExternalRunning) {
+        const bool external = controller.state() == PythonServiceController::State::ExternalRunning
+                              && !controller.isManagedServiceRunning();
+        QTimer::singleShot(0, this, []() {
+            PythonServiceController::instance().stopService();
+        });
+        showStatusMessage(external
+                              ? QStringLiteral("外部启动的 Python 服务不会被客户端强制关闭")
+                              : QStringLiteral("已请求停止 Python 服务"),
+                          3000);
+    } else {
+        QTimer::singleShot(0, this, []() {
+            PythonServiceController::instance().startService();
+        });
+        showStatusMessage(QStringLiteral("正在启动 Python 服务"), 3000);
+    }
+    refreshPythonServiceButtonUi();
+}
+
+void AggregateChatForm::onPythonServiceButtonContextMenu(const QPoint& pos)
+{
+    Q_UNUSED(pos)
+    PythonServiceStatusDialog dlg(this);
+    dlg.exec();
 }
 
 QStringList AggregateChatForm::selectedPlatformListenTargets() const
@@ -2225,8 +2778,8 @@ QWidget* AggregateChatForm::buildLeftPanel()
     m_leftPanel = panel;
     panel->setObjectName("aggregateLeftPanel");
     panel->setAutoFillBackground(true);
-    panel->setMinimumWidth(236);
-    panel->setMaximumWidth(320);
+    panel->setMinimumWidth(kAggregateConversationPanelMinWidth);
+    panel->setMaximumWidth(kAggregateConversationPanelMaxWidth);
     auto* layout = new QVBoxLayout(panel);
     layout->setContentsMargins(10, 10, 10, 10);
     layout->setSpacing(8);
@@ -2287,36 +2840,6 @@ QWidget* AggregateChatForm::buildLeftPanel()
             this, &AggregateChatForm::onStopPlatformListeningClicked);
     setPlatformListenControlsEnabled(false);
     updatePlatformListenStatusLabel();
-
-    // Mode row
-    auto* modeRow = new QWidget(panel);
-    auto* modeLayout = new QHBoxLayout(modeRow);
-    modeLayout->setContentsMargins(0, 0, 0, 0);
-    modeLayout->setSpacing(8);
-    auto* modeLabel = new QLabel(QStringLiteral("模式："), modeRow);
-    modeLabel->setObjectName(QStringLiteral("aggregateModeLabel"));
-    m_modeCombo = new FoldArrowComboBox(modeRow);
-    m_modeCombo->addItem(QStringLiteral("人工接待"));
-    m_modeCombo->addItem(QStringLiteral("AI 辅助"));
-    m_modeCombo->addItem(QStringLiteral("AI自动回复"));
-    m_modeCombo->setMinimumWidth(90);
-    modeLayout->addWidget(modeLabel);
-    modeLayout->addWidget(m_modeCombo);
-    modeLayout->addStretch(1);
-
-    m_btnStopAutoReply = new QPushButton(modeRow);
-    m_btnStopAutoReply->setObjectName(QStringLiteral("aggregateStopAutoReplyButton"));
-    m_btnStopAutoReply->setIcon(QIcon(QStringLiteral(":/stop_auto_reply.svg")));
-    m_btnStopAutoReply->setIconSize(QSize(22, 22));
-    m_btnStopAutoReply->setFixedSize(34, 34);
-    m_btnStopAutoReply->setCursor(Qt::PointingHandCursor);
-    m_btnStopAutoReply->setToolTip(
-        QStringLiteral("停止自动回复：立即停止 AI 自动回复意图，并切换为「人工接待」。"
-                       "再次使用「AI自动回复」需在模式下拉中重新选择并确认风险提示。"));
-    m_btnStopAutoReply->setAccessibleName(QStringLiteral("停止自动回复"));
-    connect(m_btnStopAutoReply, &QPushButton::clicked, this, &AggregateChatForm::onStopAutoReplyClicked);
-    modeLayout->addWidget(m_btnStopAutoReply);
-    layout->addWidget(modeRow);
 
     // Tabs
     auto* tabRow = new QWidget(panel);
@@ -2439,12 +2962,30 @@ QWidget* AggregateChatForm::buildCenterPanel()
     chatLayout->setSpacing(0);
 
     // Chat header
-    m_chatHeader = new QLabel(m_chatArea);
-    m_chatHeader->setObjectName("chatHeader");
-    m_chatHeader->setFixedHeight(48);
-    m_chatHeader->setAlignment(Qt::AlignVCenter);
-    m_chatHeader->setContentsMargins(0, 0, 0, 0);
-    chatLayout->addWidget(m_chatHeader);
+    m_chatHeaderBar = new QWidget(m_chatArea);
+    m_chatHeaderBar->setObjectName("chatHeader");
+    m_chatHeaderBar->setFixedHeight(48);
+    auto* headerLayout = new QHBoxLayout(m_chatHeaderBar);
+    headerLayout->setContentsMargins(8, 0, 16, 0);
+    headerLayout->setSpacing(4);
+    m_btnBackToConversationList = new QToolButton(m_chatHeaderBar);
+    m_btnBackToConversationList->setObjectName(QStringLiteral("aggregateConversationBackButton"));
+    m_btnBackToConversationList->setText(QStringLiteral("<"));
+    m_btnBackToConversationList->setCursor(Qt::PointingHandCursor);
+    m_btnBackToConversationList->setAutoRaise(true);
+    m_btnBackToConversationList->setFixedSize(32, 32);
+    m_btnBackToConversationList->setVisible(false);
+    connect(m_btnBackToConversationList, &QToolButton::clicked, this, [this]() {
+        m_compactConversationListForced = true;
+        setConversationPanelHidden(false);
+    });
+    headerLayout->addWidget(m_btnBackToConversationList, 0, Qt::AlignVCenter);
+    m_chatHeader = new QLabel(m_chatHeaderBar);
+    m_chatHeader->setObjectName("chatHeaderTitle");
+    m_chatHeader->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    m_chatHeader->setContentsMargins(4, 0, 0, 0);
+    headerLayout->addWidget(m_chatHeader, 1);
+    chatLayout->addWidget(m_chatHeaderBar);
 
     m_chatInputOverlayHost = new QWidget(m_chatArea);
     m_chatInputOverlayHost->setObjectName(QStringLiteral("aggregateChatInputOverlayHost"));
@@ -2504,7 +3045,6 @@ QWidget* AggregateChatForm::buildCenterPanel()
     m_btnAiModelPick->setPopupMode(QToolButton::InstantPopup);
     m_btnAiModelPick->setAutoRaise(false);
     m_btnAiModelPick->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    m_btnAiModelPick->setVisible(false);
     m_aggregateAiModelMenu = new QMenu(m_btnAiModelPick);
     auto* actDoubao = m_aggregateAiModelMenu->addAction(QStringLiteral("豆包"));
     actDoubao->setData(QStringLiteral("doubao:ark"));
@@ -2520,12 +3060,48 @@ QWidget* AggregateChatForm::buildCenterPanel()
             &AggregateChatForm::onAggregateAiModelMenuTriggered);
     refreshAggregateAiModelButtonUi();
 
-    m_inputEdit = new QPlainTextEdit(inputInner);
+    m_composeAttachmentsScroll = new QScrollArea(inputInner);
+    m_composeAttachmentsScroll->setObjectName(QStringLiteral("composeAttachmentsScroll"));
+    m_composeAttachmentsScroll->setFrameShape(QFrame::NoFrame);
+    m_composeAttachmentsScroll->setWidgetResizable(true);
+    m_composeAttachmentsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_composeAttachmentsScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_composeAttachmentsScroll->setMaximumHeight(86);
+    m_composeAttachmentsScroll->setVisible(false);
+    m_composeAttachmentsWidget = new QWidget(m_composeAttachmentsScroll);
+    m_composeAttachmentsWidget->setObjectName(QStringLiteral("composeAttachmentsWidget"));
+    m_composeAttachmentsWidget->setAutoFillBackground(true);
+    m_composeAttachmentsLayout = new QHBoxLayout(m_composeAttachmentsWidget);
+    m_composeAttachmentsLayout->setContentsMargins(0, 0, 0, 0);
+    m_composeAttachmentsLayout->setSpacing(8);
+    m_composeAttachmentsLayout->addStretch(1);
+    m_composeAttachmentsScroll->setWidget(m_composeAttachmentsWidget);
+    if (QWidget* vp = m_composeAttachmentsScroll->viewport()) {
+        vp->setObjectName(QStringLiteral("composeAttachmentsViewport"));
+        vp->setAutoFillBackground(true);
+    }
+    inputLayout->addWidget(m_composeAttachmentsScroll);
+
+    auto* composeBox = new QWidget(inputInner);
+    composeBox->setObjectName(QStringLiteral("aggregateComposeBox"));
+    auto* composeLayout = new QVBoxLayout(composeBox);
+    composeLayout->setContentsMargins(10, 8, 10, 8);
+    composeLayout->setSpacing(6);
+
+    auto* composeEdit = new ComposeTextEdit(composeBox);
+    composeEdit->mimeHandler = [this](const QMimeData* mimeData) {
+        return handleComposeMimeData(mimeData);
+    };
+    m_inputEdit = composeEdit;
     m_inputEdit->setObjectName("messageInput");
     m_inputEdit->setPlaceholderText(QString());
     m_inputEdit->setToolTip(QStringLiteral("输入消息，Ctrl+Enter 发送"));
-    m_inputEdit->setMaximumHeight(100);
-    inputLayout->addWidget(m_inputEdit);
+    m_inputEdit->setFrameShape(QFrame::NoFrame);
+    m_inputEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_inputEdit->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_inputEdit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_inputEdit->document()->setDocumentMargin(0);
+    composeLayout->addWidget(m_inputEdit);
 
     m_draftSaveTimer = new QTimer(this);
     m_draftSaveTimer->setSingleShot(true);
@@ -2536,7 +3112,17 @@ QWidget* AggregateChatForm::buildCenterPanel()
     btnRow->setContentsMargins(0, 0, 0, 0);
     btnRow->setSpacing(8);
     btnRow->addWidget(m_btnAiModelPick, 0, Qt::AlignLeft | Qt::AlignVCenter);
-    m_statusLabel = new QLabel(inputInner);
+    m_btnAutoReplyToggle = new QPushButton(composeBox);
+    m_btnAutoReplyToggle->setObjectName(QStringLiteral("aggregateAutoReplyToggleButton"));
+    m_btnAutoReplyToggle->setCursor(Qt::PointingHandCursor);
+    m_btnAutoReplyToggle->setFlat(true);
+    m_btnAutoReplyToggle->setFocusPolicy(Qt::NoFocus);
+    m_btnAutoReplyToggle->setCheckable(true);
+    m_btnAutoReplyToggle->setIconSize(QSize(20, 20));
+    m_btnAutoReplyToggle->setFixedSize(38, 38);
+    connect(m_btnAutoReplyToggle, &QPushButton::clicked, this, &AggregateChatForm::onAutoReplyToggleClicked);
+    btnRow->addWidget(m_btnAutoReplyToggle, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    m_statusLabel = new QLabel(composeBox);
     m_statusLabel->setObjectName(QStringLiteral("aggregateInlineStatus"));
     m_statusLabel->setWordWrap(false);
     m_statusLabel->setMaximumWidth(320);
@@ -2544,26 +3130,37 @@ QWidget* AggregateChatForm::buildCenterPanel()
     m_statusLabel->setVisible(false);
     btnRow->addWidget(m_statusLabel, 0, Qt::AlignLeft | Qt::AlignVCenter);
     btnRow->addStretch(1);
-    m_btnAiGenerate = new QPushButton(QStringLiteral("生成本条回复"), inputInner);
+    m_btnAiGenerate = new QPushButton(composeBox);
     m_btnAiGenerate->setObjectName(QStringLiteral("simulateButton"));
+    m_btnAiGenerate->setIcon(QIcon(QStringLiteral(":/aggregate_reception_icons/generate_reply_icon.svg")));
+    m_btnAiGenerate->setIconSize(QSize(20, 20));
+    m_btnAiGenerate->setToolTip(QStringLiteral("生成本条回复"));
+    m_btnAiGenerate->setAccessibleName(QStringLiteral("生成本条回复"));
     m_btnAiGenerate->setCursor(Qt::PointingHandCursor);
-    m_btnAiGenerate->setFixedSize(120, 36);
-    m_btnAiGenerate->setVisible(false);
+    m_btnAiGenerate->setFixedSize(38, 38);
     connect(m_btnAiGenerate, &QPushButton::clicked, this, &AggregateChatForm::onGenerateAiDraftClicked);
-    m_btnSend = new QPushButton(QStringLiteral("发送"), inputInner);
+    m_btnSend = new QPushButton(composeBox);
     m_btnSend->setObjectName("sendButton");
+    m_btnSend->setIcon(QIcon(QStringLiteral(":/aggregate_reception_icons/send_icon.svg")));
+    m_btnSend->setIconSize(QSize(20, 20));
+    m_btnSend->setToolTip(QStringLiteral("发送"));
+    m_btnSend->setAccessibleName(QStringLiteral("发送"));
     m_btnSend->setCursor(Qt::PointingHandCursor);
-    m_btnSend->setFixedSize(80, 36);
+    m_btnSend->setFixedSize(38, 38);
     connect(m_btnSend, &QPushButton::clicked, this, &AggregateChatForm::onSendClicked);
     btnRow->addWidget(m_btnAiGenerate);
     btnRow->addWidget(m_btnSend);
-    inputLayout->addLayout(btnRow);
+    refreshAutoReplyToggleButtonUi();
+    composeLayout->addLayout(btnRow);
+    inputLayout->addWidget(composeBox);
+    updateComposeInputHeight();
 
     inputOuter->addWidget(inputInner, 0);
 
     m_chatInputOverlayHost->installEventFilter(this);
     connect(m_inputEdit->document(), &QTextDocument::contentsChanged, this, [this]() {
-        QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
+        updateComposeInputHeight();
+        scheduleChatInputRelayout();
         if (!m_restoringDraft && m_currentConvId > 0 && m_draftSaveTimer)
             m_draftSaveTimer->start();
     });
@@ -2582,8 +3179,8 @@ QWidget* AggregateChatForm::buildRightPanel()
     m_rightPanel = panel;
     panel->setObjectName("aggregateRightPanel");
     panel->setAutoFillBackground(true);
-    panel->setMinimumWidth(208);
-    panel->setMaximumWidth(288);
+    panel->setMinimumWidth(kAggregateRightPanelMinWidth);
+    panel->setMaximumWidth(kAggregateRightPanelMaxWidth);
 
     auto* layout = new QVBoxLayout(panel);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -2723,6 +3320,7 @@ QWidget* AggregateChatForm::buildRightPanel()
 
     // —— 中：性能指标 2x2 占位 ——
     auto* metricsWrap = new QWidget(m_rightBarScrollContent);
+    m_rightBarMetricsWrap = metricsWrap;
     auto* metLay = new QVBoxLayout(metricsWrap);
     metLay->setContentsMargins(0, 0, 0, 0);
     metLay->setSpacing(6);
@@ -2732,21 +3330,19 @@ QWidget* AggregateChatForm::buildRightPanel()
     auto* metTitle = new QHBoxLayout();
     auto* metTitleL = new QLabel(QStringLiteral("性能指标"), metricsWrap);
     metTitleL->setObjectName(QStringLiteral("aggregateRightBarMetricsTitle"));
-    auto* metBadge = new QLabel(QStringLiteral("HEALTHY"), metricsWrap);
-    metBadge->setObjectName(QStringLiteral("aggregateRightBarMetricsBadge"));
     metTitle->addWidget(metTitleL);
     metTitle->addStretch(1);
-    metTitle->addWidget(metBadge, 0, Qt::AlignRight | Qt::AlignVCenter);
     metLay->addLayout(metTitle);
-    const QStringList metricCap = { QStringLiteral("运行时间"), QStringLiteral("请求处理"), QStringLiteral("系统健康"),
+    const QStringList metricCap = { QStringLiteral("AI请求"), QStringLiteral("成功率"), QStringLiteral("系统健康"),
                                     QStringLiteral("响应速度") };
-    const QString kMetricResPaths[4] = { QStringLiteral(":/aggregate_reception_icons/runtime_icon.svg"),
-                                         QStringLiteral(":/aggregate_reception_icons/request_handle_icon.svg"),
+    const QString kMetricResPaths[4] = { QStringLiteral(":/aggregate_reception_icons/request_handle_icon.svg"),
+                                         QStringLiteral(":/aggregate_reception_icons/system_healthy_icon.svg"),
                                          QStringLiteral(":/aggregate_reception_icons/system_healthy_icon.svg"),
                                          QStringLiteral(":/aggregate_reception_icons/response_speed_icon.svg") };
-    const QString kMetricKeyProp[4] = { QStringLiteral("runtime"), QStringLiteral("request"),
+    const QString kMetricKeyProp[4] = { QStringLiteral("request"), QStringLiteral("runtime"),
                                         QStringLiteral("system"), QStringLiteral("response") };
     auto* grid2 = new QGridLayout();
+    m_rightBarMetricsGrid = grid2;
     grid2->setContentsMargins(1, 2, 1, 4);
     grid2->setHorizontalSpacing(8);
     grid2->setVerticalSpacing(8);
@@ -2754,6 +3350,7 @@ QWidget* AggregateChatForm::buildRightPanel()
     grid2->setColumnStretch(1, 1);
     for (int i = 0; i < 4; ++i) {
         auto* card = new AggregateRightMetricCardFrame(metricsWrap);
+        m_rightBarMetricCards[i] = card;
         auto* cv = new QVBoxLayout(card);
         cv->setContentsMargins(14, 14, 14, 14);
         cv->setSpacing(6);
@@ -2828,6 +3425,65 @@ QWidget* AggregateChatForm::buildRightPanel()
     sep2->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_rightBarVLayout->addWidget(sep2);
 
+    m_customerProfileSection = new QWidget(m_rightBarScrollContent);
+    m_customerProfileSection->setObjectName(QStringLiteral("aggregateRightBarCustomerProfileSection"));
+    m_customerProfileSection->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    auto* profileOuterLay = new QVBoxLayout(m_customerProfileSection);
+    profileOuterLay->setContentsMargins(0, 0, 0, 0);
+    profileOuterLay->setSpacing(4);
+
+    auto* profileHeaderRow = new QWidget(m_customerProfileSection);
+    auto* profileHeaderLay = new QHBoxLayout(profileHeaderRow);
+    profileHeaderLay->setContentsMargins(0, 0, 0, 0);
+    profileHeaderLay->setSpacing(4);
+    m_customerProfileToggle = new QToolButton(profileHeaderRow);
+    m_customerProfileToggle->setObjectName(QStringLiteral("aggregateCustomerProfileToggle"));
+    m_customerProfileToggle->setText(QStringLiteral("客户信息"));
+    m_customerProfileToggle->setCheckable(true);
+    m_customerProfileToggle->setChecked(true);
+    m_customerProfileToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_customerProfileToggle->setArrowType(Qt::DownArrow);
+    m_customerProfileToggle->setAutoRaise(true);
+    m_customerProfileToggle->setCursor(Qt::PointingHandCursor);
+    m_customerProfileToggle->setFocusPolicy(Qt::NoFocus);
+    m_customerProfileToggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_btnOrganizeCustomerProfile = new QPushButton(QStringLiteral("整理"), profileHeaderRow);
+    m_btnOrganizeCustomerProfile->setObjectName(QStringLiteral("aggregateCustomerProfileOrganizeButton"));
+    m_btnOrganizeCustomerProfile->setCursor(Qt::PointingHandCursor);
+    m_btnOrganizeCustomerProfile->setFixedSize(76, 28);
+    connect(m_btnOrganizeCustomerProfile, &QPushButton::clicked,
+            this, &AggregateChatForm::onOrganizeCustomerProfileClicked);
+    profileHeaderLay->addWidget(m_customerProfileToggle, 1);
+    profileHeaderLay->addWidget(m_btnOrganizeCustomerProfile, 0, Qt::AlignRight | Qt::AlignVCenter);
+
+    m_customerProfileBody = new QWidget(m_customerProfileSection);
+    auto* profileBodyLay = new QVBoxLayout(m_customerProfileBody);
+    profileBodyLay->setContentsMargins(0, 0, 0, 0);
+    profileBodyLay->setSpacing(0);
+    m_customerProfileText = new QLabel(QStringLiteral("暂无客户信息"), m_customerProfileBody);
+    m_customerProfileText->setObjectName(QStringLiteral("aggregateCustomerProfileText"));
+    m_customerProfileText->setWordWrap(true);
+    m_customerProfileText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    profileBodyLay->addWidget(m_customerProfileText);
+    connect(m_customerProfileToggle, &QToolButton::toggled, this, [this](bool expanded) {
+        if (m_customerProfileBody)
+            m_customerProfileBody->setVisible(expanded);
+        if (m_customerProfileToggle)
+            m_customerProfileToggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+        updateRightBarSendSectionStretch();
+    });
+
+    profileOuterLay->addWidget(profileHeaderRow, 0);
+    profileOuterLay->addWidget(m_customerProfileBody, 0);
+    m_rightBarVLayout->addWidget(m_customerProfileSection, 0);
+
+    auto* sepProfile = new QFrame(m_rightBarScrollContent);
+    sepProfile->setObjectName(QStringLiteral("aggregateRightBarBlockSep"));
+    sepProfile->setFrameShape(QFrame::HLine);
+    sepProfile->setFixedHeight(1);
+    sepProfile->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_rightBarVLayout->addWidget(sepProfile);
+
     m_rightBarSendStatusSection = new QWidget(m_rightBarScrollContent);
     m_rightBarSendStatusSection->setObjectName(QStringLiteral("aggregateRightBarSendStatusSection"));
     m_rightBarSendStatusSection->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
@@ -2844,7 +3500,7 @@ QWidget* AggregateChatForm::buildRightPanel()
 
     m_sendTimelineToggle = new QToolButton(sendTimelineHeaderRow);
     m_sendTimelineToggle->setObjectName(QStringLiteral("aggregateSendTimelineToggle"));
-    m_sendTimelineToggle->setText(QStringLiteral("查看运行日志"));
+    m_sendTimelineToggle->setText(QStringLiteral("处理动态"));
     m_sendTimelineToggle->setCheckable(true);
     m_sendTimelineToggle->setChecked(false);
     m_sendTimelineToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -2862,7 +3518,7 @@ QWidget* AggregateChatForm::buildRightPanel()
     m_btnClearSendTimeline->setFocusPolicy(Qt::NoFocus);
     m_btnClearSendTimeline->setFixedSize(28, 28);
     m_btnClearSendTimeline->setIconSize(QSize(20, 20));
-    m_btnClearSendTimeline->setToolTip(QStringLiteral("清空显示"));
+    m_btnClearSendTimeline->setToolTip(QStringLiteral("清空处理动态显示"));
     m_btnClearSendTimeline->setAccessibleName(QStringLiteral("清空显示"));
     {
         const QString n = QStringLiteral(":/aggregate_reception_icons/clear_output_normal_icon.svg");
@@ -2908,6 +3564,8 @@ QWidget* AggregateChatForm::buildRightPanel()
 
     m_rightStack->setCurrentWidget(m_customerDetail);
     refreshRightBarModelDisplay();
+    refreshRightBarMetrics();
+    refreshCustomerProfilePanel();
     return panel;
 }
 
@@ -3008,6 +3666,102 @@ void AggregateChatForm::refreshRightBarModelDisplay()
     }
     if (m_modelPickerList)
         m_modelPickerList->setCurrentRow(m_rightBarDisplayModelIndex);
+}
+
+void AggregateChatForm::refreshRightBarMetrics()
+{
+    if (!m_rightBarMetricValues[0])
+        return;
+
+    const AiRequestEventMetrics metrics =
+        AiRequestEventDao().aggregateMetrics(m_aggregateAiSessionModelKey);
+
+    m_rightBarMetricValues[0]->setText(QStringLiteral("今日%1").arg(metrics.todayRequestCount));
+    m_rightBarMetricValues[1]->setText(metrics.hasSuccessRate
+                                           ? QStringLiteral("%1%").arg(metrics.successRatePercent)
+                                           : QStringLiteral("—"));
+
+    AiConfigLoadOptions loadOptions;
+    loadOptions.allowAggregateFallback = true;
+    loadOptions.allowGeneralFallback = true;
+    const AiProviderConfig config = loadAiProviderConfig(m_aggregateAiSessionModelKey, loadOptions);
+    QString health = QStringLiteral("未验证");
+    if (config.apiKey.trimmed().isEmpty()
+        || config.baseUrl.trimmed().isEmpty()
+        || config.model.trimmed().isEmpty()) {
+        health = QStringLiteral("未配置");
+    } else if (metrics.latestStatus == QLatin1String("completed")) {
+        health = QStringLiteral("可用");
+    } else if (metrics.latestStatus == QLatin1String("failed")) {
+        health = QStringLiteral("异常");
+    }
+    m_rightBarMetricValues[2]->setText(health);
+    if (!metrics.latestError.trimmed().isEmpty())
+        m_rightBarMetricValues[2]->setToolTip(metrics.latestError.left(200));
+    else
+        m_rightBarMetricValues[2]->setToolTip(QString());
+
+    m_rightBarMetricValues[3]->setText(metrics.hasAverageDuration
+                                           ? aggregateMetricDurationLabel(metrics.averageDurationMs)
+                                           : QStringLiteral("—"));
+}
+
+void AggregateChatForm::refreshCustomerProfilePanel()
+{
+    if (!m_customerProfileText)
+        return;
+
+    const auto record = CustomerProfileDao().findByConversationId(m_currentConvId);
+    if (record && !record->profile.isEmpty())
+        m_customerProfileText->setText(customerProfileDisplayText(record->profile, record->updatedAt));
+    else
+        m_customerProfileText->setText(QStringLiteral("暂无客户信息"));
+
+    if (m_btnOrganizeCustomerProfile) {
+        m_btnOrganizeCustomerProfile->setText(m_customerProfileBusy
+                                                  ? QStringLiteral("整理中")
+                                                  : (record ? QStringLiteral("重新整理")
+                                                            : QStringLiteral("整理")));
+        m_btnOrganizeCustomerProfile->setEnabled(m_currentConvId > 0
+                                                 && !m_customerProfileBusy
+                                                 && !m_aggregateAiGenerating
+                                                 && !m_autoReplyBusy);
+    }
+}
+
+void AggregateChatForm::setCustomerProfileBusy(bool busy)
+{
+    m_customerProfileBusy = busy;
+    if (m_btnOrganizeCustomerProfile) {
+        m_btnOrganizeCustomerProfile->setText(busy ? QStringLiteral("整理中")
+                                                   : QStringLiteral("整理"));
+    }
+    updateAggregateAiControlsVisibility();
+    refreshCustomerProfilePanel();
+}
+
+QJsonObject AggregateChatForm::parseCustomerProfileJson(const QString& text) const
+{
+    QString raw = text.trimmed();
+    raw.remove(QStringLiteral("```json"), Qt::CaseInsensitive);
+    raw.remove(QStringLiteral("```"));
+    const int firstBrace = raw.indexOf(QLatin1Char('{'));
+    const int lastBrace = raw.lastIndexOf(QLatin1Char('}'));
+    if (firstBrace >= 0 && lastBrace > firstBrace)
+        raw = raw.mid(firstBrace, lastBrace - firstBrace + 1);
+
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8(), &err);
+    if (err.error == QJsonParseError::NoError && doc.isObject())
+        return doc.object();
+
+    QJsonObject fallback;
+    fallback.insert(QStringLiteral("summary"), text.trimmed().left(300));
+    fallback.insert(QStringLiteral("concerns"), QJsonArray());
+    fallback.insert(QStringLiteral("preferences"), QJsonArray());
+    fallback.insert(QStringLiteral("risks"), QJsonArray());
+    fallback.insert(QStringLiteral("current_need"), QString());
+    return fallback;
 }
 
 void AggregateChatForm::openModelPickerSheet()
@@ -3321,13 +4075,190 @@ QWidget* AggregateChatForm::createDateSeparator(const QDate& date)
 
 // ===================== Data Operations =====================
 
+bool AggregateChatForm::handleComposeMimeData(const QMimeData* mimeData)
+{
+    if (!mimeData)
+        return false;
+
+    bool addedAttachment = false;
+    if (mimeData->hasUrls()) {
+        for (const QUrl& url : mimeData->urls()) {
+            if (!url.isLocalFile())
+                continue;
+            addedAttachment = addComposeFileAttachment(url.toLocalFile()) || addedAttachment;
+        }
+    }
+
+    if (!addedAttachment && mimeData->hasImage()) {
+        QImage image = qvariant_cast<QImage>(mimeData->imageData());
+        if (image.isNull()) {
+            const QPixmap pixmap = qvariant_cast<QPixmap>(mimeData->imageData());
+            if (!pixmap.isNull())
+                image = pixmap.toImage();
+        }
+        const QString path = saveComposeImageToCache(image);
+        if (!path.isEmpty())
+            addedAttachment = addComposeFileAttachment(path) || addedAttachment;
+    }
+
+    if (!addedAttachment)
+        return false;
+
+    const QString text = mimeData->text();
+    if (!text.trimmed().isEmpty() && m_inputEdit) {
+        const bool looksLikeFileUrlList = text.trimmed().startsWith(QStringLiteral("file:/"));
+        if (!looksLikeFileUrlList)
+            m_inputEdit->textCursor().insertText(text);
+    }
+
+    if (m_draftSaveTimer && m_currentConvId > 0)
+        m_draftSaveTimer->start();
+    scheduleChatInputRelayout();
+    return true;
+}
+
+bool AggregateChatForm::addComposeFileAttachment(const QString& path)
+{
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile())
+        return false;
+
+    OutgoingMessagePart part;
+    if (isImageFilePath(path))
+        part.type = OutgoingPartType::Image;
+    else if (isVideoFilePath(path))
+        part.type = OutgoingPartType::Video;
+    else
+        part.type = OutgoingPartType::File;
+    part.localPath = info.absoluteFilePath();
+    part.fileName = info.fileName();
+    part.sizeBytes = info.size();
+    part.mimeType = QMimeDatabase().mimeTypeForFile(info).name();
+
+    for (const OutgoingMessagePart& existing : std::as_const(m_composeAttachments)) {
+        if (QFileInfo(existing.localPath).absoluteFilePath() == part.localPath)
+            return true;
+    }
+
+    m_composeAttachments.push_back(part);
+    refreshComposeAttachments();
+    return true;
+}
+
+void AggregateChatForm::refreshComposeAttachments()
+{
+    if (!m_composeAttachmentsLayout || !m_composeAttachmentsScroll)
+        return;
+
+    while (QLayoutItem* item = m_composeAttachmentsLayout->takeAt(0)) {
+        if (QWidget* widget = item->widget())
+            widget->deleteLater();
+        delete item;
+    }
+
+    for (int i = 0; i < m_composeAttachments.size(); ++i) {
+        const OutgoingMessagePart part = m_composeAttachments.at(i);
+        auto* card = new QFrame(m_composeAttachmentsWidget);
+        card->setObjectName(QStringLiteral("composeAttachmentCard"));
+        card->setFixedSize(190, 64);
+        card->setStyleSheet(QStringLiteral(
+            "QFrame#composeAttachmentCard{background:#F8FAFC;border:1px solid #D9E2EC;border-radius:6px;}"));
+        auto* row = new QHBoxLayout(card);
+        row->setContentsMargins(8, 6, 6, 6);
+        row->setSpacing(8);
+
+        auto* thumb = new QLabel(card);
+        thumb->setFixedSize(48, 48);
+        thumb->setAlignment(Qt::AlignCenter);
+        thumb->setStyleSheet(QStringLiteral("background:#E5E7EB;border-radius:4px;color:#334155;font-size:12px;"));
+        if (part.type == OutgoingPartType::Image) {
+            QPixmap pixmap(part.localPath);
+            if (!pixmap.isNull())
+                thumb->setPixmap(pixmap.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            else
+                thumb->setText(QStringLiteral("图片"));
+        } else {
+            thumb->setText(part.type == OutgoingPartType::Video ? QStringLiteral("视频") : QStringLiteral("文件"));
+        }
+        row->addWidget(thumb);
+
+        auto* textBox = new QWidget(card);
+        textBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        auto* textLayout = new QVBoxLayout(textBox);
+        textLayout->setContentsMargins(0, 0, 0, 0);
+        textLayout->setSpacing(2);
+        auto* title = new QLabel(part.fileName.isEmpty() ? QFileInfo(part.localPath).fileName() : part.fileName, textBox);
+        title->setStyleSheet(QStringLiteral("color:#0F172A;font-size:12px;"));
+        title->setMinimumWidth(0);
+        title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        title->setTextFormat(Qt::PlainText);
+        title->setWordWrap(false);
+        title->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        title->setToolTip(part.localPath);
+        auto* detail = new QLabel(readableFileSize(part.sizeBytes), textBox);
+        detail->setStyleSheet(QStringLiteral("color:#64748B;font-size:11px;"));
+        detail->setMinimumWidth(0);
+        detail->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        textLayout->addWidget(title);
+        textLayout->addWidget(detail);
+        row->addWidget(textBox, 1);
+
+        auto* removeBtn = new QToolButton(card);
+        removeBtn->setText(QStringLiteral("×"));
+        removeBtn->setToolTip(QStringLiteral("删除附件"));
+        removeBtn->setCursor(Qt::PointingHandCursor);
+        removeBtn->setAutoRaise(false);
+        removeBtn->setFixedSize(22, 22);
+        removeBtn->setStyleSheet(QStringLiteral(
+            "QToolButton{"
+            "background:#E2E8F0;"
+            "border:1px solid #CBD5E1;"
+            "border-radius:11px;"
+            "color:#334155;"
+            "font-size:14px;"
+            "font-weight:700;"
+            "padding:0;"
+            "}"
+            "QToolButton:hover{background:#FEE2E2;border-color:#FCA5A5;color:#B91C1C;}"
+            "QToolButton:pressed{background:#FECACA;}"));
+        connect(removeBtn, &QToolButton::clicked, this, [this, i]() {
+            if (i >= 0 && i < m_composeAttachments.size()) {
+                m_composeAttachments.removeAt(i);
+                refreshComposeAttachments();
+                if (m_draftSaveTimer && m_currentConvId > 0)
+                    m_draftSaveTimer->start();
+                QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
+            }
+        });
+        row->addWidget(removeBtn, 0, Qt::AlignTop);
+
+        m_composeAttachmentsLayout->addWidget(card);
+    }
+    m_composeAttachmentsLayout->addStretch(1);
+    m_composeAttachmentsScroll->setVisible(!m_composeAttachments.isEmpty());
+    scheduleChatInputRelayout();
+}
+
+void AggregateChatForm::clearComposeAttachments()
+{
+    m_composeAttachments.clear();
+    refreshComposeAttachments();
+}
+
 void AggregateChatForm::persistCurrentDraft()
 {
     if (m_currentConvId <= 0 || !m_inputEdit)
         return;
 
     ConversationDao dao;
-    dao.saveCachedDraft(m_currentConvId, m_inputEdit->toPlainText());
+    const QString content = m_inputEdit->toPlainText();
+    dao.saveCachedDraft(m_currentConvId, content);
+    if (RuntimeMode::isSingleHostServiceDb()) {
+        const auto conv = dao.findById(m_currentConvId);
+        if (conv)
+            AppDataUiStateDao().saveDraft(conv->platform, conv->platformConversationId, content);
+    }
+    m_draftAttachments[m_currentConvId] = m_composeAttachments;
 }
 
 void AggregateChatForm::restoreDraftForConversation(int conversationId)
@@ -3336,14 +4267,25 @@ void AggregateChatForm::restoreDraftForConversation(int conversationId)
         return;
 
     ConversationDao dao;
-    const QString draft = conversationId > 0 ? dao.cachedDraftForConversation(conversationId) : QString();
+    QString draft = conversationId > 0 ? dao.cachedDraftForConversation(conversationId) : QString();
+    if (RuntimeMode::isSingleHostServiceDb() && conversationId > 0) {
+        const auto conv = dao.findById(conversationId);
+        if (conv) {
+            const QString appDataDraft =
+                AppDataUiStateDao().draftForConversation(conv->platform, conv->platformConversationId);
+            if (!appDataDraft.isEmpty())
+                draft = appDataDraft;
+        }
+    }
     m_restoringDraft = true;
     {
         const QSignalBlocker blocker(m_inputEdit->document());
         m_inputEdit->setPlainText(draft);
     }
+    m_composeAttachments = m_draftAttachments.value(conversationId);
+    refreshComposeAttachments();
     m_restoringDraft = false;
-    QTimer::singleShot(0, this, &AggregateChatForm::relayoutChatInputOverlay);
+    scheduleChatInputRelayout();
 }
 
 void AggregateChatForm::restoreLastSelectedConversation()
@@ -3352,7 +4294,18 @@ void AggregateChatForm::restoreLastSelectedConversation()
         return;
 
     ConversationDao dao;
-    int conversationId = dao.lastSelectedCachedConversationId();
+    int conversationId = -1;
+    if (RuntimeMode::isSingleHostServiceDb()) {
+        QString platform;
+        QString conversationKey;
+        if (AppDataUiStateDao().lastSelectedConversation(&platform, &conversationKey)) {
+            const auto conv = dao.findByPlatformId(platform, conversationKey);
+            if (conv && m_conversationListModel->containsConversation(conv->id))
+                conversationId = conv->id;
+        }
+    }
+    if (conversationId <= 0)
+        conversationId = dao.lastSelectedCachedConversationId();
     if (conversationId <= 0 || !m_conversationListModel->containsConversation(conversationId))
         conversationId = m_conversationListModel->conversationIdAt(0);
 
@@ -3372,8 +4325,55 @@ void AggregateChatForm::refreshConversationList()
                                         static_cast<int>(m_platformFilter),
                                         keyword,
                                         m_pendingStickyConvId);
-    m_conversationListModel->setSourceConversations(mgr.allConversations(),
-                                                    msgDao.lastCachedDirectionsByConversation());
+    QVector<ConversationInfo> conversations;
+    QHash<int, QString> lastDirections;
+    bool loadedFromService = false;
+    if (RuntimeMode::ownsBusinessDatabase() && m_pythonServiceAvailable) {
+        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+        QString error;
+        const QJsonObject response = Ipc::IpcService::instance().fetchConversationList(
+            QString(),
+            500,
+            5000,
+            &status,
+            &error);
+        if (status == Ipc::ResponseStatus::Success
+            && response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("success")) {
+            ConversationDao conversationDao;
+            const QJsonArray rows = response.value(QStringLiteral("conversations")).toArray();
+            conversations.reserve(rows.size());
+            for (const QJsonValue& value : rows) {
+                const QJsonObject object = value.toObject();
+                if (object.isEmpty())
+                    continue;
+                const int localId = conversationDao.upsertSnapshotCacheConversation(object);
+                if (localId <= 0)
+                    continue;
+                const auto conv = conversationDao.findById(localId);
+                if (!conv)
+                    continue;
+                conversations.push_back(*conv);
+                lastDirections.insert(
+                    localId,
+                    object.value(QStringLiteral("last_direction")).toString().trimmed().toLower());
+            }
+            loadedFromService = true;
+            qInfo() << "[AggregateChatForm] conversation list loaded from service"
+                    << "serviceCount=" << rows.size()
+                    << "mappedCount=" << conversations.size();
+        } else {
+            qWarning() << "[AggregateChatForm] service conversation list fetch failed; fallback local cache"
+                       << "status=" << Ipc::toString(status)
+                       << "error=" << error
+                       << "serviceError=" << response.value(QStringLiteral("error")).toString();
+        }
+    }
+
+    if (!loadedFromService) {
+        conversations = mgr.allConversations();
+        lastDirections = msgDao.lastCachedDirectionsByConversation();
+    }
+    m_conversationListModel->setSourceConversations(conversations, lastDirections);
     renderConversationListFromModel();
     return;
 }
@@ -3396,8 +4396,7 @@ void AggregateChatForm::reloadFromLocalCache()
                               ? m_conversationService->conversationById(m_currentConvId)
                               : std::optional<ConversationInfo>();
         if (conv) {
-            if (m_chatHeader)
-                m_chatHeader->setText(QStringLiteral("%1 (%2)").arg(conv->customerName, conv->platform));
+            setChatHeaderTitle(QStringLiteral("%1 (%2)").arg(conv->customerName, conv->platform));
             updateCustomerInfo(*conv);
         }
         scheduleScrollChatToBottom();
@@ -3533,6 +4532,49 @@ void AggregateChatForm::applyCacheSnapshotToLocalCache(const QJsonObject& snapsh
             << "removedConversations=" << removedConversations
             << "removedMessages=" << removedMessages
             << "nextCursor=" << nextCursor;
+}
+
+QVector<MessageRecord> AggregateChatForm::messagesForDisplay(int conversationId) const
+{
+    if (!RuntimeMode::ownsBusinessDatabase() || !m_pythonServiceAvailable)
+        return ConversationManager::instance().messages(conversationId);
+
+    const auto conv = m_conversationService
+                          ? m_conversationService->conversationById(conversationId)
+                          : std::optional<ConversationInfo>();
+    if (!conv)
+        return ConversationManager::instance().messages(conversationId);
+
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    QString error;
+    const QJsonObject response = Ipc::IpcService::instance().fetchConversationMessages(
+        conv->platform,
+        conv->platformConversationId,
+        500,
+        5000,
+        &status,
+        &error);
+    if (status != Ipc::ResponseStatus::Success
+        || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) != QLatin1String("success")) {
+        qWarning() << "[AggregateChatForm] service messages fetch failed; fallback local cache"
+                   << "conversationId=" << conversationId
+                   << "platform=" << conv->platform
+                   << "conversationKey=" << conv->platformConversationId
+                   << "status=" << Ipc::toString(status)
+                   << "error=" << error
+                   << "serviceError=" << response.value(QStringLiteral("error")).toString();
+        return ConversationManager::instance().messages(conversationId);
+    }
+
+    QVector<MessageRecord> messages;
+    const QJsonArray rows = response.value(QStringLiteral("messages")).toArray();
+    messages.reserve(rows.size());
+    for (const QJsonValue& value : rows) {
+        const QJsonObject object = value.toObject();
+        if (!object.isEmpty())
+            messages.push_back(serviceMessageRecord(object, conversationId));
+    }
+    return messages;
 }
 
 #if 0
@@ -3683,7 +4725,7 @@ void AggregateChatForm::showConversation(int conversationId)
     auto& mgr = ConversationManager::instance();
     mgr.selectConversation(conversationId);
 
-    auto messages = mgr.messages(conversationId);
+    auto messages = messagesForDisplay(conversationId);
     if (!m_messageListModel)
         m_messageListModel = new MessageListModel(this);
     m_messageListModel->setConversationMessages(conversationId, messages);
@@ -3695,12 +4737,13 @@ void AggregateChatForm::showConversation(int conversationId)
                           ? m_conversationService->conversationById(conversationId)
                           : std::optional<ConversationInfo>();
     if (conv) {
-        m_chatHeader->setText(QStringLiteral("%1 (%2)").arg(conv->customerName, conv->platform));
+        setChatHeaderTitle(QStringLiteral("%1 (%2)").arg(conv->customerName, conv->platform));
         updateCustomerInfo(*conv);
         resetSendTimelineForConversation();
     }
 
     m_centerStack->setCurrentWidget(m_chatArea);
+    updateCompactHeaderControls();
     restoreDraftForConversation(conversationId);
     m_inputEdit->setFocus();
 
@@ -3751,6 +4794,8 @@ void AggregateChatForm::refreshVisibleConversationMessages()
 {
     if (m_currentConvId <= 0 || !m_messageView)
         return;
+    if (RuntimeMode::ownsBusinessDatabase())
+        return;
 
     auto messages = ConversationManager::instance().messages(m_currentConvId);
     const QString newSignature = buildMessageSignature(messages);
@@ -3791,6 +4836,7 @@ void AggregateChatForm::updateCustomerInfo(const ConversationInfo& /*conv*/)
 {
     if (m_rightStack)
         m_rightStack->setCurrentWidget(m_customerDetail);
+    refreshCustomerProfilePanel();
 }
 
 void AggregateChatForm::resetSendTimelineForConversation()
@@ -3799,6 +4845,7 @@ void AggregateChatForm::resetSendTimelineForConversation()
         m_sendTimeline->clear();
     MessageSendEventDao dao;
     m_sendTimelineBaselineId = dao.globalMaxId();
+    m_aiStageTimelineBaselineId = AiRequestEventDao().globalStageMaxId();
 }
 
 void AggregateChatForm::pollSendTimeline()
@@ -3806,16 +4853,40 @@ void AggregateChatForm::pollSendTimeline()
     if (m_currentConvId <= 0 || !m_sendTimeline)
         return;
 
-    MessageSendEventDao dao;
-    const QVector<MessageSendEventRecord> rows =
-        dao.listSince(m_currentConvId, m_sendTimelineBaselineId);
-    if (rows.isEmpty())
-        return;
+    struct TimelineLine {
+        QDateTime createdAt;
+        QString text;
+    };
+    QVector<TimelineLine> lines;
 
+    MessageSendEventDao sendDao;
+    const QVector<MessageSendEventRecord> rows =
+        sendDao.listSince(m_currentConvId, m_sendTimelineBaselineId);
     for (const MessageSendEventRecord& e : rows) {
-        m_sendTimeline->appendPlainText(formatSendEventLine(e));
+        const QString line = formatSendEventLine(e);
+        if (!line.isEmpty())
+            lines.push_back({e.createdAt, line});
         m_sendTimelineBaselineId = std::max(m_sendTimelineBaselineId, e.id);
     }
+
+    AiRequestEventDao aiDao;
+    const QVector<AiRequestStageEventRecord> aiRows =
+        aiDao.listStagesSince(m_currentConvId, m_aiStageTimelineBaselineId);
+    for (const AiRequestStageEventRecord& e : aiRows) {
+        const QString line = formatAiStageEventLine(e);
+        if (!line.isEmpty())
+            lines.push_back({e.createdAt, line});
+        m_aiStageTimelineBaselineId = std::max(m_aiStageTimelineBaselineId, e.id);
+    }
+
+    if (lines.isEmpty())
+        return;
+
+    std::sort(lines.begin(), lines.end(), [](const TimelineLine& a, const TimelineLine& b) {
+        return a.createdAt < b.createdAt;
+    });
+    for (const TimelineLine& line : std::as_const(lines))
+        m_sendTimeline->appendPlainText(line.text);
 }
 
 void AggregateChatForm::onClearSendTimeline()
@@ -3824,6 +4895,7 @@ void AggregateChatForm::onClearSendTimeline()
         m_sendTimeline->clear();
     MessageSendEventDao dao;
     m_sendTimelineBaselineId = dao.globalMaxId();
+    m_aiStageTimelineBaselineId = AiRequestEventDao().globalStageMaxId();
 }
 
 void AggregateChatForm::showCenterEmptyState()
@@ -3831,6 +4903,7 @@ void AggregateChatForm::showCenterEmptyState()
     abortAggregateAiRequest();
     m_centerStack->setCurrentWidget(m_centerEmptyState);
     updateAggregateAiControlsVisibility();
+    updateCompactHeaderControls();
 }
 
 void AggregateChatForm::showRightEmptyState()
@@ -3838,6 +4911,8 @@ void AggregateChatForm::showRightEmptyState()
     if (m_sendTimeline)
         m_sendTimeline->clear();
     m_sendTimelineBaselineId = 0;
+    m_aiStageTimelineBaselineId = 0;
+    refreshCustomerProfilePanel();
 }
 
 // ===================== Slots =====================
@@ -3878,6 +4953,7 @@ void AggregateChatForm::onConversationItemClicked(QListWidgetItem* item)
     qDebug() << "点击会话:" << convId;
     showConversation(convId);
     refreshConversationList();
+    scheduleAdaptiveRelayout(false);
 }
 
 void AggregateChatForm::onConversationIndexClicked(const QModelIndex& index)
@@ -3889,6 +4965,7 @@ void AggregateChatForm::onConversationIndexClicked(const QModelIndex& index)
         return;
     showConversation(convId);
     refreshConversationList();
+    scheduleAdaptiveRelayout(false);
 }
 
 void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
@@ -3925,8 +5002,17 @@ void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
 
         ConversationDao convDao;
         const auto conv = convDao.findById(convId);
-        if (conv && !applyServiceConversationMutation(*conv, false))
+        if (conv) {
+            if (!applyServiceConversationMutation(*conv, false))
+                return;
+            if (RuntimeMode::ownsBusinessDatabase())
+                return;
+        } else if (RuntimeMode::ownsBusinessDatabase()) {
+            showAggregateWarning(this,
+                                 QStringLiteral("Python 服务端"),
+                                 QStringLiteral("未找到本地会话缓存，请先同步 Python 服务端数据后再操作。"));
             return;
+        }
 
         if (!ConversationManager::instance().clearConversationMessages(convId)) {
             QMessageBox warnBox(this);
@@ -3956,8 +5042,17 @@ void AggregateChatForm::onConversationListContextMenu(const QPoint& pos)
 
         ConversationDao convDao;
         const auto conv = convDao.findById(convId);
-        if (conv && !applyServiceConversationMutation(*conv, true))
+        if (conv) {
+            if (!applyServiceConversationMutation(*conv, true))
+                return;
+            if (RuntimeMode::ownsBusinessDatabase())
+                return;
+        } else if (RuntimeMode::ownsBusinessDatabase()) {
+            showAggregateWarning(this,
+                                 QStringLiteral("Python 服务端"),
+                                 QStringLiteral("未找到本地会话缓存，请先同步 Python 服务端数据后再操作。"));
             return;
+        }
 
         ConversationManager::instance().deleteConversation(convId);
     }
@@ -3968,36 +5063,71 @@ void AggregateChatForm::onSendClicked()
     QElapsedTimer timer;
     timer.start();
     if (m_currentConvId <= 0) return;
-    QString text = m_inputEdit->toPlainText().trimmed();
-    if (text.isEmpty()) return;
+    const QString text = m_inputEdit ? m_inputEdit->toPlainText().trimmed() : QString();
+    if (text.isEmpty() && m_composeAttachments.isEmpty()) return;
+
+    for (const OutgoingMessagePart& part : std::as_const(m_composeAttachments)) {
+        if (part.localPath.trimmed().isEmpty() || !QFileInfo::exists(part.localPath)) {
+            showStatusMessage(QStringLiteral("附件不存在或已被移动：%1").arg(part.fileName), 6000);
+            return;
+        }
+    }
+
+    OutgoingMessagePayload payload;
+    payload.parts = m_composeAttachments;
+    if (!text.isEmpty()) {
+        OutgoingMessagePart textPart;
+        textPart.type = OutgoingPartType::Text;
+        textPart.text = text;
+        payload.parts.push_back(textPart);
+    }
 
     // 发送后先留在「待处理」，直到客服切换会话或主动切换 tab。
     m_pendingStickyConvId = m_currentConvId;
     m_inputEdit->clear();
-    ConversationDao().clearCachedDraft(m_currentConvId);
-    ConversationManager::instance().sendMessage(m_currentConvId, text);
+    clearComposeAttachments();
+    m_draftAttachments.remove(m_currentConvId);
+    ConversationDao convDao;
+    const auto conv = convDao.findById(m_currentConvId);
+    convDao.clearCachedDraft(m_currentConvId);
+    if (RuntimeMode::isSingleHostServiceDb() && conv)
+        AppDataUiStateDao().clearDraft(conv->platform, conv->platformConversationId);
+    ConversationManager::instance().sendPayload(m_currentConvId, payload);
+    schedulePythonServiceBackfill(300);
     qInfo() << "[AggregateChatForm] send click timing"
             << "conversationId=" << m_currentConvId
             << "textLength=" << text.size()
+            << "partCount=" << payload.parts.size()
             << "elapsedMs=" << timer.elapsed();
 }
 
-void AggregateChatForm::onStopAutoReplyClicked()
+void AggregateChatForm::onAutoReplyToggleClicked()
 {
-    QSettings s = AppSettings::create();
-    s.setValue(QStringLiteral("aggregateAutoReply/emergencyUserStop"), true);
+    const bool enable = m_btnAutoReplyToggle && m_btnAutoReplyToggle->isChecked();
+    if (enable) {
+        QMessageBox box(QMessageBox::Warning, QStringLiteral("AI 自动回复"),
+                        QStringLiteral("开启后，AI 将接管来自千牛平台会话中的客户消息，并在满足条件时自动生成并发送回复。\n\n"
+                                       "请确认已在左栏「管理后台」→「AI 客服后台」→「API 配置/模型」中配置好模型与 API，"
+                                       "并了解误发、合规与费用风险。\n\n"
+                                       "确定要开启自动回复吗？"),
+                        QMessageBox::Yes | QMessageBox::No, this);
+        box.setDefaultButton(QMessageBox::No);
+        box.setStyleSheet(aggregateMessageBoxContrastStyle());
+        if (box.exec() != QMessageBox::Yes) {
+            refreshAutoReplyToggleButtonUi();
+            return;
+        }
 
-    abortAggregateAiRequest();
-
-    if (m_modeCombo) {
-        m_suppressingModeComboChange = true;
-        m_modeCombo->setCurrentIndex(0);
-        m_lastAggregateModeIndex = 0;
-        m_suppressingModeComboChange = false;
-        updateAggregateAiControlsVisibility();
+        setAggregateAutoReplyEnabled(true);
+        showStatusMessage(QStringLiteral("已开启自动回复"), 4000);
+        if (m_currentConvId > 0)
+            tryAggregateAutoReply(m_currentConvId, QStringLiteral("manual-enable"));
+        return;
     }
 
-    showStatusMessage(QStringLiteral("已停止自动回复并切换为「人工接待」"), 5000);
+    setAggregateAutoReplyEnabled(false);
+    abortAutoReplyRequest();
+    showStatusMessage(QStringLiteral("已停止自动回复"), 5000);
 }
 
 void AggregateChatForm::onConversationListChanged()
@@ -4028,8 +5158,7 @@ void AggregateChatForm::onUnifiedConversationUpdated(const Models::Conversation&
     if (conversation.id == m_currentConvId) {
         const ConversationInfo info = conversationInfoFromUnified(conversation);
         updateCustomerInfo(info);
-        if (m_chatHeader)
-            m_chatHeader->setText(QStringLiteral("%1 (%2)").arg(info.customerName, info.platform));
+        setChatHeaderTitle(QStringLiteral("%1 (%2)").arg(info.customerName, info.platform));
     }
     refreshConversationList();
 }
@@ -4185,6 +5314,12 @@ bool AggregateChatForm::applyServiceConversationMutation(const ConversationInfo&
         qInfo() << "[AggregateChatForm] service mutation skipped: Python service unavailable"
                 << "conversationId=" << conv.id
                 << "error=" << serviceError;
+        if (RuntimeMode::ownsBusinessDatabase()) {
+            showAggregateWarning(this,
+                                 QStringLiteral("Python 服务端"),
+                                 QStringLiteral("Python 服务未启动，无法修改服务端会话数据。请先启动 Python 服务后再操作。"));
+            return false;
+        }
         return true;
     }
 
@@ -4207,8 +5342,18 @@ bool AggregateChatForm::applyServiceConversationMutation(const ConversationInfo&
               &error);
     const bool ok = status == Ipc::ResponseStatus::Success
         && response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("success");
-    if (ok)
+    if (ok) {
+        if (RuntimeMode::ownsBusinessDatabase()) {
+            const QJsonObject event = response.value(QStringLiteral("event")).toObject();
+            if (!ipc.dispatchPlatformEvent(event)) {
+                qWarning() << "[AggregateChatForm] service mutation succeeded without dispatchable event"
+                           << "conversationId=" << conv.id
+                           << "delete=" << deleteConversation;
+                reloadFromLocalCache();
+            }
+        }
         return true;
+    }
 
     QString detail = error;
     if (detail.isEmpty())
@@ -4238,18 +5383,61 @@ bool AggregateChatForm::applyServiceConversationMutation(const ConversationInfo&
 
 void AggregateChatForm::updateAggregateAiControlsVisibility()
 {
-    const bool modeAi = m_modeCombo && m_modeCombo->currentIndex() == kAggregateModeIndexAiAssist;
     const bool convOk = m_currentConvId > 0;
     const bool onChat = m_centerStack && m_centerStack->currentWidget() == m_chatArea;
-    const bool showGen = modeAi && convOk && onChat;
+    const bool showControls = convOk && onChat;
+    const bool aiBusy = m_aggregateAiGenerating || m_autoReplyBusy || m_customerProfileBusy;
     if (m_btnAiModelPick) {
-        m_btnAiModelPick->setVisible(showGen);
-        m_btnAiModelPick->setEnabled(showGen && !m_aggregateAiGenerating);
+        m_btnAiModelPick->setVisible(showControls);
+        m_btnAiModelPick->setEnabled(showControls && !aiBusy);
     }
     if (m_btnAiGenerate) {
-        m_btnAiGenerate->setVisible(showGen);
-        m_btnAiGenerate->setEnabled(showGen && !m_aggregateAiGenerating);
+        m_btnAiGenerate->setVisible(showControls);
+        m_btnAiGenerate->setEnabled(showControls && !aiBusy);
     }
+    if (m_btnAutoReplyToggle) {
+        m_btnAutoReplyToggle->setVisible(showControls);
+        m_btnAutoReplyToggle->setEnabled(showControls && !m_aggregateAiGenerating && !m_customerProfileBusy);
+    }
+    if (m_btnOrganizeCustomerProfile) {
+        m_btnOrganizeCustomerProfile->setEnabled(showControls && !aiBusy);
+    }
+    refreshAutoReplyToggleButtonUi();
+    refreshCustomerProfilePanel();
+}
+
+bool AggregateChatForm::isAggregateAutoReplyEnabled() const
+{
+    QSettings s = AppSettings::create();
+    return s.value(QStringLiteral("aggregateAutoReply/enabled"), false).toBool()
+        && !s.value(QStringLiteral("aggregateAutoReply/emergencyUserStop"), false).toBool();
+}
+
+void AggregateChatForm::setAggregateAutoReplyEnabled(bool enabled)
+{
+    QSettings s = AppSettings::create();
+    s.setValue(QStringLiteral("aggregateAutoReply/enabled"), enabled);
+    s.setValue(QStringLiteral("aggregateAutoReply/emergencyUserStop"), !enabled);
+    refreshAutoReplyToggleButtonUi();
+}
+
+void AggregateChatForm::refreshAutoReplyToggleButtonUi()
+{
+    if (!m_btnAutoReplyToggle)
+        return;
+
+    const bool enabled = isAggregateAutoReplyEnabled();
+    m_btnAutoReplyToggle->setChecked(enabled);
+    const QString label = enabled ? QStringLiteral("停止自动回复")
+                                  : QStringLiteral("开启自动回复");
+    m_btnAutoReplyToggle->setText(QString());
+    m_btnAutoReplyToggle->setIcon(QIcon(enabled
+        ? QStringLiteral(":/aggregate_reception_icons/stop_auto_reply_icon.svg")
+        : QStringLiteral(":/aggregate_reception_icons/turn_on_auto_reply_icon.svg")));
+    m_btnAutoReplyToggle->setToolTip(
+        enabled ? QStringLiteral("停止 AI 自动回复，当前自动回复任务会被中止。")
+                : QStringLiteral("开启 AI 自动回复。开启前会确认误发、合规与费用风险。"));
+    m_btnAutoReplyToggle->setAccessibleName(label);
 }
 
 void AggregateChatForm::setAggregateAiBusy(bool busy)
@@ -4259,8 +5447,6 @@ void AggregateChatForm::setAggregateAiBusy(bool busy)
         m_btnSend->setEnabled(!busy);
     if (m_inputEdit)
         m_inputEdit->setReadOnly(busy);
-    if (m_modeCombo)
-        m_modeCombo->setEnabled(!busy);
     if (busy)
         showStatusMessage(QStringLiteral("AI 正在生成草稿..."), 0);
     updateAggregateAiControlsVisibility();
@@ -4268,12 +5454,37 @@ void AggregateChatForm::setAggregateAiBusy(bool busy)
 
 void AggregateChatForm::abortAggregateAiRequest()
 {
+    if (m_aggregateAiGenerating && m_aggregateAiRequestEventId > 0) {
+        AiRequestEventDao().appendStage(m_aggregateAiRequestEventId, m_currentConvId,
+                                         QStringLiteral("canceled"));
+        AiRequestEventDao().cancelEvent(m_aggregateAiRequestEventId,
+                                        int(m_aggregateAiRequestTimer.elapsed()));
+        m_aggregateAiRequestEventId = 0;
+        m_aggregateAiFirstTokenMs = 0;
+    }
+    if (m_autoReplyBusy && m_autoReplyRequestEventId > 0) {
+        AiRequestEventDao().appendStage(m_autoReplyRequestEventId, m_autoReplyTargetConvId,
+                                         QStringLiteral("canceled"));
+        AiRequestEventDao().cancelEvent(m_autoReplyRequestEventId,
+                                        int(m_autoReplyRequestTimer.elapsed()));
+        m_autoReplyRequestEventId = 0;
+        m_autoReplyFirstTokenMs = 0;
+    }
+    if (m_customerProfileBusy && m_customerProfileRequestEventId > 0) {
+        AiRequestEventDao().appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                                         QStringLiteral("canceled"));
+        AiRequestEventDao().cancelEvent(m_customerProfileRequestEventId,
+                                        int(m_customerProfileRequestTimer.elapsed()));
+        m_customerProfileRequestEventId = 0;
+        m_customerProfileFirstTokenMs = 0;
+    }
     if (!m_aggregateAiIpcRequestId.isEmpty()) {
         Ipc::IpcService::instance().cancelRequest(m_aggregateAiIpcRequestId);
         m_aggregateAiIpcRequestId.clear();
     }
     clearStreamingSession(m_aggregateAiSession);
     clearStreamingSession(m_autoReplySession);
+    clearStreamingSession(m_customerProfileSession);
     if (m_aggregateAiGenerating)
         setAggregateAiBusy(false);
     if (m_autoReplyBusy) {
@@ -4281,6 +5492,32 @@ void AggregateChatForm::abortAggregateAiRequest()
         m_autoReplyTargetConvId = -1;
         m_autoReplyAccumulated.clear();
     }
+    if (m_customerProfileBusy) {
+        m_customerProfileBusy = false;
+        m_customerProfileAccumulated.clear();
+    }
+    updateAggregateAiControlsVisibility();
+    refreshRightBarMetrics();
+}
+
+void AggregateChatForm::abortAutoReplyRequest()
+{
+    if (m_autoReplyBusy && m_autoReplyRequestEventId > 0) {
+        AiRequestEventDao().appendStage(m_autoReplyRequestEventId, m_autoReplyTargetConvId,
+                                         QStringLiteral("canceled"));
+        AiRequestEventDao().cancelEvent(m_autoReplyRequestEventId,
+                                        int(m_autoReplyRequestTimer.elapsed()));
+        m_autoReplyRequestEventId = 0;
+        m_autoReplyFirstTokenMs = 0;
+    }
+    clearStreamingSession(m_autoReplySession);
+    if (m_autoReplyBusy) {
+        m_autoReplyBusy = false;
+        m_autoReplyTargetConvId = -1;
+        m_autoReplyAccumulated.clear();
+    }
+    updateAggregateAiControlsVisibility();
+    refreshRightBarMetrics();
 }
 
 void AggregateChatForm::clearStreamingSession(IAiStreamingSession*& session)
@@ -4293,41 +5530,10 @@ void AggregateChatForm::clearStreamingSession(IAiStreamingSession*& session)
     session = nullptr;
 }
 
-void AggregateChatForm::onModeComboChanged()
-{
-    if (!m_modeCombo || m_suppressingModeComboChange)
-        return;
-
-    const int newIdx = m_modeCombo->currentIndex();
-    if (newIdx == kAggregateModeIndexAutoReply && m_lastAggregateModeIndex != kAggregateModeIndexAutoReply) {
-        QMessageBox box(QMessageBox::Warning, QStringLiteral("AI 自动回复"),
-                        QStringLiteral("开启后，AI 将接管来自千牛平台会话中的客户消息，并在满足条件时自动生成并发送回复（当前版本仅讨论千牛；"
-                                       "具体触发与风控规则以后续实现为准）。\n\n"
-                                       "请确认已在左栏「管理后台」→「AI 客服后台」→「API 配置/模型」中"
-                                       "配置好模型与 API，并了解误发、合规与费用风险。\n\n"
-                                       "确定要进入「AI 自动回复」模式吗？"),
-                        QMessageBox::Yes | QMessageBox::No, this);
-        box.setDefaultButton(QMessageBox::No);
-        box.setStyleSheet(aggregateMessageBoxContrastStyle());
-        if (box.exec() != QMessageBox::Yes) {
-            m_suppressingModeComboChange = true;
-            m_modeCombo->setCurrentIndex(m_lastAggregateModeIndex);
-            m_suppressingModeComboChange = false;
-            return;
-        }
-        QSettings st = AppSettings::create();
-        st.setValue(QStringLiteral("aggregateAutoReply/emergencyUserStop"), false);
-    }
-
-    m_lastAggregateModeIndex = newIdx;
-    updateAggregateAiControlsVisibility();
-}
-
 void AggregateChatForm::refreshAggregateAiModelButtonUi()
 {
     if (m_btnAiModelPick)
-        m_btnAiModelPick->setText(
-            QStringLiteral("模型：%1").arg(aggregateModelMenuLabel(m_aggregateAiSessionModelKey)));
+        m_btnAiModelPick->setText(aggregateModelMenuLabel(m_aggregateAiSessionModelKey));
     if (m_aggregateAiModelMenu) {
         for (QAction* a : m_aggregateAiModelMenu->actions()) {
             const QString k = a->data().toString();
@@ -4347,12 +5553,70 @@ void AggregateChatForm::onAggregateAiModelMenuTriggered(QAction* action)
     QSettings s = AppSettings::create();
     s.setValue(QStringLiteral("aggregateAi/sessionModelKey"), key);
     refreshAggregateAiModelButtonUi();
+    refreshRightBarMetrics();
+}
+
+void AggregateChatForm::onOrganizeCustomerProfileClicked()
+{
+    if (m_currentConvId <= 0 || m_customerProfileBusy)
+        return;
+    if (m_aggregateAiGenerating || m_autoReplyBusy) {
+        showStatusMessage(QStringLiteral("AI 正在处理其他任务，请稍后再整理客户信息"), 5000);
+        return;
+    }
+    if (!m_aiChatService) {
+        showStatusMessage(QStringLiteral("AI 服务未初始化"), 4000);
+        return;
+    }
+
+    AggregateAiBuiltRequest built =
+        m_aiChatService->buildAggregateCustomerProfileRequest(m_currentConvId, m_aggregateAiSessionModelKey);
+    if (!handleAggregateBuildFailure(this, built, false, nullptr))
+        return;
+
+    m_customerProfileAccumulated.clear();
+    m_customerProfileRequestTimer.restart();
+    m_customerProfileFirstTokenMs = 0;
+    built.request.extraRootFields.insert(QStringLiteral("max_tokens"), 360);
+    clearStreamingSession(m_customerProfileSession);
+    m_customerProfileSession = m_aiChatService->createSession(built.config, built.request, this);
+    connect(m_customerProfileSession, &IAiStreamingSession::delta,
+            this, &AggregateChatForm::onCustomerProfileStreamDelta);
+    connect(m_customerProfileSession, &IAiStreamingSession::completed,
+            this, &AggregateChatForm::onCustomerProfileCompleted);
+    connect(m_customerProfileSession, &IAiStreamingSession::failed,
+            this, &AggregateChatForm::onCustomerProfileFailed);
+
+    m_customerProfileRequestEventId = AiRequestEventDao().beginEvent(
+        QStringLiteral("aggregate_customer_profile"),
+        m_currentConvId,
+        m_aggregateAiSessionModelKey,
+        built.config.model,
+        QStringLiteral("customer-profile"));
+    if (m_customerProfileRequestEventId > 0) {
+        AiRequestEventDao eventDao;
+        eventDao.appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                             QStringLiteral("profile_started"));
+        eventDao.appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                             QStringLiteral("context_ready"));
+        eventDao.appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                             QStringLiteral("request_sent"),
+                             aggregateModelMenuLabel(m_aggregateAiSessionModelKey));
+    }
+
+    setCustomerProfileBusy(true);
+    showStatusMessage(QStringLiteral("正在整理客户信息..."), 0);
+    m_customerProfileSession->start();
 }
 
 void AggregateChatForm::onGenerateAiDraftClicked()
 {
     if (m_currentConvId <= 0 || m_aggregateAiGenerating)
         return;
+    if (m_autoReplyBusy) {
+        showStatusMessage(QStringLiteral("自动回复处理中，请先停止自动回复或稍后再生成草稿"), 5000);
+        return;
+    }
     if (!m_aiChatService) {
         showStatusMessage(QStringLiteral("AI 服务未初始化"), 4000);
         return;
@@ -4373,6 +5637,24 @@ void AggregateChatForm::onGenerateAiDraftClicked()
     connect(m_aggregateAiSession, &IAiStreamingSession::delta, this, &AggregateChatForm::onAggregateAiStreamDelta);
     connect(m_aggregateAiSession, &IAiStreamingSession::completed, this, &AggregateChatForm::onAggregateAiCompleted);
     connect(m_aggregateAiSession, &IAiStreamingSession::failed, this, &AggregateChatForm::onAggregateAiFailed);
+    m_aggregateAiRequestTimer.restart();
+    m_aggregateAiFirstTokenMs = 0;
+    m_aggregateAiRequestEventId = AiRequestEventDao().beginEvent(
+        QStringLiteral("aggregate_manual"),
+        m_currentConvId,
+        m_aggregateAiSessionModelKey,
+        built.config.model,
+        QStringLiteral("manual"));
+    if (m_aggregateAiRequestEventId > 0) {
+        AiRequestEventDao eventDao;
+        eventDao.appendStage(m_aggregateAiRequestEventId, m_currentConvId,
+                             QStringLiteral("manual_started"));
+        eventDao.appendStage(m_aggregateAiRequestEventId, m_currentConvId,
+                             QStringLiteral("context_ready"));
+        eventDao.appendStage(m_aggregateAiRequestEventId, m_currentConvId,
+                             QStringLiteral("request_sent"),
+                             aggregateModelMenuLabel(m_aggregateAiSessionModelKey));
+    }
     setAggregateAiBusy(true);
     m_aggregateAiSession->start();
 }
@@ -4420,14 +5702,8 @@ void AggregateChatForm::tryAggregateAutoReply(int conversationId, const QString&
 {
     if (conversationId <= 0 || !m_aiChatService)
         return;
-    if (!m_modeCombo || m_modeCombo->currentIndex() != kAggregateModeIndexAutoReply)
+    if (!isAggregateAutoReplyEnabled())
         return;
-
-    QSettings st = AppSettings::create();
-    if (st.value(QStringLiteral("aggregateAutoReply/emergencyUserStop"), false).toBool()) {
-        qInfo() << "[AggregateAutoReply] skip emergencyUserStop trigger=" << triggerTag << "conv=" << conversationId;
-        return;
-    }
 
     const auto conv = m_conversationService
                           ? m_conversationService->conversationById(conversationId)
@@ -4455,6 +5731,25 @@ void AggregateChatForm::tryAggregateAutoReply(int conversationId, const QString&
     m_autoReplyTargetConvId = conversationId;
     m_autoReplyAccumulated.clear();
     m_autoReplyBusy = true;
+    m_autoReplyRequestTimer.restart();
+    m_autoReplyFirstTokenMs = 0;
+    m_autoReplyRequestEventId = AiRequestEventDao().beginEvent(
+        QStringLiteral("aggregate_auto"),
+        conversationId,
+        m_aggregateAiSessionModelKey,
+        built.config.model,
+        triggerTag);
+    if (m_autoReplyRequestEventId > 0) {
+        AiRequestEventDao eventDao;
+        eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
+                             QStringLiteral("auto_started"));
+        eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
+                             QStringLiteral("context_ready"));
+        eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
+                             QStringLiteral("request_sent"),
+                             aggregateModelMenuLabel(m_aggregateAiSessionModelKey));
+    }
+    updateAggregateAiControlsVisibility();
     built.request.extraRootFields.insert(QStringLiteral("max_tokens"), 512);
     clearStreamingSession(m_autoReplySession);
     m_autoReplySession = m_aiChatService->createSession(built.config, built.request, this);
@@ -4470,6 +5765,14 @@ void AggregateChatForm::onAutoReplyStreamDelta(const QString& delta)
 {
     if (!m_autoReplyBusy)
         return;
+    if (m_autoReplyFirstTokenMs <= 0) {
+        m_autoReplyFirstTokenMs = int(m_autoReplyRequestTimer.elapsed());
+        AiRequestEventDao().appendStage(
+            m_autoReplyRequestEventId,
+            m_autoReplyTargetConvId,
+            QStringLiteral("first_token"),
+            aggregateMetricDurationLabel(m_autoReplyFirstTokenMs));
+    }
     m_autoReplyAccumulated += delta;
 }
 
@@ -4485,12 +5788,47 @@ void AggregateChatForm::onAutoReplyCompleted()
     m_autoReplyAccumulated.clear();
 
     if (text.isEmpty()) {
+        if (m_autoReplyRequestEventId > 0) {
+            AiRequestEventDao().appendStage(m_autoReplyRequestEventId, cid,
+                                             QStringLiteral("failed"),
+                                             QStringLiteral("模型未返回正文"));
+            AiRequestEventDao().failEvent(m_autoReplyRequestEventId,
+                                          int(m_autoReplyRequestTimer.elapsed()),
+                                          QStringLiteral("empty_completion"));
+            m_autoReplyRequestEventId = 0;
+            m_autoReplyFirstTokenMs = 0;
+        }
+        updateAggregateAiControlsVisibility();
+        refreshRightBarMetrics();
         qInfo() << "[AggregateAutoReply] empty completion conv=" << cid;
         showStatusMessage(QStringLiteral("自动回复：模型未返回正文"), 5000);
         return;
     }
 
+    if (m_autoReplyRequestEventId > 0) {
+        const int durationMs = int(m_autoReplyRequestTimer.elapsed());
+        AiRequestEventDao eventDao;
+        eventDao.appendStage(
+            m_autoReplyRequestEventId,
+            cid,
+            QStringLiteral("completed"),
+            QStringLiteral("%1 字，耗时 %2")
+                .arg(text.size())
+                .arg(aggregateMetricDurationLabel(durationMs)));
+        eventDao.appendStage(m_autoReplyRequestEventId, cid,
+                             QStringLiteral("send_submitted"));
+        AiRequestEventDao().completeEvent(m_autoReplyRequestEventId,
+                                          durationMs,
+                                          m_autoReplyFirstTokenMs,
+                                          text.size());
+        m_autoReplyRequestEventId = 0;
+        m_autoReplyFirstTokenMs = 0;
+    }
+    updateAggregateAiControlsVisibility();
+    refreshRightBarMetrics();
+
     ConversationManager::instance().sendMessage(cid, text);
+    schedulePythonServiceBackfill(300);
     qInfo() << "[AggregateAutoReply] sent conv=" << cid << "len=" << text.size();
     showStatusMessage(QStringLiteral("已自动发送 AI 回复"), 4000);
 }
@@ -4499,10 +5837,23 @@ void AggregateChatForm::onAutoReplyFailed(const QString& reason)
 {
     if (!m_autoReplyBusy)
         return;
+    const int cid = m_autoReplyTargetConvId;
     m_autoReplyBusy = false;
     clearStreamingSession(m_autoReplySession);
     m_autoReplyTargetConvId = -1;
     m_autoReplyAccumulated.clear();
+    if (m_autoReplyRequestEventId > 0) {
+        AiRequestEventDao().appendStage(m_autoReplyRequestEventId, cid,
+                                         QStringLiteral("failed"),
+                                         reason.left(120));
+        AiRequestEventDao().failEvent(m_autoReplyRequestEventId,
+                                      int(m_autoReplyRequestTimer.elapsed()),
+                                      reason);
+        m_autoReplyRequestEventId = 0;
+        m_autoReplyFirstTokenMs = 0;
+    }
+    updateAggregateAiControlsVisibility();
+    refreshRightBarMetrics();
     qInfo() << "[AggregateAutoReply] failed:" << reason;
     showStatusMessage(QStringLiteral("自动回复失败：%1").arg(reason.left(120)), 6000);
 }
@@ -4511,6 +5862,14 @@ void AggregateChatForm::onAggregateAiStreamDelta(const QString& delta)
 {
     if (!m_aggregateAiGenerating)
         return;
+    if (m_aggregateAiFirstTokenMs <= 0) {
+        m_aggregateAiFirstTokenMs = int(m_aggregateAiRequestTimer.elapsed());
+        AiRequestEventDao().appendStage(
+            m_aggregateAiRequestEventId,
+            m_currentConvId,
+            QStringLiteral("first_token"),
+            aggregateMetricDurationLabel(m_aggregateAiFirstTokenMs));
+    }
     m_aggregateAiAccumulated += delta;
     if (m_inputEdit)
         m_inputEdit->setPlainText(m_aggregateAiBaseline + m_aggregateAiAccumulated);
@@ -4523,9 +5882,37 @@ void AggregateChatForm::onAggregateAiCompleted()
     clearStreamingSession(m_aggregateAiSession);
     setAggregateAiBusy(false);
     if (m_aggregateAiAccumulated.trimmed().isEmpty()) {
+        if (m_aggregateAiRequestEventId > 0) {
+            AiRequestEventDao().appendStage(m_aggregateAiRequestEventId, m_currentConvId,
+                                             QStringLiteral("failed"),
+                                             QStringLiteral("模型未返回正文"));
+            AiRequestEventDao().failEvent(m_aggregateAiRequestEventId,
+                                          int(m_aggregateAiRequestTimer.elapsed()),
+                                          QStringLiteral("empty_completion"));
+            m_aggregateAiRequestEventId = 0;
+            m_aggregateAiFirstTokenMs = 0;
+        }
+        refreshRightBarMetrics();
         showStatusMessage(QStringLiteral("AI 未返回可用草稿"), 5000);
         return;
     }
+    if (m_aggregateAiRequestEventId > 0) {
+        const int durationMs = int(m_aggregateAiRequestTimer.elapsed());
+        AiRequestEventDao().appendStage(
+            m_aggregateAiRequestEventId,
+            m_currentConvId,
+            QStringLiteral("completed"),
+            QStringLiteral("%1 字，耗时 %2")
+                .arg(m_aggregateAiAccumulated.trimmed().size())
+                .arg(aggregateMetricDurationLabel(durationMs)));
+        AiRequestEventDao().completeEvent(m_aggregateAiRequestEventId,
+                                          durationMs,
+                                          m_aggregateAiFirstTokenMs,
+                                          m_aggregateAiAccumulated.trimmed().size());
+        m_aggregateAiRequestEventId = 0;
+        m_aggregateAiFirstTokenMs = 0;
+    }
+    refreshRightBarMetrics();
     persistCurrentDraft();
     showStatusMessage(QStringLiteral("AI 草稿已生成，可直接发送或继续修改"), 4000);
 }
@@ -4542,6 +5929,117 @@ void AggregateChatForm::onAggregateAiFailed(const QString& reason)
     if (m_inputEdit)
         m_inputEdit->setPlainText(m_aggregateAiBaseline + m_aggregateAiAccumulated + tail);
     persistCurrentDraft();
+    if (m_aggregateAiRequestEventId > 0) {
+        AiRequestEventDao().appendStage(m_aggregateAiRequestEventId, m_currentConvId,
+                                         QStringLiteral("failed"),
+                                         reason.left(120));
+        AiRequestEventDao().failEvent(m_aggregateAiRequestEventId,
+                                      int(m_aggregateAiRequestTimer.elapsed()),
+                                      reason);
+        m_aggregateAiRequestEventId = 0;
+        m_aggregateAiFirstTokenMs = 0;
+    }
     setAggregateAiBusy(false);
+    refreshRightBarMetrics();
     showStatusMessage(QStringLiteral("AI 草稿生成失败：%1").arg(reason.left(120)), 6000);
+}
+
+void AggregateChatForm::onCustomerProfileStreamDelta(const QString& delta)
+{
+    if (!m_customerProfileBusy)
+        return;
+    if (m_customerProfileFirstTokenMs <= 0) {
+        m_customerProfileFirstTokenMs = int(m_customerProfileRequestTimer.elapsed());
+        AiRequestEventDao().appendStage(
+            m_customerProfileRequestEventId,
+            m_currentConvId,
+            QStringLiteral("first_token"),
+            aggregateMetricDurationLabel(m_customerProfileFirstTokenMs));
+    }
+    m_customerProfileAccumulated += delta;
+}
+
+void AggregateChatForm::onCustomerProfileCompleted()
+{
+    if (!m_customerProfileBusy)
+        return;
+    clearStreamingSession(m_customerProfileSession);
+
+    const int durationMs = int(m_customerProfileRequestTimer.elapsed());
+    const QString raw = m_customerProfileAccumulated.trimmed();
+    if (raw.isEmpty()) {
+        if (m_customerProfileRequestEventId > 0) {
+            AiRequestEventDao().appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                                             QStringLiteral("failed"),
+                                             QStringLiteral("模型未返回客户信息"));
+            AiRequestEventDao().failEvent(m_customerProfileRequestEventId,
+                                          durationMs,
+                                          QStringLiteral("empty_completion"));
+            m_customerProfileRequestEventId = 0;
+            m_customerProfileFirstTokenMs = 0;
+        }
+        m_customerProfileAccumulated.clear();
+        setCustomerProfileBusy(false);
+        refreshRightBarMetrics();
+        showStatusMessage(QStringLiteral("客户信息整理失败：模型未返回内容"), 5000);
+        return;
+    }
+
+    const QJsonObject profile = parseCustomerProfileJson(raw);
+    const bool saved = CustomerProfileDao().upsert(m_currentConvId,
+                                                   profile,
+                                                   m_aggregateAiSessionModelKey,
+                                                   m_customerProfileRequestEventId);
+    if (m_customerProfileRequestEventId > 0) {
+        AiRequestEventDao eventDao;
+        if (saved) {
+            eventDao.appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                                 QStringLiteral("profile_completed"),
+                                 QStringLiteral("耗时 %1").arg(aggregateMetricDurationLabel(durationMs)));
+            eventDao.appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                                 QStringLiteral("profile_saved"));
+            eventDao.completeEvent(m_customerProfileRequestEventId,
+                                   durationMs,
+                                   m_customerProfileFirstTokenMs,
+                                   raw.size());
+        } else {
+            eventDao.appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                                 QStringLiteral("failed"),
+                                 QStringLiteral("客户信息保存失败"));
+            eventDao.failEvent(m_customerProfileRequestEventId,
+                               durationMs,
+                               QStringLiteral("save_failed"));
+        }
+        m_customerProfileRequestEventId = 0;
+        m_customerProfileFirstTokenMs = 0;
+    }
+
+    m_customerProfileAccumulated.clear();
+    setCustomerProfileBusy(false);
+    refreshRightBarMetrics();
+    refreshCustomerProfilePanel();
+    showStatusMessage(saved ? QStringLiteral("客户信息已更新")
+                            : QStringLiteral("客户信息保存失败"),
+                      saved ? 4000 : 6000);
+}
+
+void AggregateChatForm::onCustomerProfileFailed(const QString& reason)
+{
+    if (!m_customerProfileBusy)
+        return;
+    clearStreamingSession(m_customerProfileSession);
+    m_customerProfileAccumulated.clear();
+    if (m_customerProfileRequestEventId > 0) {
+        AiRequestEventDao().appendStage(m_customerProfileRequestEventId, m_currentConvId,
+                                         QStringLiteral("failed"),
+                                         reason.left(120));
+        AiRequestEventDao().failEvent(m_customerProfileRequestEventId,
+                                      int(m_customerProfileRequestTimer.elapsed()),
+                                      reason);
+        m_customerProfileRequestEventId = 0;
+        m_customerProfileFirstTokenMs = 0;
+    }
+    setCustomerProfileBusy(false);
+    refreshRightBarMetrics();
+    showStatusMessage(QStringLiteral("客户信息整理失败：%1").arg(reason.left(120)), 6000);
 }

@@ -18,6 +18,9 @@ public:
     virtual void startListening() = 0;
     virtual void stopListening() = 0;
     virtual void sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId = QString()) = 0;
+    virtual void sendMessagePart(const QString& conversationId,
+                                 const OutgoingMessagePart& part,
+                                 const QString& clientMessageId = QString());
     virtual bool isConnected() const = 0;
     virtual QString accountId() const { return platformName(); }
 

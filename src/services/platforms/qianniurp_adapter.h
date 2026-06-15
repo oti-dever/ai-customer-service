@@ -19,6 +19,9 @@ public:
     void startListening() override;
     void stopListening() override;
     void sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId = QString()) override;
+    void sendMessagePart(const QString& conversationId,
+                         const OutgoingMessagePart& part,
+                         const QString& clientMessageId = QString()) override;
     bool isConnected() const override { return m_connected; }
 
 private:

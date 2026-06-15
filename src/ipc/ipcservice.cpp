@@ -544,6 +544,52 @@ QJsonObject IpcService::fetchCacheSnapshot(const QString& platform,
     return snapshot;
 }
 
+QJsonObject IpcService::fetchConversationList(const QString& platform,
+                                              int conversationLimit,
+                                              int timeoutMs,
+                                              ResponseStatus* statusOut,
+                                              QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/conversations/list"));
+    QUrlQuery query;
+    if (!platform.trimmed().isEmpty())
+        query.addQueryItem(QStringLiteral("platform"), platform.trimmed().toLower());
+    query.addQueryItem(QStringLiteral("conversation_limit"), QString::number(qMax(1, conversationLimit)));
+    url.setQuery(query);
+
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] conversation list fetched"
+            << "platform=" << platform
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "conversations=" << response.value(QStringLiteral("conversation_count")).toInt()
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::fetchConversationMessages(const QString& platform,
+                                                  const QString& conversationKey,
+                                                  int messageLimit,
+                                                  int timeoutMs,
+                                                  ResponseStatus* statusOut,
+                                                  QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/conversations/messages"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("platform"), platform.trimmed().toLower());
+    query.addQueryItem(QStringLiteral("conversation_key"), conversationKey.trimmed());
+    query.addQueryItem(QStringLiteral("message_limit"), QString::number(qMax(1, messageLimit)));
+    url.setQuery(query);
+
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] conversation messages fetched"
+            << "platform=" << platform
+            << "conversationKey=" << conversationKey
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "messages=" << response.value(QStringLiteral("message_count")).toInt()
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
 QJsonObject IpcService::fetchPlatformReplay(const QString& platform,
                                             const QString& cursor,
                                             int limit,
@@ -627,6 +673,24 @@ QJsonObject IpcService::deleteConversationOnService(const QString& platform,
     return response;
 }
 
+bool IpcService::dispatchPlatformEvent(const QJsonObject& event, bool replayed)
+{
+    if (event.isEmpty())
+        return false;
+
+    QJsonObject dispatched = event;
+    if (replayed)
+        dispatched.insert(QStringLiteral("replayed"), true);
+    emit platformEventReceived(dispatched);
+    emit rpaEventReceived(dispatched);
+    qInfo() << "[IpcService] platform event dispatched"
+            << "eventId=" << dispatched.value(QStringLiteral("event_id")).toString()
+            << "platform=" << dispatched.value(QStringLiteral("platform")).toString()
+            << "eventType=" << dispatched.value(QStringLiteral("event_type")).toString()
+            << "replayed=" << replayed;
+    return true;
+}
+
 int IpcService::dispatchPlatformReplayEvents(const QJsonObject& replay)
 {
     if (replay.value(QStringLiteral("status")).toString() != QLatin1String("success"))
@@ -635,13 +699,8 @@ int IpcService::dispatchPlatformReplayEvents(const QJsonObject& replay)
     int dispatched = 0;
     const QJsonArray events = replay.value(QStringLiteral("events")).toArray();
     for (const QJsonValue& value : events) {
-        QJsonObject event = value.toObject();
-        if (event.isEmpty())
-            continue;
-        event.insert(QStringLiteral("replayed"), true);
-        emit platformEventReceived(event);
-        emit rpaEventReceived(event);
-        ++dispatched;
+        if (dispatchPlatformEvent(value.toObject(), true))
+            ++dispatched;
     }
     qInfo() << "[IpcService] platform replay dispatched"
             << "platform=" << replay.value(QStringLiteral("platform")).toString()

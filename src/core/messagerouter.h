@@ -19,6 +19,8 @@ public:
     IPlatformAdapter* adapter(const QString& platformName) const;
 
     void sendMessage(int conversationId, const QString& text, const QString& clientMessageId = QString());
+    void sendMessage(int conversationId, const OutgoingMessagePart& part, const QString& clientMessageId = QString());
+    void sendPayload(int conversationId, const OutgoingMessagePayload& payload);
 
     void dispatchEvent(const Models::ConversationEvent& event);
 

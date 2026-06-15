@@ -1834,11 +1834,11 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             background: %17;
         }
         QPushButton#simulateButton {
-            background: %12;
+            background: transparent;
             color: %13;
-            border: 1px solid %11;
-            border-radius: 8px;
-            padding: 5px 12px;
+            border: 1px solid transparent;
+            border-radius: 19px;
+            padding: 0;
             font-size: 12px;
             font-weight: 500;
         }
@@ -1850,30 +1850,52 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             background: %15;
         }
         QPushButton#simulateButton:disabled {
-            background: %15;
-            border-color: %11;
+            background: transparent;
+            border-color: transparent;
             color: %20;
         }
-        QPushButton#aggregateStopAutoReplyButton {
-            background: %12;
-            border: 1px solid %11;
-            border-radius: 8px;
-            padding: 5px;
-            min-width: 34px;
-            max-width: 34px;
-            min-height: 34px;
-            max-height: 34px;
+        QPushButton#aggregateAutoReplyToggleButton {
+            background: #FFFFFF;
+            color: %13;
+            border: 1px solid #3AA5FF;
+            border-radius: 19px;
+            padding: 0;
+            min-width: 38px;
+            max-width: 38px;
+            min-height: 38px;
+            max-height: 38px;
+            outline: none;
+            font-size: 12px;
+            font-weight: 500;
         }
-        QPushButton#aggregateStopAutoReplyButton:hover {
-            background: %17;
-            border-color: %14;
+        QPushButton#aggregateAutoReplyToggleButton:focus {
+            background: #FFFFFF;
+            border: 1px solid #3AA5FF;
+            border-radius: 19px;
+            outline: none;
         }
-        QPushButton#aggregateStopAutoReplyButton:pressed {
-            background: %15;
+        QPushButton#aggregateAutoReplyToggleButton:hover {
+            background: #EFF8FF;
+            border-color: #168EEA;
         }
-        QPushButton#aggregateStopAutoReplyButton:disabled {
-            background: %15;
+        QPushButton#aggregateAutoReplyToggleButton:pressed {
+            background: #DBF0FF;
+        }
+        QPushButton#aggregateAutoReplyToggleButton:checked {
+            background: #EAF6FF;
+            color: #168EEA;
+            border-color: #168EEA;
+            border-radius: 19px;
+            outline: none;
+        }
+        QPushButton#aggregateAutoReplyToggleButton:checked:hover {
+            background: #DBF0FF;
+            border-color: #0B7ED0;
+        }
+        QPushButton#aggregateAutoReplyToggleButton:disabled {
+            background: #FFFFFF;
             border-color: %11;
+            color: %20;
         }
         QPushButton#aggregateTabAll,
         QPushButton#aggregateTabPending,
@@ -1930,27 +1952,33 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             font-size: 12px;
             color: %2;
         }
-        QListWidget#aggregateConversationList {
+        QListWidget#aggregateConversationList,
+        QListView#aggregateConversationList {
             background: transparent;
             border: none;
             outline: none;
         }
-        QListWidget#aggregateConversationList:focus {
+        QListWidget#aggregateConversationList:focus,
+        QListView#aggregateConversationList:focus {
             outline: none;
         }
-        QListWidget#aggregateConversationList::item {
+        QListWidget#aggregateConversationList::item,
+        QListView#aggregateConversationList::item {
             padding: 2px 0;
             border-radius: 4px;
             outline: none;
             border: none;
         }
-        QListWidget#aggregateConversationList::item:focus {
+        QListWidget#aggregateConversationList::item:focus,
+        QListView#aggregateConversationList::item:focus {
             outline: none;
         }
-        QListWidget#aggregateConversationList::item:hover {
+        QListWidget#aggregateConversationList::item:hover,
+        QListView#aggregateConversationList::item:hover {
             background: rgba(32, 184, 232, 0.08);
         }
-        QListWidget#aggregateConversationList::item:selected {
+        QListWidget#aggregateConversationList::item:selected,
+        QListView#aggregateConversationList::item:selected {
             background: transparent;
         }
         QWidget#convItemWidget {
@@ -2002,22 +2030,6 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             background: %1;
             border: none;
         }
-        QToolButton#aggregateRightBarToggleButton {
-            background: %12;
-            color: %19;
-            border: 1px solid %11;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: 700;
-            padding: 0;
-        }
-        QToolButton#aggregateRightBarToggleButton:hover {
-            background: %17;
-            border-color: %14;
-        }
-        QToolButton#aggregateRightBarToggleButton:pressed {
-            background: %15;
-        }
         QLabel#aggregateEmptyMain {
             font-size: 16px;
             font-weight: bold;
@@ -2028,14 +2040,37 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             color: %20;
         }
 
-        QLabel#chatHeader {
+        QWidget#chatHeader {
             background: #FFFFFF;
             font-size: 14px;
             font-weight: bold;
             color: %22;
             border-bottom: 1px solid %23;
             /* 全宽条贴中间栏；文字与内容区同宽（与下方输入区内边距 16 对齐） */
-            padding: 0 16px;
+            padding: 0;
+        }
+        QLabel#chatHeaderTitle {
+            background: transparent;
+            font-size: 14px;
+            font-weight: bold;
+            color: %22;
+            border: none;
+            padding: 0;
+        }
+        QToolButton#aggregateConversationBackButton {
+            background: transparent;
+            color: %22;
+            border: none;
+            border-radius: 6px;
+            font-size: 18px;
+            font-weight: 700;
+            padding: 0;
+        }
+        QToolButton#aggregateConversationBackButton:hover {
+            background: %17;
+        }
+        QToolButton#aggregateConversationBackButton:pressed {
+            background: %15;
         }
         QScrollArea#messageScroll {
             background: #F4F6FA;
@@ -2054,31 +2089,44 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             background: #FFFFFF;
             border-top: 1px solid %26;
         }
-        QPlainTextEdit#messageInput {
+        QWidget#aggregateComposeBox {
             background: #FFFFFF;
             border: 1px solid %26;
-            border-radius: 6px;
-            padding: 12px;
+            border-radius: 18px;
+        }
+        QScrollArea#composeAttachmentsScroll {
+            background: #FFFFFF;
+            border: none;
+        }
+        QWidget#composeAttachmentsViewport,
+        QWidget#composeAttachmentsWidget {
+            background: #FFFFFF;
+        }
+        QPlainTextEdit#messageInput {
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 4px 4px 2px 4px;
             font-size: 13px;
             color: %27;
         }
         QPlainTextEdit#messageInput:hover {
-            border-color: %28;
+            border: none;
         }
         QPlainTextEdit#messageInput:focus {
-            border-color: %28;
+            border: none;
         }
         QPlainTextEdit#messageInput:disabled {
             color: %20;
-            background: %17;
+            background: transparent;
         }
         QToolButton#aggregateAiModelButton {
             background: transparent;
             border: 1px solid transparent;
-            border-radius: 6px;
-            padding: 3px 20px 3px 8px;
-            min-height: 22px;
-            max-height: 26px;
+            border-radius: 10px;
+            padding: 4px 22px 4px 10px;
+            min-height: 28px;
+            max-height: 34px;
             font-size: 11px;
             font-weight: 500;
             color: %20;
@@ -2107,8 +2155,8 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             background: %6;
             color: white;
             border: none;
-            border-radius: 6px;
-            padding: 8px 20px;
+            border-radius: 19px;
+            padding: 0;
             font-size: 13px;
             font-weight: bold;
         }
@@ -2288,14 +2336,6 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
             font-weight: 600;
             color: %20;
         }
-        QLabel#aggregateRightBarMetricsBadge {
-            font-size: 10px;
-            font-weight: 600;
-            color: #16A34A;
-            background: rgba(22, 163, 74, 0.12);
-            border-radius: 4px;
-            padding: 2px 6px;
-        }
         QFrame#aggregateRightBarMetricCard {
             background: #FFFFFF;
             border: 1px solid #E5E7EB;
@@ -2340,6 +2380,46 @@ QString buildAggregateChatFormQss(const AggregateChatTokens& t)
         }
         QToolButton#aggregateSendTimelineToggle:pressed {
             color: #1E293B;
+        }
+        QToolButton#aggregateCustomerProfileToggle {
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0 0 8px 0;
+            text-align: left;
+            color: #111827;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        QToolButton#aggregateCustomerProfileToggle:hover {
+            color: #0F172A;
+        }
+        QPushButton#aggregateCustomerProfileOrganizeButton {
+            background: #FFFFFF;
+            color: #334155;
+            border: 1px solid %26;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            padding: 3px 8px;
+        }
+        QPushButton#aggregateCustomerProfileOrganizeButton:hover {
+            background: %17;
+            border-color: %14;
+        }
+        QPushButton#aggregateCustomerProfileOrganizeButton:disabled {
+            background: %15;
+            border-color: %11;
+            color: %20;
+        }
+        QLabel#aggregateCustomerProfileText {
+            background: #FFFFFF;
+            border: 1px solid %26;
+            border-radius: 8px;
+            padding: 8px;
+            font-size: 12px;
+            color: %27;
+            line-height: 145%;
         }
         QPlainTextEdit#sendStatusTimeline {
             background: #FFFFFF;

@@ -39,11 +39,6 @@ int main(int argc, char* argv[])
     }
     qInfo() << "数据库初始化成功";
 
-    QString serviceError;
-    if (!Ipc::IpcService::instance().connectToConfiguredService(&serviceError)) {
-        qWarning() << "[Main] Python 服务端连接失败:" << serviceError;
-    }
-
     QObject::connect(&a, &QCoreApplication::aboutToQuit, [] {
         Ipc::IpcService::instance().shutdown();
         SwordCursor::restore();

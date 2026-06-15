@@ -1,8 +1,10 @@
 ﻿#include "conversationmanager.h"
 #include "messagerouter.h"
+#include "../data/appdatauistatedao.h"
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
 #include "../services/platforms/iplatformadapter.h"
+#include "../utils/runtimemode.h"
 #include <QDateTime>
 #include <QDebug>
 
@@ -162,11 +164,21 @@ void ConversationManager::selectConversation(int conversationId)
     m_currentConvId = conversationId;
     ConversationDao dao;
     dao.setLastSelectedCachedConversationId(conversationId);
+    if (RuntimeMode::isSingleHostServiceDb()) {
+        if (conversationId <= 0) {
+            AppDataUiStateDao().clearLastSelectedConversation();
+        }
+    }
     if (conversationId > 0) {
         clearUnread(conversationId);
         dao.setStatus(conversationId, QStringLiteral("active"));
         const auto conv = dao.findById(conversationId);
         if (conv) {
+            if (RuntimeMode::isSingleHostServiceDb()) {
+                AppDataUiStateDao().saveLastSelectedConversation(
+                    conv->platform,
+                    conv->platformConversationId);
+            }
             emit unifiedConversationUpdated(LegacyModelCompat::toUnifiedConversation(*conv));
             emit conversationUpdated(*conv);
         }
@@ -186,6 +198,27 @@ void ConversationManager::sendMessage(int conversationId, const QString& text, c
     }
     qDebug() << "[ConversationManager] send message convId=" << conversationId;
     m_router->sendMessage(conversationId, text, clientMessageId);
+}
+
+void ConversationManager::sendMessage(int conversationId,
+                                      const OutgoingMessagePart& part,
+                                      const QString& clientMessageId)
+{
+    if (!m_router) {
+        qWarning() << "[ConversationManager] message router not initialized" << conversationId;
+        emit messageSendFailed(conversationId, QStringLiteral("message router not initialized"));
+        return;
+    }
+    m_router->sendMessage(conversationId, part, clientMessageId);
+}
+
+void ConversationManager::sendPayload(int conversationId, const OutgoingMessagePayload& payload)
+{
+    if (!m_router) {
+        emit messageSendFailed(conversationId, QStringLiteral("message router not initialized"));
+        return;
+    }
+    m_router->sendPayload(conversationId, payload);
 }
 
 bool ConversationManager::startPlatformListening(const QString& platform)

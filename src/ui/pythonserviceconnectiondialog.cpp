@@ -3,8 +3,10 @@
 #include "../ipc/ipcservice.h"
 #include "../utils/applystyle.h"
 #include "../utils/appsettings.h"
+#include "../utils/runtimemode.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -39,6 +41,21 @@ void PythonServiceConnectionDialog::setupUI()
     hint->setWordWrap(true);
     mainLayout->addWidget(hint);
 
+    auto* modeRow = new QHBoxLayout();
+    modeRow->setSpacing(8);
+    modeRow->addWidget(new QLabel(QStringLiteral("运行模式"), this));
+    m_runtimeModeCombo = new QComboBox(this);
+    m_runtimeModeCombo->addItem(QStringLiteral("同机运行：Python 服务主库"),
+                                RuntimeMode::singleHostServiceDb());
+    m_runtimeModeCombo->addItem(QStringLiteral("兼容模式：客户端本地缓存"),
+                                RuntimeMode::clientCacheDb());
+    m_runtimeModeCombo->addItem(QStringLiteral("远程服务：仅连接服务端"),
+                                RuntimeMode::remoteService());
+    const int modeIndex = m_runtimeModeCombo->findData(RuntimeMode::currentMode());
+    m_runtimeModeCombo->setCurrentIndex(modeIndex >= 0 ? modeIndex : 0);
+    modeRow->addWidget(m_runtimeModeCombo, 1);
+    mainLayout->addLayout(modeRow);
+
     auto* serviceRow = new QHBoxLayout();
     serviceRow->setSpacing(8);
     m_serviceEndpointEdit = new QLineEdit(Ipc::IpcService::instance().serviceEndpoint(), this);
@@ -53,7 +70,8 @@ void PythonServiceConnectionDialog::setupUI()
     QSettings settings = AppSettings::create();
     m_startupBackfillCheck = new QCheckBox(QStringLiteral("连接后同步服务端历史数据到本地缓存"), this);
     m_startupBackfillCheck->setChecked(
-        settings.value(QStringLiteral("pythonService/startupBackfillEnabled"), false).toBool());
+        settings.value(QStringLiteral("pythonService/startupBackfillEnabled"),
+                       RuntimeMode::ownsBusinessDatabase()).toBool());
     m_startupBackfillCheck->setToolTip(
         QStringLiteral("默认关闭。当前历史同步链路仍在优化，开启后会从 Python 服务拉取 replay/snapshot 并写入客户端缓存。"));
     mainLayout->addWidget(m_startupBackfillCheck);
@@ -77,6 +95,9 @@ void PythonServiceConnectionDialog::onSaveServiceClicked()
     auto& ipc = Ipc::IpcService::instance();
     ipc.setServiceEndpoint(m_serviceEndpointEdit ? m_serviceEndpointEdit->text() : QString());
     ipc.saveConnectionSettings();
+    RuntimeMode::setCurrentMode(m_runtimeModeCombo
+                                    ? m_runtimeModeCombo->currentData().toString()
+                                    : RuntimeMode::defaultMode());
     QSettings settings = AppSettings::create();
     settings.setValue(
         QStringLiteral("pythonService/startupBackfillEnabled"),

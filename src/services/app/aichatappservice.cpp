@@ -52,6 +52,23 @@ QString aggregateAiMvpSystemPrompt()
         "礼貌问候；明确订单、物流、售后的查询途径；避免无法兑现的承诺。具体规则以公司内部文档为准。");
 }
 
+QString aggregateCustomerProfileSystemPrompt()
+{
+    return QStringLiteral(
+        "你是电商客服工作台的客户信息整理助手。请只根据最近聊天记录提炼对后续接待有用的客户信息。"
+        "不要编造未出现的信息，不要推断敏感身份、购买力、年龄、性别等隐私标签。"
+        "内容必须简短，适合显示在客服右侧栏。\n"
+        "请只输出合法 JSON，不要 Markdown，不要解释。字段固定为：\n"
+        "{"
+        "\"summary\":\"一句话概括当前客户情况\","
+        "\"concerns\":[\"关注点，最多3条\"],"
+        "\"preferences\":[\"沟通偏好或明确要求，最多3条\"],"
+        "\"risks\":[\"需要客服注意的风险或禁忌，最多3条\"],"
+        "\"current_need\":\"当前最直接诉求\""
+        "}"
+        "没有明确内容的数组返回 []，字符串返回空字符串。");
+}
+
 } // namespace
 
 AiChatAppService::AiChatAppService(QObject* parent)
@@ -155,4 +172,42 @@ IAiStreamingSession* AiChatAppService::createSession(const AiProviderConfig& con
                                                      QObject* parent) const
 {
     return m_facade->createSession(config, request, parent);
+}
+
+AggregateAiBuiltRequest AiChatAppService::buildAggregateCustomerProfileRequest(int conversationId,
+                                                                               const QString& sessionModelKey) const
+{
+    AggregateAiBuiltRequest built;
+
+    AiConfigLoadOptions loadOptions;
+    loadOptions.allowAggregateFallback = true;
+    loadOptions.allowGeneralFallback = true;
+    built.config = resolveProviderConfig(sessionModelKey, QString(), QString(), QString(), loadOptions);
+
+    if (built.config.apiKey.trimmed().isEmpty()) {
+        built.failure = AggregateAiBuildFailure::MissingApiKey;
+        built.failureDetail = QStringLiteral("缺少 API Key");
+        return built;
+    }
+    if (built.config.baseUrl.trimmed().isEmpty() || built.config.model.trimmed().isEmpty()) {
+        built.failure = AggregateAiBuildFailure::IncompleteModelConfig;
+        built.failureDetail = QStringLiteral("模型配置不完整");
+        return built;
+    }
+
+    MessageDao dao;
+    const QVector<MessageRecord> messages = dao.listCachedMessages(conversationId, 40);
+    const QList<AiConversationTurn> turns = buildAggregateHistoryTurns(messages);
+    if (turns.isEmpty()) {
+        built.failure = AggregateAiBuildFailure::EmptyInbound;
+        built.failureDetail = QStringLiteral("暂无可整理的聊天记录");
+        return built;
+    }
+
+    built.request.systemPrompt = aggregateCustomerProfileSystemPrompt();
+    built.request.turns = turns;
+    built.request.turns.append(makeAiTextTurn(
+        QStringLiteral("user"),
+        QStringLiteral("请根据上面的最近聊天记录，整理这位客户的信息。只输出指定 JSON。")));
+    return built;
 }

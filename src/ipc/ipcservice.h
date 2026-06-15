@@ -47,6 +47,17 @@ public:
                                    int timeoutMs = 5000,
                                    ResponseStatus* statusOut = nullptr,
                                    QString* errorOut = nullptr);
+    QJsonObject fetchConversationList(const QString& platform = QString(),
+                                      int conversationLimit = 100,
+                                      int timeoutMs = 5000,
+                                      ResponseStatus* statusOut = nullptr,
+                                      QString* errorOut = nullptr);
+    QJsonObject fetchConversationMessages(const QString& platform,
+                                          const QString& conversationKey,
+                                          int messageLimit = 300,
+                                          int timeoutMs = 5000,
+                                          ResponseStatus* statusOut = nullptr,
+                                          QString* errorOut = nullptr);
     QJsonObject fetchPlatformReplay(const QString& platform = QString(),
                                     const QString& cursor = QString(),
                                     int limit = 100,
@@ -71,6 +82,7 @@ public:
                                             int timeoutMs = 5000,
                                             ResponseStatus* statusOut = nullptr,
                                             QString* errorOut = nullptr);
+    bool dispatchPlatformEvent(const QJsonObject& event, bool replayed = false);
     int dispatchPlatformReplayEvents(const QJsonObject& replay);
     int dispatchRpaReplayEvents(const QJsonObject& replay);
     PlatformCommandResponse sendPlatformCommandViaWebSocket(const PlatformCommandRequest& request,

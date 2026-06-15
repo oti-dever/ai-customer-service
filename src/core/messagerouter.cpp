@@ -4,8 +4,79 @@
 #include "../data/qianniuconversationdao.h"
 #include "../data/wechatmessagedao.h"
 #include "../services/platforms/iplatformadapter.h"
+#include "../utils/runtimemode.h"
 #include "types.h"
 #include <QElapsedTimer>
+#include <QFileInfo>
+#include <QUuid>
+
+namespace {
+
+Models::MessageContentType contentTypeForPart(const OutgoingMessagePart& part)
+{
+    switch (part.type) {
+    case OutgoingPartType::Image:
+        return Models::MessageContentType::Image;
+    case OutgoingPartType::Video:
+        return Models::MessageContentType::Video;
+    case OutgoingPartType::File:
+        return Models::MessageContentType::File;
+    case OutgoingPartType::Text:
+    default:
+        return Models::MessageContentType::Text;
+    }
+}
+
+QString contentForPart(const OutgoingMessagePart& part)
+{
+    if (part.type == OutgoingPartType::Text)
+        return part.text;
+    const QString fileName = part.fileName.isEmpty()
+        ? QFileInfo(part.localPath).fileName()
+        : part.fileName;
+    switch (part.type) {
+    case OutgoingPartType::Image:
+        return QStringLiteral("[图片]");
+    case OutgoingPartType::Video:
+        return fileName.isEmpty()
+            ? QStringLiteral("[视频]")
+            : QStringLiteral("[视频] %1").arg(fileName);
+    case OutgoingPartType::File:
+        return fileName.isEmpty()
+            ? QStringLiteral("[文件]")
+            : QStringLiteral("[文件] %1").arg(fileName);
+    case OutgoingPartType::Text:
+    default:
+        return part.text;
+    }
+}
+
+QJsonObject mediaPayload(const OutgoingMessagePart& part,
+                         const QString& clientMessageId,
+                         const ConversationInfo& conversation)
+{
+    QJsonObject payload;
+    payload.insert(QStringLiteral("direction"), QStringLiteral("out"));
+    payload.insert(QStringLiteral("sender_role"), QStringLiteral("agent"));
+    payload.insert(QStringLiteral("source_type"), QStringLiteral("manual_confirmed"));
+    payload.insert(QStringLiteral("confidence"), 100);
+    payload.insert(QStringLiteral("verification_status"), QStringLiteral("manual_verified"));
+    payload.insert(QStringLiteral("content_type"), Models::toString(contentTypeForPart(part)));
+    payload.insert(QStringLiteral("content"), contentForPart(part));
+    payload.insert(QStringLiteral("content_image_path"), part.localPath);
+    payload.insert(QStringLiteral("evidence_ref"), part.localPath);
+    payload.insert(QStringLiteral("file_path"), part.localPath);
+    payload.insert(QStringLiteral("file_name"), part.fileName);
+    payload.insert(QStringLiteral("mime_type"), part.mimeType);
+    payload.insert(QStringLiteral("size_bytes"), double(part.sizeBytes));
+    payload.insert(QStringLiteral("client_message_id"), clientMessageId);
+    payload.insert(QStringLiteral("display_name"), conversation.customerName);
+    payload.insert(QStringLiteral("_event_account_id"), conversation.accountId);
+    payload.insert(QStringLiteral("_event_conversation_key"), conversation.platformConversationId);
+    return payload;
+}
+
+} // namespace
 
 MessageRouter::MessageRouter(QObject* parent)
     : QObject(parent)
@@ -92,6 +163,32 @@ IPlatformAdapter* MessageRouter::adapter(const QString& platformName) const
 
 void MessageRouter::sendMessage(int conversationId, const QString& text, const QString& clientMessageId)
 {
+    OutgoingMessagePart part;
+    part.type = OutgoingPartType::Text;
+    part.text = text;
+    sendMessage(conversationId, part, clientMessageId);
+}
+
+void MessageRouter::sendPayload(int conversationId, const OutgoingMessagePayload& payload)
+{
+    for (const OutgoingMessagePart& part : payload.parts)
+        sendMessage(conversationId, part);
+}
+
+void MessageRouter::sendMessage(int conversationId,
+                                const OutgoingMessagePart& part,
+                                const QString& clientMessageId)
+{
+    if (part.type == OutgoingPartType::Text && part.text.trimmed().isEmpty())
+        return;
+    if (part.type != OutgoingPartType::Text) {
+        const QFileInfo mediaInfo(part.localPath);
+        if (part.localPath.trimmed().isEmpty() || !mediaInfo.exists() || !mediaInfo.isFile()) {
+            emit messageSendFailed(conversationId, QStringLiteral("media file not found"));
+            return;
+        }
+    }
+
     QElapsedTimer totalTimer;
     totalTimer.start();
     ConversationDao convDao;
@@ -109,22 +206,46 @@ void MessageRouter::sendMessage(int conversationId, const QString& text, const Q
         return;
     }
 
-    MessageDao msgDao;
     QDateTime now = QDateTime::currentDateTime();
-    Models::Message pendingMessage;
     const QString normalizedClientMessageId = clientMessageId.isEmpty()
         ? QUuid::createUuid().toString(QUuid::WithoutBraces)
         : clientMessageId;
+    const Models::MessageContentType outgoingContentType = contentTypeForPart(part);
+    const QString outgoingContent = contentForPart(part);
+
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        QElapsedTimer adapterTimer;
+        adapterTimer.start();
+        a->sendMessagePart(conv->platformConversationId, part, normalizedClientMessageId);
+        qInfo() << "[MessageRouter] send delegated to Python service"
+                << "conversationId=" << conversationId
+                << "platform=" << conv->platform
+                << "platformConversationId=" << conv->platformConversationId
+                << "clientMessageId=" << normalizedClientMessageId
+                << "adapterElapsedMs=" << adapterTimer.elapsed()
+                << "totalElapsedMs=" << totalTimer.elapsed()
+                << "contentType=" << Models::toString(outgoingContentType)
+                << "content=" << outgoingContent.left(30);
+        return;
+    }
+
+    MessageDao msgDao;
+    Models::Message pendingMessage;
     pendingMessage.conversationId = conversationId;
     pendingMessage.direction = Models::MessageDirection::Outbound;
-    pendingMessage.contentType = Models::MessageContentType::Text;
-    pendingMessage.content = text;
+    pendingMessage.contentType = outgoingContentType;
+    pendingMessage.content = outgoingContent;
     pendingMessage.status = Models::MessageStatus::Pending;
     pendingMessage.sourceType = Models::SourceType::ManualConfirmed;
     pendingMessage.confidence = Models::defaultConfidence(pendingMessage.sourceType);
     pendingMessage.verificationStatus = Models::VerificationStatus::ManualVerified;
     pendingMessage.observedAt = now;
+    pendingMessage.evidenceRef = part.localPath;
     pendingMessage.metadata.insert(QStringLiteral("client_message_id"), normalizedClientMessageId);
+    pendingMessage.metadata.insert(QStringLiteral("file_path"), part.localPath);
+    pendingMessage.metadata.insert(QStringLiteral("file_name"), part.fileName);
+    pendingMessage.metadata.insert(QStringLiteral("mime_type"), part.mimeType);
+    pendingMessage.metadata.insert(QStringLiteral("size_bytes"), double(part.sizeBytes));
     pendingMessage.clientMessageId = normalizedClientMessageId;
     QElapsedTimer cacheTimer;
     cacheTimer.start();
@@ -142,8 +263,31 @@ void MessageRouter::sendMessage(int conversationId, const QString& text, const Q
         return;
     }
 
+    if (part.type != OutgoingPartType::Text) {
+        const QJsonObject payload = mediaPayload(part, normalizedClientMessageId, *conv);
+        if (conv->platform == QLatin1String("wechat")) {
+            WechatMessageDao().createMessageExtension(
+                msgId,
+                conversationId,
+                conv->accountId,
+                conv->platformConversationId,
+                conv->customerName,
+                QString(),
+                payload);
+        } else if (conv->platform == QLatin1String("qianniu")) {
+            QianniuConversationDao().createMessageExtension(
+                msgId,
+                conversationId,
+                conv->accountId,
+                conv->platformConversationId,
+                conv->customerName,
+                QString(),
+                payload);
+        }
+    }
+
     cacheTimer.restart();
-    convDao.updateLastMessage(conversationId, text, now);
+    convDao.updateLastMessage(conversationId, pendingMessage.content, now);
     const qint64 updateConversationElapsedMs = cacheTimer.elapsed();
 
     QElapsedTimer emitTimer;
@@ -162,7 +306,7 @@ void MessageRouter::sendMessage(int conversationId, const QString& text, const Q
 
     QElapsedTimer adapterTimer;
     adapterTimer.start();
-    a->sendMessage(conv->platformConversationId, text, normalizedClientMessageId);
+    a->sendMessagePart(conv->platformConversationId, part, normalizedClientMessageId);
     const qint64 adapterElapsedMs = adapterTimer.elapsed();
 
     qInfo() << "[MessageRouter] send timing"
@@ -175,7 +319,8 @@ void MessageRouter::sendMessage(int conversationId, const QString& text, const Q
             << "emitPendingElapsedMs=" << emitPendingElapsedMs
             << "adapterElapsedMs=" << adapterElapsedMs
             << "totalElapsedMs=" << totalTimer.elapsed()
-            << "text=" << text.left(30);
+            << "contentType=" << Models::toString(pendingMessage.contentType)
+            << "content=" << pendingMessage.content.left(30);
 }
 
 void MessageRouter::onConversationObserved(const ConversationInfo& conv)
@@ -426,6 +571,15 @@ void MessageRouter::onMessageSent(const QString& conversationId, const QString& 
     if (!conv)
         return;
 
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        qInfo() << "[MessageRouter] send confirm delegated to service cache sync"
+                << "platform=" << sentAdapter->platformName()
+                << "conv=" << conversationId
+                << "clientMessageId=" << clientMessageId
+                << "elapsedMs=" << totalTimer.elapsed();
+        return;
+    }
+
     MessageDao msgDao;
     QElapsedTimer stageTimer;
     stageTimer.start();
@@ -478,7 +632,7 @@ void MessageRouter::onSendFailed(const QString& conversationId, const QString& r
     const QString platformName = failedAdapter ? failedAdapter->platformName() : QString();
     auto conv = platformName.isEmpty() ? std::nullopt : dao.findByPlatformId(platformName, conversationId);
 
-    if (conv) {
+    if (conv && !RuntimeMode::ownsBusinessDatabase()) {
         MessageDao msgDao;
         std::optional<MessageRecord> pending = msgDao.latestPendingOutboundCacheByClientMessageId(conv->id, clientMessageId);
         if (!pending)
@@ -499,6 +653,7 @@ void MessageRouter::onSendFailed(const QString& conversationId, const QString& r
                << "clientMessageId=" << clientMessageId
                << "elapsedMs=" << totalTimer.elapsed()
                << "reason=" << reason;
+    emit messageSendFailed(conv ? conv->id : 0, reason);
 }
 
 int MessageRouter::ensureConversation(const PlatformMessage& msg)

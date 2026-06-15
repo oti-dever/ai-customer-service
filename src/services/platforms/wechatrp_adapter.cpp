@@ -49,6 +49,28 @@ QString displayNameFromConversationKey(const QString& conversationKey)
         return trimmed.mid(lastSep + 1).trimmed();
     return trimmed;
 }
+
+QString outgoingContentType(const OutgoingMessagePart& part)
+{
+    switch (part.type) {
+    case OutgoingPartType::Image: return QStringLiteral("image");
+    case OutgoingPartType::Video: return QStringLiteral("video");
+    case OutgoingPartType::File: return QStringLiteral("file");
+    case OutgoingPartType::Text:
+    default: return QStringLiteral("text");
+    }
+}
+
+QString outgoingContent(const OutgoingMessagePart& part)
+{
+    if (part.type == OutgoingPartType::Text)
+        return part.text;
+    if (part.type == OutgoingPartType::Image)
+        return QStringLiteral("[图片]");
+    if (part.type == OutgoingPartType::Video)
+        return QStringLiteral("[视频] %1").arg(part.fileName);
+    return QStringLiteral("[文件] %1").arg(part.fileName);
+}
 } // namespace
 
 WechatRPAAdapter::WechatRPAAdapter(QObject* parent)
@@ -117,10 +139,21 @@ void WechatRPAAdapter::stopListening()
 
 void WechatRPAAdapter::sendMessage(const QString& conversationId, const QString& text, const QString& clientMessageId)
 {
+    OutgoingMessagePart part;
+    part.type = OutgoingPartType::Text;
+    part.text = text;
+    sendMessagePart(conversationId, part, clientMessageId);
+}
+
+void WechatRPAAdapter::sendMessagePart(const QString& conversationId,
+                                       const OutgoingMessagePart& part,
+                                       const QString& clientMessageId)
+{
+    const QString content = outgoingContent(part);
     if (m_commandInFlight) {
         qInfo() << "[WechatRPAAdapter] sendMessage delayed: command already in flight";
-        QTimer::singleShot(200, this, [this, conversationId, text, clientMessageId]() {
-            sendMessage(conversationId, text, clientMessageId);
+        QTimer::singleShot(200, this, [this, conversationId, part, clientMessageId]() {
+            sendMessagePart(conversationId, part, clientMessageId);
         });
         return;
     }
@@ -137,7 +170,12 @@ void WechatRPAAdapter::sendMessage(const QString& conversationId, const QString&
     request.parameters.insert(QStringLiteral("client_message_id"), request.taskId);
     request.parameters.insert(QStringLiteral("conversation_key"), conversationId);
     request.parameters.insert(QStringLiteral("display_name"), displayName);
-    request.parameters.insert(QStringLiteral("text"), text);
+    request.parameters.insert(QStringLiteral("content_type"), outgoingContentType(part));
+    request.parameters.insert(QStringLiteral("text"), part.text);
+    request.parameters.insert(QStringLiteral("file_path"), part.localPath);
+    request.parameters.insert(QStringLiteral("file_name"), part.fileName);
+    request.parameters.insert(QStringLiteral("mime_type"), part.mimeType);
+    request.parameters.insert(QStringLiteral("size_bytes"), double(part.sizeBytes));
     request.parameters.insert(QStringLiteral("require_target_verification"), true);
     request.parameters.insert(QStringLiteral("prefer_background"), true);
     request.parameters.insert(QStringLiteral("allow_foreground_fallback"), true);
@@ -171,9 +209,19 @@ void WechatRPAAdapter::sendMessage(const QString& conversationId, const QString&
             scheduleConfirmTimeout();
             return;
         }
-        QTimer::singleShot(800, this, [this, conversationId, text, clientMessageId = request.taskId]() {
-            emit messageSent(conversationId, text, clientMessageId);
+        QTimer::singleShot(800, this, [this, conversationId, content, clientMessageId = request.taskId]() {
+            emit messageSent(conversationId, content, clientMessageId);
         });
+        return;
+    }
+
+    if (response.status == Ipc::ResponseStatus::Timeout
+        && response.errorMessage == QLatin1String("request_timeout")) {
+        qWarning() << "[WechatRPAAdapter] sendMessage command timed out; waiting for result event"
+                   << "conversation=" << conversationId
+                   << "clientMessageId=" << request.taskId
+                   << "contentType=" << outgoingContentType(part);
+        scheduleConfirmTimeout();
         return;
     }
 

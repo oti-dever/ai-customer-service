@@ -1,7 +1,6 @@
 #ifndef AGGREGATECHATFORM_H
 #define AGGREGATECHATFORM_H
 
-#include <QComboBox>
 #include <QCheckBox>
 #include <QPoint>
 #include <QLabel>
@@ -21,6 +20,7 @@
 #include <QPixmap>
 #include <QString>
 #include <QEvent>
+#include <QElapsedTimer>
 #include <QShowEvent>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
@@ -42,10 +42,15 @@ class QAction;
 class QButtonGroup;
 class QSplitter;
 class QModelIndex;
+class QHBoxLayout;
+class QGridLayout;
+class QMimeData;
+class QResizeEvent;
 
 /** 左侧平台工具条：与库中 `conversations.platform` 一致（如 qianniu、pdd_web、douyin、wechat）。 */
 enum class AggregatePlatformFilter { All = 0, Qianniu = 1, Pdd = 2, Doudian = 3, Wechat = 4 };
 enum class AggregateConversationTab { All = 0, Pending = 1, Replied = 2 };
+enum class AggregateAdaptiveLayoutMode { Unknown = -1, Wide = 0, Medium = 1, Compact = 2 };
 
 class AggregateChatForm : public QWidget
 {
@@ -59,6 +64,7 @@ public:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
@@ -78,6 +84,7 @@ private:
     /** 兼容旧命名；主路径请使用 reloadFromLocalCache()。 */
     void reloadFromDatabase();
     void applyCacheSnapshotToLocalCache(const QJsonObject& snapshot);
+    QVector<MessageRecord> messagesForDisplay(int conversationId) const;
     void renderConversationListFromModel();
     void showConversation(int conversationId);
     void renderConversationMessages(const QVector<MessageRecord>& messages);
@@ -90,6 +97,10 @@ private:
     void scheduleScrollChatToBottom();
     void persistCurrentDraft();
     void restoreDraftForConversation(int conversationId);
+    bool handleComposeMimeData(const QMimeData* mimeData);
+    bool addComposeFileAttachment(const QString& path);
+    void refreshComposeAttachments();
+    void clearComposeAttachments();
     void restoreLastSelectedConversation();
     void updateCustomerInfo(const ConversationInfo& conv);
     void resetSendTimelineForConversation();
@@ -100,29 +111,45 @@ private:
     bool applyServiceConversationMutation(const ConversationInfo& conv, bool deleteConversation);
     void updateAggregateAiControlsVisibility();
     void refreshAggregateAiModelButtonUi();
+    bool isAggregateAutoReplyEnabled() const;
+    void setAggregateAutoReplyEnabled(bool enabled);
+    void refreshAutoReplyToggleButtonUi();
     void setAggregateAiBusy(bool busy);
     QStringList selectedPlatformListenTargets() const;
     void refreshPlatformListenStateFromService();
     void backfillFromPythonService();
+    void schedulePythonServiceBackfill(int delayMs = 250);
     void setPlatformListenControlsEnabled(bool enabled);
     void updatePlatformListenStatusLabel();
+    void refreshPythonServiceButtonUi();
     void abortAggregateAiRequest();
+    void abortAutoReplyRequest();
     void clearStreamingSession(IAiStreamingSession*& session);
-    /** 千牛 + AI 自动回复模式下，在满足 §3 条件时尝试生成并发送（T1 切换会话 / T2 当前会话新入站）。 */
+    /** 自动回复开启后，在满足条件时尝试生成并发送（T1 切换会话 / T2 当前会话新入站）。 */
     void tryAggregateAutoReply(int conversationId, const QString& triggerTag);
     void relayoutChatInputOverlay();
     void updateMessageListBottomReserve(int overlayBottomPx);
     void syncConversationItemVisualState();
     void syncSolidBackgrounds();
     void refreshRightBarModelDisplay();
+    void refreshRightBarMetrics();
+    void refreshCustomerProfilePanel();
+    void setCustomerProfileBusy(bool busy);
+    QJsonObject parseCustomerProfileJson(const QString& text) const;
     void setConversationTab(AggregateConversationTab tab);
-    /** 折叠/展开「查看运行日志」时切换竖直 stretch，使折叠时主内容区顶对齐、不分散大块空白。 */
+    /** 折叠/展开「处理动态」时切换竖直 stretch，使折叠时主内容区顶对齐、不分散大块空白。 */
     void updateRightBarSendSectionStretch();
-    void setupRightBarToggleButton();
+    void setChatHeaderTitle(const QString& title);
+    void scheduleAdaptiveRelayout(bool fromUserSplitter = false);
+    void runScheduledAdaptiveRelayout();
+    void scheduleChatInputRelayout();
+    void updateComposeInputHeight();
+    AggregateAdaptiveLayoutMode desiredAdaptiveLayoutMode() const;
+    void updateAdaptiveConversationLayout(bool fromUserSplitter = false);
+    void setConversationPanelHidden(bool hidden);
+    void updateRightBarAdaptiveLayout();
+    void updateCompactHeaderControls();
     void setRightBarHidden(bool hidden);
-    void updateRightBarToggleButtonGeometry();
-    void updateRightBarToggleButtonVisibility(const QPoint& globalPos);
-    void installRightBarToggleEventFilter(QWidget* widget);
     void openModelPickerSheet();
     void closeModelPickerSheet();
     void startModelSheetWidthAnimation(int fromWidth, int toWidth, bool hideOverlayOnFinish);
@@ -140,10 +167,11 @@ private slots:
     void onConversationIndexClicked(const QModelIndex& index);
     void onConversationItemClicked(QListWidgetItem* item);
     void onSendClicked();
-    void onStopAutoReplyClicked();
-    void onModeComboChanged();
+    void onAutoReplyToggleClicked();
     void onStartPlatformListeningClicked();
     void onStopPlatformListeningClicked();
+    void onPythonServiceButtonClicked();
+    void onPythonServiceButtonContextMenu(const QPoint& pos);
     void onGenerateAiDraftClicked();
     void onAggregateAiModelMenuTriggered(QAction* action);
     void onIpcAiSuggestionReceived(const Ipc::AiSuggestionResponse& response);
@@ -151,6 +179,10 @@ private slots:
     void onAggregateAiStreamDelta(const QString& delta);
     void onAggregateAiCompleted();
     void onAggregateAiFailed(const QString& reason);
+    void onOrganizeCustomerProfileClicked();
+    void onCustomerProfileStreamDelta(const QString& delta);
+    void onCustomerProfileCompleted();
+    void onCustomerProfileFailed(const QString& reason);
     void onAutoReplyStreamDelta(const QString& delta);
     void onAutoReplyCompleted();
     void onAutoReplyFailed(const QString& reason);
@@ -178,7 +210,6 @@ private:
     QWidget* m_centerPanel = nullptr;
     QWidget* m_rightPanel = nullptr;
     QLabel* m_platformSectionTitle = nullptr;
-    QComboBox* m_modeCombo = nullptr;
     QCheckBox* m_chkListenWechat = nullptr;
     QCheckBox* m_chkListenQianniu = nullptr;
     QPushButton* m_btnStartPlatformListening = nullptr;
@@ -191,8 +222,8 @@ private:
     QPushButton* m_btnAll = nullptr;
     QPushButton* m_btnPending = nullptr;
     QPushButton* m_btnReplied = nullptr;
-    /** 原「模拟消息」；现为 **一键停止** AI 自动回复（并切人工接待），见《AI自动回复方案设计与实现》。 */
-    QPushButton* m_btnStopAutoReply = nullptr;
+    QPushButton* m_btnAutoReplyToggle = nullptr;
+    QToolButton* m_btnPythonService = nullptr;
     QToolButton* m_btnSimulateMessage = nullptr;
     QLineEdit* m_searchEdit = nullptr;
     QListView* m_conversationList = nullptr;
@@ -206,6 +237,9 @@ private:
     QWidget* m_chatInputPanel = nullptr;
     QListView* m_messageView = nullptr;
     QPlainTextEdit* m_inputEdit = nullptr;
+    QScrollArea* m_composeAttachmentsScroll = nullptr;
+    QWidget* m_composeAttachmentsWidget = nullptr;
+    QHBoxLayout* m_composeAttachmentsLayout = nullptr;
     QToolButton* m_btnAiModelPick = nullptr;
     QMenu* m_aggregateAiModelMenu = nullptr;
     QString m_aggregateAiSessionModelKey;
@@ -219,6 +253,7 @@ private:
     IAiStreamingSession* m_aggregateAiSession = nullptr;
     /** 与 AI 辅助分离，避免与「生成本条回复」并发共用一个 client。 */
     IAiStreamingSession* m_autoReplySession = nullptr;
+    IAiStreamingSession* m_customerProfileSession = nullptr;
     bool m_aggregateAiGenerating = false;
     bool m_autoReplyBusy = false;
     int m_autoReplyTargetConvId = -1;
@@ -226,6 +261,19 @@ private:
     QString m_aggregateAiIpcRequestId;
     QString m_aggregateAiBaseline;
     QString m_aggregateAiAccumulated;
+    qint64 m_aggregateAiRequestEventId = 0;
+    QElapsedTimer m_aggregateAiRequestTimer;
+    int m_aggregateAiFirstTokenMs = 0;
+    qint64 m_autoReplyRequestEventId = 0;
+    QElapsedTimer m_autoReplyRequestTimer;
+    int m_autoReplyFirstTokenMs = 0;
+    bool m_customerProfileBusy = false;
+    qint64 m_customerProfileRequestEventId = 0;
+    QElapsedTimer m_customerProfileRequestTimer;
+    int m_customerProfileFirstTokenMs = 0;
+    QString m_customerProfileAccumulated;
+    QWidget* m_chatHeaderBar = nullptr;
+    QToolButton* m_btnBackToConversationList = nullptr;
     QLabel* m_chatHeader = nullptr;
     QWidget* m_customerDetail = nullptr;
     QScrollArea* m_rightBarScroll = nullptr;
@@ -236,9 +284,17 @@ private:
     QWidget* m_rightBarBottomSpacer = nullptr;
     /** 发送状态标题+输出区的外层，与主列 spacing 解耦、便于收紧标题与文本区间距。 */
     QWidget* m_rightBarSendStatusSection = nullptr;
+    QWidget* m_customerProfileSection = nullptr;
+    QToolButton* m_customerProfileToggle = nullptr;
+    QPushButton* m_btnOrganizeCustomerProfile = nullptr;
+    QWidget* m_customerProfileBody = nullptr;
+    QLabel* m_customerProfileText = nullptr;
     QPushButton* m_btnModelSwitchRow = nullptr;
     /** 与 aiPresetDefinitions() 顺序一致，仅影响右栏展示，不接真实请求路由。 */
     int m_rightBarDisplayModelIndex = 0;
+    QWidget* m_rightBarMetricsWrap = nullptr;
+    QGridLayout* m_rightBarMetricsGrid = nullptr;
+    QWidget* m_rightBarMetricCards[4] = {};
     QLabel* m_rightBarModelIconLabel = nullptr;
     QLabel* m_rightBarModelNameLabel = nullptr;
     QWidget* m_rightBarModelStatusDot = nullptr;
@@ -257,11 +313,23 @@ private:
     QTimer* m_messageRefreshTimer = nullptr;
     QTimer* m_sendTimelineTimer = nullptr;
     QTimer* m_draftSaveTimer = nullptr;
+    QTimer* m_pythonBackfillTimer = nullptr;
+    QTimer* m_adaptiveRelayoutTimer = nullptr;
+    QTimer* m_chatInputRelayoutTimer = nullptr;
     qint64 m_sendTimelineBaselineId = 0;
-    QToolButton* m_rightBarToggleButton = nullptr;
+    qint64 m_aiStageTimelineBaselineId = 0;
     bool m_rightBarHidden = false;
+    bool m_rightBarAutoHidden = false;
     int m_lastRightBarWidth = 296;
+    bool m_leftPanelHidden = false;
+    bool m_compactConversationListForced = false;
+    int m_lastLeftPanelWidth = 248;
+    int m_rightBarMetricColumnCount = 0;
+    bool m_pendingAdaptiveRelayoutFromUserSplitter = false;
+    AggregateAdaptiveLayoutMode m_adaptiveLayoutMode = AggregateAdaptiveLayoutMode::Unknown;
     bool m_restoringDraft = false;
+    QVector<OutgoingMessagePart> m_composeAttachments;
+    QMap<int, QVector<OutgoingMessagePart>> m_draftAttachments;
 
     AggregateConversationTab m_currentTab = AggregateConversationTab::Pending;
     int m_currentConvId = -1;
@@ -269,11 +337,6 @@ private:
     int m_pendingStickyConvId = -1;
     QDate m_lastBubbleDate;
     QString m_currentMessageSignature;
-
-    /** 模式下拉：避免程序化 `setCurrentIndex` 触发确认逻辑递归。 */
-    bool m_suppressingModeComboChange = false;
-    /** 上一次稳定的模式索引（0 人工 / 1 AI辅助 / 2 AI自动回复），用于取消确认后回退。 */
-    int m_lastAggregateModeIndex = 0;
 
     QString m_loginUsername;
     QString m_selfDisplayName;

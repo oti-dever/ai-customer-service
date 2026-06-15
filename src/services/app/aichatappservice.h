@@ -41,6 +41,8 @@ public:
                                            const AiConfigLoadOptions& options = {}) const;
     AggregateAiBuiltRequest buildAggregateReplyRequest(int conversationId,
                                                        const QString& sessionModelKey) const;
+    AggregateAiBuiltRequest buildAggregateCustomerProfileRequest(int conversationId,
+                                                                 const QString& sessionModelKey) const;
     IAiStreamingSession* createSession(const AiProviderConfig& config,
                                        const AiRequest& request,
                                        QObject* parent) const;
