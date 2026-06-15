@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from rpa.platforms.qianniu.adapter import PLATFORM_QIANNIU, QianniuSidecarAdapter
 from rpa.platforms.wechat.adapter import PLATFORM_WECHAT, WechatSidecarAdapter, clean, payload_status
+from .app_database import ensure_app_database_schema
 from .truth_store import PythonServiceTruthStore
 
 
@@ -442,6 +443,8 @@ class _CommandWebSocketServer:
 class RpaBridge:
     def __init__(self, mode: str = "debug", command_ws_host: str = "127.0.0.1", command_ws_port: int = 8767) -> None:
         self._truth_store = PythonServiceTruthStore()
+        app_db_path = ensure_app_database_schema()
+        logging.info("Python service app data db schema ready: %s", app_db_path)
         truth_db_path = self._truth_store.ensure_schema()
         logging.info("Python service truth db schema ready: %s", truth_db_path)
         self.store = RpaEventStore(truth_store=self._truth_store)
@@ -567,6 +570,7 @@ class RpaBridge:
                 "status": result.get("status", "success"),
                 "error": result.get("error", ""),
                 "result": {key: value for key, value in result.items() if key != "event"},
+                "event": event if isinstance(event, dict) else {},
             }
 
     def _mutation_blocker(self, platform: str) -> dict[str, Any] | None:

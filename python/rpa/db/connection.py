@@ -10,10 +10,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def resolved_default_db_path() -> Path:
-    raw = (os.environ.get("AI_CUSTOMER_SERVICE_DB") or "").strip()
+    raw = (
+        os.environ.get("AI_CUSTOMER_SERVICE_APP_DB")
+        or os.environ.get("AI_CUSTOMER_SERVICE_SERVER_DB")
+        or os.environ.get("AI_CUSTOMER_SERVICE_DB")
+        or ""
+    ).strip()
     if raw:
         return Path(raw).expanduser()
-    return PROJECT_ROOT / "database" / "service.db"
+    return PROJECT_ROOT / "database" / "app_data.db"
 
 
 def open_db(db_path: Path | None = None) -> sqlite3.Connection:

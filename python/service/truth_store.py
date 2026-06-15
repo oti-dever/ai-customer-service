@@ -437,6 +437,18 @@ class PythonServiceTruthStore:
         conn = open_db(path)
         try:
             self._ensure_schema(conn)
+            content_type = _clean(params.get("content_type")) or "text"
+            content = _clean(params.get("text"))
+            if not content and content_type != "text":
+                file_name = _clean(params.get("file_name"))
+                if content_type == "image":
+                    content = "[图片]"
+                elif content_type == "video":
+                    content = f"[视频] {file_name}".strip()
+                elif content_type == "file":
+                    content = f"[文件] {file_name}".strip()
+                else:
+                    content = file_name or f"[{content_type}]"
             event = {
                 "event_type": "message_observed",
                 "platform": _clean(payload.get("platform")).lower(),
@@ -450,8 +462,14 @@ class PythonServiceTruthStore:
                     "direction": "outbound",
                     "sender_role": "agent",
                     "sender_name": "",
-                    "content_type": "text",
-                    "content": _clean(params.get("text")),
+                    "content_type": content_type,
+                    "content": content,
+                    "content_image_path": _clean(params.get("file_path")),
+                    "evidence_ref": _clean(params.get("file_path")),
+                    "file_path": _clean(params.get("file_path")),
+                    "file_name": _clean(params.get("file_name")),
+                    "mime_type": _clean(params.get("mime_type")),
+                    "size_bytes": params.get("size_bytes") or 0,
                     "source_type": "manual_confirmed",
                     "confidence": 100,
                     "verification_status": "manual_verified",

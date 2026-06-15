@@ -13,7 +13,7 @@ import threading
 import time
 
 from .ai_suggestion import build_ai_suggestion_response
-from .cache_snapshot import build_cache_snapshot
+from .cache_snapshot import build_cache_snapshot, build_conversation_list, build_conversation_messages
 from . import rpa_bridge
 
 
@@ -122,6 +122,28 @@ class AiServiceHandler(BaseHTTPRequestHandler):
                     platform=platform,
                     cursor=cursor,
                     conversation_limit=conversation_limit,
+                    message_limit=message_limit,
+                )
+            )
+            return
+        if path == "/api/conversations/list":
+            platform = query.get("platform", [""])[0]
+            conversation_limit = query.get("conversation_limit", ["100"])[0]
+            self._send_json(
+                build_conversation_list(
+                    platform=platform,
+                    conversation_limit=conversation_limit,
+                )
+            )
+            return
+        if path == "/api/conversations/messages":
+            platform = query.get("platform", [""])[0]
+            conversation_key = query.get("conversation_key", [""])[0]
+            message_limit = query.get("message_limit", ["300"])[0]
+            self._send_json(
+                build_conversation_messages(
+                    platform=platform,
+                    conversation_key=conversation_key,
                     message_limit=message_limit,
                 )
             )
