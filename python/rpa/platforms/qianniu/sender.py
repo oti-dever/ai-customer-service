@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .config import AppConfig, load_config
@@ -186,6 +187,53 @@ class QianniuSender:
             return enter_result
 
         return SendResult(ok=True, stage="sent", method=f"{input_result.method}+{enter_result.method}")
+
+    def send_media(
+        self,
+        file_path: str,
+        content_type: str,
+        dry_run: bool = False,
+        chat_root: Any | None = None,
+        input_field: Any | None = None,
+    ) -> SendResult:
+        source = Path(file_path)
+        if not source.is_file():
+            return SendResult(ok=False, stage="validate", detail="file_not_found")
+        if content_type not in {"image", "video", "file"}:
+            return SendResult(ok=False, stage="validate", detail="unsupported_content_type")
+
+        if chat_root is None:
+            handle = self.detector.find_current_chat()
+            if not handle:
+                return SendResult(ok=False, stage="find_chat", detail="chat window not found")
+            chat_root = handle.chat_root
+
+        input_field = self._resolve_input_field(chat_root, input_field)
+        if not input_field:
+            return SendResult(ok=False, stage="find_input", detail="input field not found")
+        if dry_run:
+            return SendResult(ok=True, stage="dry_run", method="none", detail="dry-run, not sent")
+
+        try:
+            input_field.SetFocus()
+        except Exception:
+            pass
+
+        from rpa.platforms.wechat.media_clipboard import (
+            press_paste_shortcut,
+            set_clipboard_file_paths,
+        )
+
+        if not set_clipboard_file_paths([source]):
+            return SendResult(ok=False, stage="clipboard", detail="clipboard_file_write_failed")
+        if not press_paste_shortcut():
+            return SendResult(ok=False, stage="paste", detail="clipboard_file_paste_failed")
+
+        time.sleep(0.9 if source.stat().st_size < 20 * 1024 * 1024 else 1.8)
+        enter_result = self._send_enter(input_field)
+        if not enter_result.ok:
+            return enter_result
+        return SendResult(ok=True, stage="sent", method=f"clipboard_file+{enter_result.method}")
 
     def _resolve_input_field(self, chat_root: Any, input_field: Any | None = None) -> Any | None:
         self._ensure_cache_thread()

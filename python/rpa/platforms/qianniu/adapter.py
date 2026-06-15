@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -10,7 +11,7 @@ from .detector import QianniuDetector
 from .qianniu_logging import get_logger
 from .reader import MessageRecord, MessageReadResult, QianniuReader
 from .sender import QianniuSender
-from .sessions import QianniuSessionReader, SessionItem
+from .sessions import QianniuSessionReader, SessionItem, session_titles_match
 from .uia import uia_guard
 
 logger = get_logger(__name__)
@@ -21,6 +22,15 @@ OBSERVER_POLL_INTERVAL_SEC = 1.5
 OBSERVER_AFTER_WORK_SLEEP_SEC = 0.3
 OBSERVER_ERROR_SLEEP_SEC = 3.0
 OBSERVER_MESSAGE_LIMIT = 30
+
+
+@dataclass(frozen=True)
+class EnsureSessionResult:
+    ok: bool
+    stage: str
+    method: str = ""
+    detail: str = ""
+    selected_title: str = ""
 
 
 class EventSink(Protocol):
@@ -65,6 +75,16 @@ def _display_name_from_key(value: str) -> str:
     if raw.startswith("qianniu_"):
         return raw[len("qianniu_") :].strip()
     return raw
+
+
+def _requested_display_name(display_name: Any, conversation_key: Any) -> str:
+    display = clean(display_name)
+    key = clean(conversation_key)
+    if display and display != "current":
+        if display == key or display.startswith("qianniu:") or display.startswith("qianniu_"):
+            return _display_name_from_key(display)
+        return display
+    return _display_name_from_key(key)
 
 
 class QianniuSidecarAdapter:
@@ -446,7 +466,7 @@ class QianniuSidecarAdapter:
         text = clean(params.get("text"))
         if not text:
             raise RuntimeError("empty_text")
-        display_name = clean(params.get("display_name")) or _display_name_from_key(clean(params.get("conversation_key"))) or "current"
+        display_name = _requested_display_name(params.get("display_name"), params.get("conversation_key")) or "current"
         chat_root = self._current_session_chat_root()
         try:
             result = self._sender.prepare_reply_draft(text, chat_root=chat_root)
@@ -470,23 +490,170 @@ class QianniuSidecarAdapter:
             "method": result.method,
         }
 
+    def _ensure_target_session_selected(self, display_name: str, conversation_key: str = "") -> EnsureSessionResult:
+        started_at = time.perf_counter()
+        target = _requested_display_name(display_name, conversation_key)
+        if not target or target == "current":
+            return EnsureSessionResult(ok=True, stage="skipped", method="no_explicit_target")
+
+        selected = self._selected_session(fresh=False)
+        if selected and session_titles_match(selected.title, target):
+            logger.info(
+                "qianniu ensure_target_session timing target=%s stage=current_selected method=selected_scan selected=%s total_ms=%.1f",
+                target,
+                selected.title,
+                _elapsed_ms(started_at),
+            )
+            return EnsureSessionResult(
+                ok=True,
+                stage="current_selected",
+                method="selected_scan",
+                selected_title=selected.title,
+            )
+
+        last_detail = clean(getattr(selected, "title", "")) if selected else ""
+        for attempt in range(1, 4):
+            scan_started_at = time.perf_counter()
+            target_item = self._find_target_session_fresh(target)
+            scan_ms = _elapsed_ms(scan_started_at)
+            if target_item is None:
+                logger.info(
+                    "qianniu ensure_target_session timing target=%s attempt=%s stage=find_target ok=False scan_ms=%.1f selected_before=%s total_ms=%.1f",
+                    target,
+                    attempt,
+                    scan_ms,
+                    last_detail,
+                    _elapsed_ms(started_at),
+                )
+                return EnsureSessionResult(
+                    ok=False,
+                    stage="find_target",
+                    method="fresh_scan",
+                    detail="target_session_not_found",
+                    selected_title=last_detail,
+                )
+
+            select_started_at = time.perf_counter()
+            switched, switch_method = self._select_session(target_item)
+            select_ms = _elapsed_ms(select_started_at)
+            if not switched:
+                logger.info(
+                    "qianniu ensure_target_session timing target=%s attempt=%s stage=select_target ok=False method=%s scan_ms=%.1f select_ms=%.1f total_ms=%.1f",
+                    target,
+                    attempt,
+                    switch_method,
+                    scan_ms,
+                    select_ms,
+                    _elapsed_ms(started_at),
+                )
+                last_detail = switch_method or "session_switch_failed"
+                continue
+
+            verify_started_at = time.perf_counter()
+            verified = self._selected_session(fresh=True)
+            verify_ms = _elapsed_ms(verify_started_at)
+            if verified and session_titles_match(verified.title, target):
+                logger.info(
+                    "qianniu ensure_target_session timing target=%s attempt=%s stage=verified ok=True method=%s scan_ms=%.1f select_ms=%.1f verify_ms=%.1f selected=%s total_ms=%.1f",
+                    target,
+                    attempt,
+                    switch_method,
+                    scan_ms,
+                    select_ms,
+                    verify_ms,
+                    verified.title,
+                    _elapsed_ms(started_at),
+                )
+                return EnsureSessionResult(
+                    ok=True,
+                    stage="verified",
+                    method=f"fresh_scan+{switch_method}+verify_selected",
+                    selected_title=verified.title,
+                )
+
+            last_detail = clean(getattr(verified, "title", "")) if verified else "selected_session_unavailable"
+            logger.info(
+                "qianniu ensure_target_session timing target=%s attempt=%s stage=verify_target ok=False method=%s scan_ms=%.1f select_ms=%.1f verify_ms=%.1f selected_after=%s total_ms=%.1f",
+                target,
+                attempt,
+                switch_method,
+                scan_ms,
+                select_ms,
+                verify_ms,
+                last_detail,
+                _elapsed_ms(started_at),
+            )
+
+        return EnsureSessionResult(
+            ok=False,
+            stage="verify_target",
+            method="fresh_scan+select+verify_selected",
+            detail="target_session_not_verified",
+            selected_title=last_detail,
+        )
+
+    def _selected_session(self, *, fresh: bool) -> SessionItem | None:
+        getter = getattr(self._sessions, "selected_session", None)
+        if callable(getter):
+            try:
+                return getter(fresh=fresh)
+            except TypeError:
+                return getter()
+        return None
+
+    def _find_target_session_fresh(self, target: str) -> SessionItem | None:
+        invalidator = getattr(self._sessions, "invalidate_cache", None)
+        if callable(invalidator):
+            invalidator()
+        sessions = self._sessions.read_visible_sessions(limit=100, detect_unread=False)
+        for item in sessions:
+            if session_titles_match(item.title, target):
+                return item
+        return None
+
+    def _select_session(self, item: SessionItem) -> tuple[bool, str]:
+        selector = getattr(self._sessions, "select_session", None)
+        if not callable(selector):
+            return False, "select_session_unavailable"
+        return selector(item)
+
     def _send_message(self, params: dict[str, Any], request_id: str) -> dict[str, Any]:
         total_started_at = time.perf_counter()
         token = clean(params.get("confirm_token"))
         if token != "manual_confirmed_by_agent":
             raise RuntimeError("send_message_requires_manual_confirm_token")
+        content_type = clean(params.get("content_type")) or "text"
         text = clean(params.get("text"))
-        if not text:
+        file_path = clean(params.get("file_path"))
+        if content_type == "text" and not text:
             raise RuntimeError("empty_text")
-        display_name = clean(params.get("display_name")) or _display_name_from_key(clean(params.get("conversation_key"))) or "current"
+        if content_type in {"image", "video", "file"} and not file_path:
+            raise RuntimeError("file_path_required")
+        if content_type not in {"text", "image", "video", "file"}:
+            raise RuntimeError("unsupported_content_type")
+        display_name = _requested_display_name(params.get("display_name"), params.get("conversation_key")) or "current"
         task_id = clean(params.get("task_id"))
         client_message_id = clean(params.get("client_message_id")) or task_id or request_id
+        ensure_result = self._ensure_target_session_selected(display_name, clean(params.get("conversation_key")))
+        if not ensure_result.ok:
+            raise RuntimeError(ensure_result.detail or ensure_result.stage or "target_session_not_verified")
         send_started_at = time.perf_counter()
         chat_root = self._current_session_chat_root()
-        try:
-            result = self._sender.send_text(text, dry_run=False, chat_root=chat_root)
-        except TypeError:
-            result = self._sender.send_text(text, dry_run=False)
+        if content_type == "text":
+            try:
+                result = self._sender.send_text(text, dry_run=False, chat_root=chat_root)
+            except TypeError:
+                result = self._sender.send_text(text, dry_run=False)
+        else:
+            try:
+                result = self._sender.send_media(
+                    file_path,
+                    content_type,
+                    dry_run=False,
+                    chat_root=chat_root,
+                )
+            except TypeError:
+                result = self._sender.send_media(file_path, content_type, dry_run=False)
         send_ms = _elapsed_ms(send_started_at)
         if not result.ok:
             logger.info(
@@ -510,6 +677,12 @@ class QianniuSidecarAdapter:
                 metadata={
                     "method": result.method,
                     "client_message_id": client_message_id,
+                    "target_session_method": ensure_result.method,
+                    "target_session_stage": ensure_result.stage,
+                    "target_session_selected": ensure_result.selected_title,
+                    "content_type": content_type,
+                    "file_path": file_path,
+                    "file_name": clean(params.get("file_name")),
                 },
             )
         )
@@ -521,6 +694,11 @@ class QianniuSidecarAdapter:
                     "status": "sent",
                     "send_method": result.method,
                     "client_message_id": client_message_id,
+                    "target_session_method": ensure_result.method,
+                    "content_type": content_type,
+                    "content": text,
+                    "file_path": file_path,
+                    "file_name": clean(params.get("file_name")),
                 },
             )
         )
@@ -540,6 +718,9 @@ class QianniuSidecarAdapter:
             "task_id": task_id,
             "client_message_id": client_message_id,
             "method": result.method,
+            "target_session_method": ensure_result.method,
+            "target_session_stage": ensure_result.stage,
+            "content_type": content_type,
         }
 
     def _current_session_chat_root(self) -> Any | None:

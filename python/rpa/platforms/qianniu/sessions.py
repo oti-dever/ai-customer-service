@@ -28,6 +28,7 @@ class SessionItem:
     raw_texts: list[str]
     unread: bool = False
     unread_score: float = 0.0
+    selected: bool = False
 
 
 class QianniuSessionReader:
@@ -124,6 +125,12 @@ class QianniuSessionReader:
     def current_chat_root(self) -> Any | None:
         return self.last_chat_root if self._is_cached_chat_root_available() else None
 
+    def invalidate_cache(self) -> None:
+        self.last_chat_root = None
+        self.last_session_root = None
+        self.last_session_root_source = ""
+        self._cache_thread_id = None
+
     def _is_cache_thread_current(self) -> bool:
         return self._cache_thread_id == threading.get_ident()
 
@@ -135,7 +142,15 @@ class QianniuSessionReader:
 
     def find_session(self, title: str, detect_unread: bool = False) -> SessionItem | None:
         for item in self.read_visible_sessions(limit=100, detect_unread=detect_unread):
-            if item.title == title:
+            if session_titles_match(item.title, title):
+                return item
+        return None
+
+    def selected_session(self, *, fresh: bool = False) -> SessionItem | None:
+        if fresh:
+            self.invalidate_cache()
+        for item in self.read_visible_sessions(limit=100, detect_unread=False):
+            if item.selected:
                 return item
         return None
 
@@ -200,6 +215,7 @@ def extract_session_items(root: Any, limit: int) -> list[SessionItem]:
                 class_name=safe_prop(control, "ClassName"),
                 control_type=safe_prop(control, "ControlTypeName") or safe_prop(control, "LocalizedControlType"),
                 raw_texts=texts,
+                selected=is_session_selected(control),
             )
         )
         if len(items) >= limit:
@@ -231,6 +247,7 @@ def with_visual_unread(item: SessionItem, threshold: float = 0.006) -> SessionIt
         raw_texts=item.raw_texts,
         unread=score >= threshold,
         unread_score=score,
+        selected=item.selected,
     )
 
 
@@ -280,6 +297,36 @@ def click_session_control(control: Any) -> bool:
         except Exception:
             continue
     return False
+
+
+def session_titles_match(left: str, right: str) -> bool:
+    return normalize_session_title(left) == normalize_session_title(right)
+
+
+def normalize_session_title(value: str) -> str:
+    return " ".join(str(value or "").strip().split()).lower()
+
+
+def is_session_selected(control: Any) -> bool:
+    try:
+        getter = getattr(control, "GetSelectionItemPattern", None)
+        if callable(getter):
+            pattern = getter()
+            if pattern:
+                selected = getattr(pattern, "IsSelected", None)
+                if callable(selected):
+                    selected = selected()
+                if selected is not None:
+                    return bool(selected)
+    except Exception:
+        pass
+    try:
+        value = safe_prop(control, "IsSelected")
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "selected"}
+        return bool(value)
+    except Exception:
+        return False
 
 
 def click_session_rect(item: SessionItem) -> bool:

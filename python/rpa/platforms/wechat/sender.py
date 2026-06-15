@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from .click_strategy import (
     ClickResult,
@@ -266,6 +267,63 @@ class WechatMessageSender:
             clicked.foreground,
         )
         return SendResult(sent=True, method=clicked.method, foreground=clicked.foreground)
+
+    def send_media(
+        self,
+        *,
+        file_path: str,
+        content_type: str,
+        display_name: str = "",
+        allow_foreground_fallback: bool = True,
+    ) -> SendResult:
+        source = Path(file_path)
+        if not source.is_file():
+            raise RuntimeError("file_not_found")
+        if content_type not in {"image", "video", "file"}:
+            raise RuntimeError("unsupported_content_type")
+
+        from rpa.platforms.wechat.media_clipboard import (
+            press_paste_shortcut,
+            set_clipboard_file_paths,
+        )
+        from rpa.platforms.wechat.uia import (
+            clear_chat_input_via_shortcuts,
+            find_chat_input,
+            focus_chat_input,
+        )
+
+        win = self._detector.find_main_window_control()
+        if win is None:
+            raise RuntimeError("wechat_window_not_found")
+        if display_name and not self._ensure_target_session_selected(
+            win,
+            display_name=display_name,
+            allow_foreground_fallback=allow_foreground_fallback,
+        ):
+            raise RuntimeError("target_session_not_verified")
+
+        input_ctrl = find_chat_input(win)
+        if input_ctrl is None:
+            input_candidates = find_input_candidates(win)
+            input_ctrl = input_candidates[0].control if input_candidates and input_candidates[0].score >= 60 else None
+        if input_ctrl is None:
+            raise RuntimeError("chat_input_not_found")
+        if not focus_chat_input(input_ctrl):
+            raise RuntimeError("chat_input_focus_failed")
+
+        clear_chat_input_via_shortcuts()
+        if not set_clipboard_file_paths([source]):
+            raise RuntimeError("clipboard_file_write_failed")
+        if not press_paste_shortcut():
+            raise RuntimeError("clipboard_file_paste_failed")
+
+        time.sleep(0.9 if source.stat().st_size < 20 * 1024 * 1024 else 1.8)
+        sent = self.send_prepared_message(allow_foreground_fallback=allow_foreground_fallback)
+        return SendResult(
+            sent=sent.sent,
+            method=f"clipboard_file+{sent.method}",
+            foreground=True,
+        )
 
 
 def _try_win32_text_message(input_ctrl: object, text: str, *, fallback_hwnd: int = 0) -> bool:

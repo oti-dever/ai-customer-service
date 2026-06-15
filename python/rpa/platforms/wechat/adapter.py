@@ -750,16 +750,65 @@ class WechatSidecarAdapter:
         token = clean(params.get("confirm_token"))
         if token != "manual_confirmed_by_agent":
             raise RuntimeError("send_message_requires_manual_confirm_token")
+        content_type = clean(params.get("content_type")) or "text"
         text = clean(params.get("text"))
         client_message_id = clean(params.get("client_message_id")) or clean(params.get("task_id")) or request_id
         allow_foreground_fallback = allow_foreground_fallback_from(params)
+        display_name = clean(params.get("display_name")) or _display_name_from_key(clean(params.get("conversation_key"))) or "current"
+        task_id = clean(params.get("task_id"))
+        if content_type in {"image", "video", "file"}:
+            file_path = clean(params.get("file_path"))
+            if not file_path:
+                raise RuntimeError("file_path_required")
+            send_result = self._sender.send_media(
+                file_path=file_path,
+                content_type=content_type,
+                display_name=display_name,
+                allow_foreground_fallback=allow_foreground_fallback,
+            )
+            event_payload = {
+                "status": "sent" if send_result.sent else "failed",
+                "foreground": send_result.foreground,
+                "send_method": send_result.method,
+                "client_message_id": client_message_id,
+                "content_type": content_type,
+                "content": text,
+                "file_path": file_path,
+                "file_name": clean(params.get("file_name")),
+                "task_id": task_id,
+            }
+            self._store.append(
+                self._task_result_event(
+                    "send_result_observed",
+                    display_name,
+                    task_id=task_id,
+                    client_message_id=client_message_id,
+                    status="sent",
+                    metadata=event_payload,
+                )
+            )
+            self._store.append(
+                self._event(
+                    "message_sent",
+                    _conversation_key(self._account_id, display_name),
+                    event_payload,
+                )
+            )
+            self._update_active_chat_state(display_name, context=None, samples=None)
+            return {
+                "sent": send_result.sent,
+                "task_id": task_id,
+                "client_message_id": client_message_id,
+                "send_method": send_result.method,
+                "foreground": send_result.foreground,
+                "content_type": content_type,
+            }
+
         result = self._prepare_reply_draft(params, request_id)
         draft_method = clean(result.get("draft_method") or result.get("method"))
         send_result = self._sender.send_prepared_message(
             allow_foreground_fallback=allow_foreground_fallback,
         )
-        display_name = clean(params.get("display_name")) or _display_name_from_key(clean(params.get("conversation_key"))) or "current"
-        task_id = clean(params.get("task_id"))
         self._store.append(
             self._task_result_event(
                 "send_result_observed",

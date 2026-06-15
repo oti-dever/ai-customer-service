@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -12,6 +13,8 @@ from .wechat_logging import get_logger
 logger = get_logger(__name__)
 
 CF_HDROP = 15
+GMEM_MOVEABLE = 0x0002
+GMEM_ZEROINIT = 0x0040
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,106 @@ class ClipboardFileResult:
     source_paths: list[str] = field(default_factory=list)
     artifact_paths: list[str] = field(default_factory=list)
     error: str = ""
+
+
+class _DropFiles(ctypes.Structure):
+    _fields_ = [
+        ("pFiles", ctypes.c_uint32),
+        ("pt_x", ctypes.c_long),
+        ("pt_y", ctypes.c_long),
+        ("fNC", ctypes.c_int),
+        ("fWide", ctypes.c_int),
+    ]
+
+
+def set_clipboard_file_paths(paths: Iterable[str | Path]) -> bool:
+    normalized = [str(Path(path).resolve()) for path in paths if Path(path).is_file()]
+    if not normalized:
+        return False
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+    except Exception:
+        return False
+
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_bool
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = ctypes.c_bool
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = ctypes.c_bool
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+
+    path_bytes = ("\0".join(normalized) + "\0\0").encode("utf-16le")
+    header = _DropFiles(
+        pFiles=ctypes.sizeof(_DropFiles),
+        pt_x=0,
+        pt_y=0,
+        fNC=0,
+        fWide=1,
+    )
+    total_size = ctypes.sizeof(header) + len(path_bytes)
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total_size)
+    if not handle:
+        return False
+
+    clipboard_open = False
+    transferred = False
+    try:
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            return False
+        try:
+            address = ctypes.cast(locked, ctypes.c_void_p).value
+            if not address:
+                return False
+            ctypes.memmove(address, ctypes.byref(header), ctypes.sizeof(header))
+            ctypes.memmove(address + ctypes.sizeof(header), path_bytes, len(path_bytes))
+        finally:
+            kernel32.GlobalUnlock(handle)
+
+        for _ in range(10):
+            if user32.OpenClipboard(None):
+                clipboard_open = True
+                break
+            time.sleep(0.03)
+        if not clipboard_open or not user32.EmptyClipboard():
+            return False
+        if not user32.SetClipboardData(CF_HDROP, handle):
+            return False
+        transferred = True
+        return True
+    except Exception as exc:
+        logger.debug("wechat clipboard CF_HDROP write failed: %s", exc)
+        return False
+    finally:
+        if clipboard_open:
+            user32.CloseClipboard()
+        if not transferred:
+            kernel32.GlobalFree(handle)
+
+
+def press_paste_shortcut() -> bool:
+    try:
+        import win32api
+        import win32con
+
+        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+        win32api.keybd_event(ord("V"), 0, 0, 0)
+        win32api.keybd_event(ord("V"), 0, win32con.KEYEVENTF_KEYUP, 0)
+        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+        return True
+    except Exception as exc:
+        logger.debug("wechat clipboard paste shortcut failed: %s", exc)
+        return False
 
 
 def read_clipboard_file_paths() -> list[Path]:
