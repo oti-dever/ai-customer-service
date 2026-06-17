@@ -259,6 +259,30 @@ class QianniuDetector:
     def find_chat_search_input(self, chat_root: Any | None) -> Any | None:
         return self.find_by_automation_id_suffix(chat_root, self.q.chat_search_input_suffix)
 
+    def find_chat_header_names(self, chat_root: Any | None, limit: int = 8) -> list[str]:
+        if not chat_root:
+            return []
+        root_rect = safe_rect_tuple(chat_root)
+        message_display = self.find_message_display(chat_root)
+        message_rect = safe_rect_tuple(message_display) if message_display else None
+        names: list[str] = []
+        seen: set[str] = set()
+        candidates: list[tuple[int, str]] = []
+        for depth, control in walk_controls(chat_root, max_depth=self.q.max_tree_depth, max_nodes=self.q.max_tree_nodes):
+            name = trim(safe_prop(control, "Name"))
+            if not _looks_like_header_name(name) or name in seen:
+                continue
+            score = self._score_chat_header_candidate(control, depth, root_rect, message_rect)
+            if score <= 0:
+                continue
+            seen.add(name)
+            candidates.append((score, name))
+        for _score, name in sorted(candidates, key=lambda item: item[0], reverse=True):
+            names.append(name)
+            if len(names) >= limit:
+                break
+        return names
+
     def find_by_automation_id_suffix(
         self,
         root: Any | None,
@@ -502,6 +526,57 @@ class QianniuDetector:
             reasons.append("root-penalty")
         return score, ",".join(reasons)
 
+    def _score_chat_header_candidate(
+        self,
+        control: Any,
+        depth: int,
+        root_rect: tuple[int, int, int, int] | None,
+        message_rect: tuple[int, int, int, int] | None,
+    ) -> int:
+        rect = safe_rect_tuple(control)
+        if not rect:
+            return 0
+        left, top, right, bottom = rect
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        if width < 20 or height < 8:
+            return 0
+
+        score = 0
+        aid = safe_prop(control, "AutomationId")
+        class_name = safe_prop(control, "ClassName")
+        control_type = safe_prop(control, "ControlTypeName") or safe_prop(control, "LocalizedControlType")
+        text = f"{aid} {class_name} {control_type}".lower()
+
+        if "label" in text or "text" in text or "name" in text:
+            score += 20
+        if "chat" in text and ("title" in text or "head" in text or "name" in text):
+            score += 40
+
+        if message_rect:
+            msg_left, msg_top, msg_right, _msg_bottom = message_rect
+            if left >= msg_left - 40 and right <= msg_right + 120:
+                score += 45
+            if top < msg_top and bottom <= msg_top + 20:
+                score += 45
+            distance = max(0, msg_top - bottom)
+            if distance <= 120:
+                score += max(0, 30 - int(distance / 4))
+        elif root_rect:
+            root_left, root_top, root_right, root_bottom = root_rect
+            root_w = max(1, root_right - root_left)
+            root_h = max(1, root_bottom - root_top)
+            if left > root_left + root_w * 0.25:
+                score += 25
+            if top < root_top + root_h * 0.22:
+                score += 35
+
+        if depth <= 1:
+            score -= 30
+        if "button" in text or "edit" in text or "input" in text or "list" in text:
+            score -= 30
+        return score
+
 
 def _child_count(control: Any) -> int:
     try:
@@ -512,6 +587,31 @@ def _child_count(control: Any) -> int:
 
 def _join_reasons(left: str, right: str) -> str:
     return ",".join(value for value in (left, right) if value)
+
+
+def _looks_like_header_name(value: str) -> bool:
+    if not value:
+        return False
+    if len(value) > 80:
+        return False
+    if value.startswith("UIWindow."):
+        return False
+    lowered = value.lower()
+    blocked = {
+        "已读",
+        "未读",
+        "发送",
+        "搜索",
+        "刷新",
+        "消息",
+        "聊天",
+        "接待中",
+        "待接待",
+        "最近联系",
+    }
+    if value in blocked or lowered in {"send", "search"}:
+        return False
+    return True
 
 
 def main() -> int:

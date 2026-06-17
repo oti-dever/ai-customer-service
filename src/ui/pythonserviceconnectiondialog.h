@@ -6,7 +6,6 @@
 class QLineEdit;
 class QPushButton;
 class QCheckBox;
-class QComboBox;
 class MainWindow;
 
 /**
@@ -26,7 +25,6 @@ private:
     void setupUI();
 
     MainWindow* m_main = nullptr;
-    QComboBox* m_runtimeModeCombo = nullptr;
     QLineEdit* m_serviceEndpointEdit = nullptr;
     QCheckBox* m_startupBackfillCheck = nullptr;
     QPushButton* m_btnSaveService = nullptr;

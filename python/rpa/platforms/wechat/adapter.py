@@ -23,6 +23,7 @@ OBSERVER_ERROR_SLEEP_SEC = 2.0
 OBSERVER_SESSION_LIMIT = 3
 OBSERVER_MESSAGE_LIMIT = 20
 OBSERVER_SETTLE_MS = 150
+MEDIA_CONTENT_TYPES = {"image", "emoji", "file", "video"}
 
 
 class EventSink(Protocol):
@@ -75,9 +76,42 @@ def _sha1(value: str) -> str:
 
 def _content_type_from_kind(kind: Any) -> str:
     value = clean(kind).lower()
-    if value in {"image", "emoji", "video", "file"}:
+    if value in MEDIA_CONTENT_TYPES:
         return value
     return "text"
+
+
+def _message_id_parts(
+    *,
+    platform: str,
+    account_id: str,
+    conversation_key: str,
+    direction: str,
+    content_type: str,
+    content: str,
+    sample: Any,
+    sequence_index: int | None = None,
+) -> list[str]:
+    parts = [
+        platform,
+        account_id,
+        conversation_key,
+        direction,
+        content_type,
+        content,
+    ]
+    if content_type in MEDIA_CONTENT_TYPES or sequence_index is not None:
+        parts.extend(
+            [
+                clean(getattr(sample, "platform_msg_id", "")),
+                clean(getattr(sample, "class_name", "")),
+                clean(getattr(sample, "automation_id", "")),
+                clean(getattr(sample, "rect", "")),
+            ]
+        )
+    if sequence_index is not None:
+        parts.extend(["visible_index", str(sequence_index)])
+    return parts
 
 
 def _conversation_key(account_id: str, display_name: str) -> str:
@@ -136,6 +170,7 @@ class WechatSidecarAdapter:
             "diagnose_wechat_uia": self._diagnose_wechat_uia,
             "fetch_visible_conversations": self._fetch_visible_conversations,
             "fetch_visible_messages": self._fetch_visible_messages,
+            "sync_history_messages": self._sync_history_messages,
             "scan_unread_and_fetch": self._scan_unread_and_fetch,
             "prepare_reply_draft": self._prepare_reply_draft,
             "send_message": self._send_message,
@@ -384,29 +419,194 @@ class WechatSidecarAdapter:
         context = getattr(batch, "context", None)
         self._update_active_chat_state(display_name, context=context, samples=batch.samples)
         raw_message_events: list[dict[str, Any]] = []
-        for item in batch.samples:
+        for sequence_index, item in enumerate(batch.samples):
             content = clean(getattr(item, "name", ""))
+            kind = clean(getattr(item, "kind", ""))
+            content_type = _content_type_from_kind(kind)
             if not content:
+                if content_type in MEDIA_CONTENT_TYPES:
+                    logger.info(
+                        "wechat media sample skipped before event reason=empty_name path=fetch_visible_messages "
+                        "display_name=%s kind=%s class=%s rect=%s",
+                        display_name,
+                        kind,
+                        clean(getattr(item, "class_name", "")),
+                        clean(getattr(item, "rect", "")),
+                    )
                 continue
-            event = self._message_event(display_name, item, context=context)
-            platform_msg_id = clean(event.get("payload", {}).get("platform_msg_id"))
+            event = self._message_event(display_name, item, context=context, sequence_index=sequence_index)
+            payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+            platform_msg_id = clean(payload.get("platform_msg_id"))
+            if content_type in MEDIA_CONTENT_TYPES:
+                logger.info(
+                    "wechat media event built path=fetch_visible_messages display_name=%s "
+                    "platform_msg_id=%s content_type=%s content=%s content_image_path=%s evidence_ref=%s "
+                    "file_copy_status=%s evidence_status=%s",
+                    display_name,
+                    platform_msg_id,
+                    content_type,
+                    content,
+                    clean(payload.get("content_image_path")),
+                    clean(payload.get("evidence_ref")),
+                    clean(payload.get("metadata", {}).get("file_copy_status") if isinstance(payload.get("metadata"), dict) else ""),
+                    clean(payload.get("metadata", {}).get("evidence_status") if isinstance(payload.get("metadata"), dict) else ""),
+                )
             if platform_msg_id and platform_msg_id in self._seen_message_ids:
-                continue
-            if platform_msg_id:
-                self._seen_message_ids.add(platform_msg_id)
+                if content_type in MEDIA_CONTENT_TYPES:
+                    logger.info(
+                        "wechat media event seen before; keep for sequence filter path=fetch_visible_messages "
+                        "platform_msg_id=%s display_name=%s",
+                        platform_msg_id,
+                        display_name,
+                    )
             raw_message_events.append(event)
 
         messages = self._filter_unread_message_events(raw_message_events)
+        if len(messages) != len(raw_message_events):
+            logger.info(
+                "wechat message event filter path=fetch_visible_messages display_name=%s raw=%s kept=%s "
+                "media_raw=%s media_kept=%s",
+                display_name,
+                len(raw_message_events),
+                len(messages),
+                sum(
+                    1
+                    for event in raw_message_events
+                    if (event.get("payload") or {}).get("content_type") in MEDIA_CONTENT_TYPES
+                ),
+                sum(
+                    1
+                    for event in messages
+                    if (event.get("payload") or {}).get("content_type") in MEDIA_CONTENT_TYPES
+                ),
+            )
         for event in messages:
             platform_msg_id = clean(event.get("payload", {}).get("platform_msg_id"))
             if platform_msg_id:
                 self._conversation_message_cursors[key] = platform_msg_id
-            self._store.append(event)
+            seq = self._store.append(event)
+            if seq and platform_msg_id:
+                self._seen_message_ids.add(platform_msg_id)
         self._seen_conversation_keys.add(key)
         return {
             "count": len(messages),
             "messages": messages,
             "display_name": display_name,
+            "context": _chat_context_payload(context),
+        }
+
+    def _sync_history_messages(self, params: dict[str, Any], request_id: str) -> dict[str, Any]:
+        limit = max(1, min(int(params.get("limit", 20) or 20), 50))
+        max_scrolls = max(1, min(int(params.get("max_scrolls", 10) or 10), 20))
+        settle_ms = max(50, min(int(params.get("settle_ms", 500) or 500), 3000))
+        restore_bottom = truthy(params.get("restore_bottom"), True)
+        requested_name = _display_name_from_key(clean(params.get("conversation_key")))
+        display_name = clean(params.get("display_name")) or requested_name
+        if not display_name:
+            raise RuntimeError("sync_history_requires_display_name")
+
+        logger.info(
+            "sync_history_messages request_id=%s display_name=%s limit=%s max_scrolls=%s settle_ms=%s",
+            request_id,
+            display_name,
+            limit,
+            max_scrolls,
+            settle_ms,
+        )
+        self._ensure_history_target_selected(display_name, allow_foreground=truthy(params.get("allow_foreground"), True))
+        batch = self._reader.read_recent_history_messages(
+            display_name=display_name,
+            limit=limit,
+            max_scrolls=max_scrolls,
+            settle_ms=settle_ms,
+            restore_bottom=restore_bottom,
+        )
+        display_name = batch.display_name
+        key = _conversation_key(self._account_id, display_name)
+        context = getattr(batch, "context", None)
+        self._update_active_chat_state(display_name, context=context, samples=batch.samples)
+
+        emitted: list[dict[str, Any]] = []
+        duplicate_count = 0
+        media_success_count = 0
+        media_failed_count = 0
+        seen_batch_keys: set[str] = set()
+        total = len(batch.samples)
+        for sequence_index, item in enumerate(batch.samples):
+            content = clean(getattr(item, "name", ""))
+            kind = clean(getattr(item, "kind", ""))
+            content_type = _content_type_from_kind(kind)
+            if not content:
+                duplicate_count += 1
+                continue
+            batch_key = self._history_batch_key(item, display_name=display_name, context=context)
+            if batch_key in seen_batch_keys:
+                duplicate_count += 1
+                continue
+            seen_batch_keys.add(batch_key)
+            event = self._message_event(
+                display_name,
+                item,
+                context=context,
+                sequence_index=sequence_index,
+                history_sync=True,
+                history_request_id=request_id,
+                history_sequence=sequence_index,
+            )
+            payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            metadata["history_total"] = total
+            payload["metadata"] = metadata
+            platform_msg_id = clean(payload.get("platform_msg_id"))
+            if platform_msg_id and platform_msg_id in self._seen_message_ids:
+                duplicate_count += 1
+                continue
+            seq = self._store.append(event)
+            if seq:
+                emitted.append(event)
+                if platform_msg_id:
+                    self._seen_message_ids.add(platform_msg_id)
+                    self._conversation_message_cursors[key] = platform_msg_id
+            else:
+                duplicate_count += 1
+            if content_type in MEDIA_CONTENT_TYPES:
+                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                if clean(payload.get("content_image_path") or payload.get("evidence_ref")):
+                    media_success_count += 1
+                elif clean(metadata.get("file_copy_status") or metadata.get("evidence_status")) in {"failed", "error"}:
+                    media_failed_count += 1
+        self._seen_conversation_keys.add(key)
+        completed_event = self._event(
+            "history_sync_completed",
+            key,
+            {
+                "task_id": request_id,
+                "display_name": display_name,
+                "requested_limit": limit,
+                "collected_count": total,
+                "inserted_count": len(emitted),
+                "duplicate_count": duplicate_count,
+                "media_success_count": media_success_count,
+                "media_failed_count": media_failed_count,
+                "scroll_count": getattr(batch, "scroll_count", 0),
+                "reached_top": bool(getattr(batch, "reached_top", False)),
+                "restored_bottom": bool(restore_bottom),
+            },
+        )
+        self._store.append(completed_event)
+        return {
+            "accepted": True,
+            "task_id": request_id,
+            "display_name": display_name,
+            "requested_limit": limit,
+            "collected_count": total,
+            "inserted_count": len(emitted),
+            "duplicate_count": duplicate_count,
+            "media_success_count": media_success_count,
+            "media_failed_count": media_failed_count,
+            "scroll_count": getattr(batch, "scroll_count", 0),
+            "reached_top": bool(getattr(batch, "reached_top", False)),
+            "restored_bottom": bool(restore_bottom),
             "context": _chat_context_payload(context),
         }
 
@@ -599,24 +799,74 @@ class WechatSidecarAdapter:
 
             count_before = len(messages)
             raw_message_events: list[dict[str, Any]] = []
-            for item in batch.samples:
+            for sequence_index, item in enumerate(batch.samples):
                 content = clean(getattr(item, "name", ""))
+                kind = clean(getattr(item, "kind", ""))
+                content_type = _content_type_from_kind(kind)
                 if not content:
+                    if content_type in MEDIA_CONTENT_TYPES:
+                        logger.info(
+                            "wechat media sample skipped before event reason=empty_name path=scan_unread "
+                            "display_name=%s kind=%s class=%s rect=%s",
+                            display_name,
+                            kind,
+                            clean(getattr(item, "class_name", "")),
+                            clean(getattr(item, "rect", "")),
+                        )
                     continue
-                msg_event = self._message_event(display_name, item, context=context)
-                platform_msg_id = clean(msg_event.get("payload", {}).get("platform_msg_id"))
+                msg_event = self._message_event(display_name, item, context=context, sequence_index=sequence_index)
+                payload = msg_event.get("payload", {}) if isinstance(msg_event.get("payload"), dict) else {}
+                platform_msg_id = clean(payload.get("platform_msg_id"))
+                if content_type in MEDIA_CONTENT_TYPES:
+                    logger.info(
+                        "wechat media event built path=scan_unread display_name=%s "
+                        "platform_msg_id=%s content_type=%s content=%s content_image_path=%s evidence_ref=%s "
+                        "file_copy_status=%s evidence_status=%s",
+                        display_name,
+                        platform_msg_id,
+                        content_type,
+                        content,
+                        clean(payload.get("content_image_path")),
+                        clean(payload.get("evidence_ref")),
+                        clean(payload.get("metadata", {}).get("file_copy_status") if isinstance(payload.get("metadata"), dict) else ""),
+                        clean(payload.get("metadata", {}).get("evidence_status") if isinstance(payload.get("metadata"), dict) else ""),
+                    )
                 if platform_msg_id and platform_msg_id in self._seen_message_ids:
-                    continue
-                if platform_msg_id:
-                    self._seen_message_ids.add(platform_msg_id)
+                    if content_type in MEDIA_CONTENT_TYPES:
+                        logger.info(
+                            "wechat media event seen before; keep for sequence filter path=scan_unread "
+                            "platform_msg_id=%s display_name=%s",
+                            platform_msg_id,
+                            display_name,
+                        )
                 raw_message_events.append(msg_event)
 
             filtered_message_events = self._filter_unread_message_events(raw_message_events)
+            if len(filtered_message_events) != len(raw_message_events):
+                logger.info(
+                    "wechat message event filter path=scan_unread display_name=%s raw=%s kept=%s "
+                    "media_raw=%s media_kept=%s",
+                    display_name,
+                    len(raw_message_events),
+                    len(filtered_message_events),
+                    sum(
+                        1
+                        for event in raw_message_events
+                        if (event.get("payload") or {}).get("content_type") in MEDIA_CONTENT_TYPES
+                    ),
+                    sum(
+                        1
+                        for event in filtered_message_events
+                        if (event.get("payload") or {}).get("content_type") in MEDIA_CONTENT_TYPES
+                    ),
+                )
             for msg_event in filtered_message_events:
                 platform_msg_id = clean(msg_event.get("payload", {}).get("platform_msg_id"))
                 if platform_msg_id:
                     self._conversation_message_cursors[_conversation_key(self._account_id, display_name)] = platform_msg_id
-                self._store.append(msg_event)
+                seq = self._store.append(msg_event)
+                if seq and platform_msg_id:
+                    self._seen_message_ids.add(platform_msg_id)
                 messages.append(msg_event)
             self._seen_conversation_keys.add(key)
 
@@ -699,6 +949,24 @@ class WechatSidecarAdapter:
                 and self._last_active_chat_title
                 and _conversation_key(self._account_id, display_name) == self._last_active_conversation_key
             )
+
+    def _ensure_history_target_selected(self, display_name: str, *, allow_foreground: bool) -> None:
+        win = self._detector.find_main_window_control()
+        if win is None:
+            raise RuntimeError("wechat_window_not_found")
+        if self._detector.verify_session_switch(display_name, win, timeout_ms=300, interval_ms=80):
+            return
+        session = self._detector.find_session_control(win, display_name, exact=False)
+        if session is None:
+            raise RuntimeError("wechat_session_not_found")
+        from .click_strategy import click_session_item_detailed
+
+        hwnd = int(getattr(win, "NativeWindowHandle", 0) or 0)
+        clicked = click_session_item_detailed(session, fallback_hwnd=hwnd, allow_foreground=allow_foreground)
+        if not clicked.ok:
+            raise RuntimeError(f"wechat_session_click_failed:{clicked.detail}")
+        if not self._detector.verify_session_switch(display_name, win, timeout_ms=1800, interval_ms=120):
+            raise RuntimeError("wechat_session_switch_not_verified")
 
     def _prepare_reply_draft(self, params: dict[str, Any], _request_id: str) -> dict[str, Any]:
         text = clean(params.get("text"))
@@ -919,7 +1187,17 @@ class WechatSidecarAdapter:
         }
         return self._event("conversation_observed", key, payload)
 
-    def _message_event(self, display_name: str, sample: Any, *, context: Any | None = None) -> dict[str, Any]:
+    def _message_event(
+        self,
+        display_name: str,
+        sample: Any,
+        *,
+        context: Any | None = None,
+        sequence_index: int | None = None,
+        history_sync: bool = False,
+        history_request_id: str = "",
+        history_sequence: int | None = None,
+    ) -> dict[str, Any]:
         key = _conversation_key(self._account_id, display_name)
         content = clean(getattr(sample, "name", ""))
         direction = self._infer_direction(sample)
@@ -928,17 +1206,36 @@ class WechatSidecarAdapter:
         context_payload = _chat_context_payload(context)
         kind = clean(getattr(sample, "kind", ""))
         content_type = _content_type_from_kind(kind)
-        raw_id = "|".join(
-            [
-                PLATFORM_WECHAT,
-                self._account_id,
-                key,
-                direction,
-                content_type,
-                content,
-            ]
-        )
-        platform_msg_id = "wechat_" + _sha1(raw_id)[:24]
+        if history_sync:
+            raw_id = "|".join(
+                [
+                    PLATFORM_WECHAT,
+                    self._account_id,
+                    key,
+                    "history",
+                    direction,
+                    content_type,
+                    " ".join(content.split()),
+                    clean(getattr(sample, "class_name", "")),
+                    clean(getattr(sample, "automation_id", "")),
+                    str(history_sequence if history_sequence is not None else sequence_index if sequence_index is not None else 0),
+                ]
+            )
+            platform_msg_id = "wechat_history_" + _sha1(raw_id)[:24]
+        else:
+            raw_id = "|".join(
+                _message_id_parts(
+                    platform=PLATFORM_WECHAT,
+                    account_id=self._account_id,
+                    conversation_key=key,
+                    direction=direction,
+                    content_type=content_type,
+                    content=content,
+                    sample=sample,
+                    sequence_index=sequence_index,
+                )
+            )
+            platform_msg_id = "wechat_" + _sha1(raw_id)[:24]
         media = self._media_extractor.extract(
             content_type,
             platform_msg_id,
@@ -967,12 +1264,56 @@ class WechatSidecarAdapter:
                 "role_confidence": getattr(sample, "role_confidence", 0.0),
                 "left_variance": getattr(sample, "left_variance", 0.0),
                 "right_variance": getattr(sample, "right_variance", 0.0),
+                "visible_sequence_index": sequence_index,
                 "chat_context": context_payload,
             },
         }
+        if history_sync:
+            payload["metadata"].update(
+                {
+                    "history_sync": True,
+                    "history_sync_request_id": history_request_id,
+                    "history_sequence": history_sequence if history_sequence is not None else sequence_index,
+                    "observation_method": "uia_history_scroll",
+                    "suppress_unread": True,
+                    "suppress_auto_reply": True,
+                    "preserve_conversation_last_message": True,
+                }
+            )
         payload["metadata"].update(media.metadata_fields)
         payload.update(media.payload_fields)
+        if content_type in {"image", "emoji", "file", "video"}:
+            logger.info(
+                "wechat media message payload ready display_name=%s platform_msg_id=%s "
+                "content_type=%s direction=%s content_len=%s content_image_path=%s evidence_ref=%s "
+                "metadata_keys=%s",
+                display_name,
+                platform_msg_id,
+                content_type,
+                payload.get("direction", ""),
+                len(content),
+                clean(payload.get("content_image_path")),
+                clean(payload.get("evidence_ref")),
+                sorted(payload.get("metadata", {}).keys()) if isinstance(payload.get("metadata"), dict) else [],
+            )
         return self._event("message_observed", key, payload)
+
+    def _history_batch_key(self, sample: Any, *, display_name: str, context: Any | None = None) -> str:
+        direction = self._infer_direction(sample)
+        kind = clean(getattr(sample, "kind", "")) or "text"
+        content = " ".join(clean(getattr(sample, "name", "")).split())
+        context_payload = _chat_context_payload(context)
+        return "|".join(
+            [
+                _conversation_key(self._account_id, display_name),
+                direction,
+                kind,
+                content,
+                clean(getattr(sample, "class_name", "")),
+                clean(getattr(sample, "automation_id", "")),
+                clean(context_payload.get("session_id") if context_payload else ""),
+            ]
+        )
 
     @property
     def _media_evidence_writer(self) -> Any:

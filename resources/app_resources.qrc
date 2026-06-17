@@ -55,6 +55,7 @@
         <file>aggregate_reception_icons/generate_reply_icon.svg</file>
         <file>aggregate_reception_icons/turn_on_auto_reply_icon.svg</file>
         <file>aggregate_reception_icons/stop_auto_reply_icon.svg</file>
+        <file>aggregate_reception_icons/sync_hitstory_messages_icon.svg</file>
         <file>aggregate_reception_icons/customer_default_avatar.png</file>
         <file>question_mark_icon.svg</file>
         <file>bug_log_icon.svg</file>

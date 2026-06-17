@@ -50,7 +50,7 @@ void ConversationManager::initialize(MessageRouter* router)
     });
 
     connect(m_router, &MessageRouter::messageReceived, this, [this](int convId, const MessageRecord& rec) {
-        if (rec.direction == QLatin1String("in")) {
+        if (!RuntimeMode::ownsBusinessDatabase() && rec.direction == QLatin1String("in")) {
             ConversationDao dao;
             dao.setStatus(convId, QStringLiteral("waiting_agent"));
         }
@@ -59,7 +59,7 @@ void ConversationManager::initialize(MessageRouter* router)
 
     connect(m_router, &MessageRouter::unifiedMessageReceived,
             this, [this](int convId, const Models::Message& message) {
-        if (message.direction == Models::MessageDirection::Inbound) {
+        if (!RuntimeMode::ownsBusinessDatabase() && message.direction == Models::MessageDirection::Inbound) {
             ConversationDao dao;
             dao.setStatus(convId, QStringLiteral("waiting_agent"));
         }
@@ -67,7 +67,7 @@ void ConversationManager::initialize(MessageRouter* router)
     });
 
     connect(m_router, &MessageRouter::messageSentOk, this, [this](int convId, const MessageRecord& rec) {
-        if (rec.direction == QLatin1String("out")) {
+        if (!RuntimeMode::ownsBusinessDatabase() && rec.direction == QLatin1String("out")) {
             ConversationDao dao;
             dao.setStatus(convId, QStringLiteral("waiting_customer"));
             const auto conv = dao.findById(convId);
@@ -87,7 +87,7 @@ void ConversationManager::initialize(MessageRouter* router)
             [this](int convId, int msgId, Models::MessageStatus status, const QString& reason) {
         qDebug() << "[ConversationManager] message status changed convId=" << convId
                  << "msgId=" << msgId << "status=" << Models::toString(status);
-        if (status == Models::MessageStatus::Sent) {
+        if (!RuntimeMode::ownsBusinessDatabase() && status == Models::MessageStatus::Sent) {
             ConversationDao dao;
             dao.setStatus(convId, QStringLiteral("waiting_customer"));
             const auto conv = dao.findById(convId);
@@ -109,7 +109,10 @@ void ConversationManager::initialize(MessageRouter* router)
     connect(m_router, &MessageRouter::conversationDeleted, this, [this](int convId) {
         if (m_currentConvId == convId) {
             m_currentConvId = -1;
-            ConversationDao().setLastSelectedCachedConversationId(-1);
+            if (RuntimeMode::isSingleHostServiceDb())
+                AppDataUiStateDao().clearLastSelectedConversation();
+            else
+                ConversationDao().setLastSelectedCachedConversationId(-1);
             emit currentConversationChanged(-1);
         }
         emit conversationDeleted(convId);
@@ -163,15 +166,18 @@ void ConversationManager::selectConversation(int conversationId)
     const bool changed = m_currentConvId != conversationId;
     m_currentConvId = conversationId;
     ConversationDao dao;
-    dao.setLastSelectedCachedConversationId(conversationId);
+    if (!RuntimeMode::isSingleHostServiceDb())
+        dao.setLastSelectedCachedConversationId(conversationId);
     if (RuntimeMode::isSingleHostServiceDb()) {
         if (conversationId <= 0) {
             AppDataUiStateDao().clearLastSelectedConversation();
         }
     }
     if (conversationId > 0) {
-        clearUnread(conversationId);
-        dao.setStatus(conversationId, QStringLiteral("active"));
+        if (!RuntimeMode::ownsBusinessDatabase()) {
+            clearUnread(conversationId);
+            dao.setStatus(conversationId, QStringLiteral("active"));
+        }
         const auto conv = dao.findById(conversationId);
         if (conv) {
             if (RuntimeMode::isSingleHostServiceDb()) {
@@ -268,6 +274,12 @@ bool ConversationManager::isPlatformListening(const QString& platform) const
 
 void ConversationManager::closeConversation(int conversationId)
 {
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        qWarning() << "[ConversationManager] local close blocked in service-owned database mode"
+                   << conversationId;
+        return;
+    }
+
     ConversationDao dao;
     dao.setStatus(conversationId, QStringLiteral("closed"));
     if (m_currentConvId == conversationId) {
@@ -281,6 +293,12 @@ void ConversationManager::closeConversation(int conversationId)
 
 bool ConversationManager::clearConversationMessages(int conversationId)
 {
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        qWarning() << "[ConversationManager] local clear blocked in service-owned database mode"
+                   << conversationId;
+        return false;
+    }
+
     MessageDao msgDao;
     if (!msgDao.clearAllForConversation(conversationId))
         return false;
@@ -301,6 +319,12 @@ bool ConversationManager::clearConversationMessages(int conversationId)
 
 void ConversationManager::deleteConversation(int conversationId)
 {
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        qWarning() << "[ConversationManager] local delete blocked in service-owned database mode"
+                   << conversationId;
+        return;
+    }
+
     ConversationDao dao;
     dao.remove(conversationId);
     if (m_currentConvId == conversationId) {
@@ -314,6 +338,9 @@ void ConversationManager::deleteConversation(int conversationId)
 
 void ConversationManager::clearUnread(int conversationId)
 {
+    if (RuntimeMode::ownsBusinessDatabase())
+        return;
+
     ConversationDao dao;
     dao.clearUnread(conversationId);
 }

@@ -72,6 +72,15 @@ void IpcService::setServiceEndpoint(const QString& endpoint)
     }
 }
 
+void IpcService::markServiceUnavailable()
+{
+    stopCommandWebSocketClient();
+    if (!m_serviceAvailable)
+        return;
+    m_serviceAvailable = false;
+    emit serviceStatusChanged(false);
+}
+
 QString IpcService::normalizedEndpoint(const QString& endpoint) const
 {
     QString value = endpoint.trimmed();

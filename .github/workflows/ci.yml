@@ -1,0 +1,53 @@
+# Windows：配置 + 编译主程序与 tests，并运行 ctest
+# 需仓库为公开或使用含 GitHub Actions 额度的私有仓；Qt 由 install-qt-action 拉取
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate Python RPA scripts
+        shell: pwsh
+        run: python -m compileall "${{ github.workspace }}/python/rpa"
+
+      - name: Smoke test Python RPA CLI
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/python
+        run: python -m rpa.main --help *> $null
+
+      - name: Install Qt
+        id: install-qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.10.2"
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Configure CMake
+        shell: pwsh
+        run: >
+          cmake -B "${{ github.workspace }}/build"
+          -S "${{ github.workspace }}"
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH="${{ steps.install-qt.outputs.qt_path }}"
+
+      - name: Build
+        run: cmake --build "${{ github.workspace }}/build" --config Release
+
+      - name: Test
+        working-directory: ${{ github.workspace }}/build
+        run: ctest -C Release --output-on-failure

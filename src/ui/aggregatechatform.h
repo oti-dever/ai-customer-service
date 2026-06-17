@@ -45,6 +45,7 @@ class QModelIndex;
 class QHBoxLayout;
 class QGridLayout;
 class QMimeData;
+class QCloseEvent;
 class QResizeEvent;
 
 /** 左侧平台工具条：与库中 `conversations.platform` 一致（如 qianniu、pdd_web、douyin、wechat）。 */
@@ -64,6 +65,7 @@ public:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
@@ -94,7 +96,12 @@ private:
     void refreshVisibleConversationMessages();
     void scrollToBottom();
     /** 在布局完成后再滚到底部（切换会话、追加消息等场景） */
-    void scheduleScrollChatToBottom();
+    void scheduleScrollChatToBottom(bool force = true);
+    bool isMessageViewNearBottom(int tolerancePx = 48) const;
+    void updateMessageScrollState();
+    void showPendingNewMessageHint(int count = 1);
+    void clearPendingNewMessageHint();
+    void updateNewMessageHintGeometry();
     void persistCurrentDraft();
     void restoreDraftForConversation(int conversationId);
     bool handleComposeMimeData(const QMimeData* mimeData);
@@ -122,6 +129,8 @@ private:
     void setPlatformListenControlsEnabled(bool enabled);
     void updatePlatformListenStatusLabel();
     void refreshPythonServiceButtonUi();
+    void updateWechatHistorySyncButtonUi();
+    bool currentConversationIsWechat() const;
     void abortAggregateAiRequest();
     void abortAutoReplyRequest();
     void clearStreamingSession(IAiStreamingSession*& session);
@@ -153,6 +162,8 @@ private:
     void openModelPickerSheet();
     void closeModelPickerSheet();
     void startModelSheetWidthAnimation(int fromWidth, int toWidth, bool hideOverlayOnFinish);
+    void shutdownTransientWork();
+    void destroyStreamingSessionNow(IAiStreamingSession*& session);
 
     QWidget* createBubble(const MessageRecord& msg);
     QWidget* createDateSeparator(const QDate& date);
@@ -172,6 +183,7 @@ private slots:
     void onStopPlatformListeningClicked();
     void onPythonServiceButtonClicked();
     void onPythonServiceButtonContextMenu(const QPoint& pos);
+    void onSyncWechatHistoryClicked();
     void onGenerateAiDraftClicked();
     void onAggregateAiModelMenuTriggered(QAction* action);
     void onIpcAiSuggestionReceived(const Ipc::AiSuggestionResponse& response);
@@ -217,6 +229,7 @@ private:
     QLabel* m_platformListenStatusLabel = nullptr;
     bool m_pythonServiceAvailable = false;
     bool m_pythonBackfillInProgress = false;
+    bool m_wechatHistorySyncInProgress = false;
     QSet<QString> m_registeredListenPlatforms;
     QSet<QString> m_serviceListeningPlatforms;
     QPushButton* m_btnAll = nullptr;
@@ -236,6 +249,8 @@ private:
     QWidget* m_chatInputOverlayHost = nullptr;
     QWidget* m_chatInputPanel = nullptr;
     QListView* m_messageView = nullptr;
+    QToolButton* m_btnNewMessages = nullptr;
+    QToolButton* m_btnSyncWechatHistory = nullptr;
     QPlainTextEdit* m_inputEdit = nullptr;
     QScrollArea* m_composeAttachmentsScroll = nullptr;
     QWidget* m_composeAttachmentsWidget = nullptr;
@@ -268,6 +283,7 @@ private:
     QElapsedTimer m_autoReplyRequestTimer;
     int m_autoReplyFirstTokenMs = 0;
     bool m_customerProfileBusy = false;
+    bool m_shuttingDown = false;
     qint64 m_customerProfileRequestEventId = 0;
     QElapsedTimer m_customerProfileRequestTimer;
     int m_customerProfileFirstTokenMs = 0;
@@ -337,6 +353,8 @@ private:
     int m_pendingStickyConvId = -1;
     QDate m_lastBubbleDate;
     QString m_currentMessageSignature;
+    bool m_messageViewNearBottom = true;
+    int m_pendingNewMessageCount = 0;
 
     QString m_loginUsername;
     QString m_selfDisplayName;

@@ -162,6 +162,15 @@ QString messageSelectProjection()
         "LEFT JOIN qianniu_messages qm ON qm.message_id = m.id ");
 }
 
+bool tableExists(const QString& tableName)
+{
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :name LIMIT 1"));
+    q.bindValue(QStringLiteral(":name"), tableName);
+    return q.exec() && q.next();
+}
+
 } // namespace
 
 static MessageRecord messageRecordFromQuery(QSqlQuery& q)
@@ -690,6 +699,9 @@ std::optional<LatestInboundSnapshot> MessageDao::latestCachedInboundSnapshot(int
 QHash<int, QString> MessageDao::lastDirectionsByConversation() const
 {
     QHash<int, QString> out;
+    if (!tableExists(QStringLiteral("messages")))
+        return out;
+
     QSqlQuery q(Database::getInstance().connection());
     q.prepare(QStringLiteral(
         "SELECT conversation_id, direction FROM messages WHERE id IN "

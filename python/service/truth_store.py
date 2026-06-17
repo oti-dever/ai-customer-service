@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,10 @@ def _sqlite_time(value: Any) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _local_now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -114,9 +118,10 @@ def _message_status_from_sync(value: Any) -> str:
     return "observed"
 
 
-def _message_fingerprint(direction: Any, sender_role: Any, content: Any) -> str:
+def _message_fingerprint(direction: Any, sender_role: Any, content: Any, content_type: Any = "text") -> str:
     normalized_content = " ".join(_clean(content).split())
-    return f"{_direction(direction, sender_role)}\n{normalized_content}"
+    normalized_type = _clean(content_type).lower() or "text"
+    return f"{_direction(direction, sender_role)}\n{normalized_type}\n{normalized_content}"
 
 
 def _event_message_fingerprint(event: dict[str, Any]) -> str:
@@ -125,7 +130,34 @@ def _event_message_fingerprint(event: dict[str, Any]) -> str:
         payload.get("direction"),
         payload.get("sender_role"),
         payload.get("content"),
+        payload.get("content_type"),
     )
+
+
+def _is_media_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return _clean(payload.get("content_type")).lower() in {"image", "emoji", "file", "video"}
+
+
+def _metadata(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    meta = payload.get("metadata")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _is_history_sync_payload(payload: Any) -> bool:
+    meta = _metadata(payload)
+    return bool(meta.get("history_sync") or meta.get("preserve_conversation_last_message"))
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
 
 
 def _longest_tail_overlap(history: list[str], current: list[str]) -> int:
@@ -162,6 +194,19 @@ class PythonServiceTruthStore:
         try:
             self._ensure_schema(conn)
             if not self._should_accept_observed_event(conn, event):
+                if event_type == "message_observed":
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    logging.info(
+                        "truth_store rejected message_observed platform=%s conversation_key=%s "
+                        "platform_msg_id=%s content_type=%s content_len=%s content_image_path=%s evidence_ref=%s",
+                        _clean(event.get("platform")),
+                        _clean(event.get("conversation_key")),
+                        _clean(payload.get("platform_msg_id")),
+                        _clean(payload.get("content_type")),
+                        len(_clean(payload.get("content"))),
+                        _clean(payload.get("content_image_path")),
+                        _clean(payload.get("evidence_ref")),
+                    )
                 return False
             self._append_event_log(conn, event)
             if event_type == "conversation_observed":
@@ -169,6 +214,19 @@ class PythonServiceTruthStore:
             elif event_type == "message_observed":
                 conv_id = self._upsert_conversation(conn, event)
                 self._upsert_message(conn, conv_id, event)
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                logging.info(
+                    "truth_store persisted message_observed conversation_id=%s platform=%s conversation_key=%s "
+                    "platform_msg_id=%s content_type=%s content_len=%s content_image_path=%s evidence_ref=%s",
+                    conv_id,
+                    _clean(event.get("platform")),
+                    _clean(event.get("conversation_key")),
+                    _clean(payload.get("platform_msg_id")),
+                    _clean(payload.get("content_type")),
+                    len(_clean(payload.get("content"))),
+                    _clean(payload.get("content_image_path")),
+                    _clean(payload.get("evidence_ref")),
+                )
             elif event_type == "message_sent":
                 self._mark_outbound_result(conn, event, sent=True)
             elif event_type == "send_failed":
@@ -330,7 +388,7 @@ class PythonServiceTruthStore:
 
             rows = conn.execute(
                 """
-                SELECT direction, sender, content FROM messages
+                SELECT direction, sender, content, content_type FROM messages
                 WHERE conversation_id = ?
                 ORDER BY id DESC
                 LIMIT ?
@@ -338,7 +396,7 @@ class PythonServiceTruthStore:
                 (conversation_id, bootstrap_limit),
             ).fetchall()
             history_fingerprints = [
-                _message_fingerprint(row[0], row[1], row[2])
+                _message_fingerprint(row[0], row[1], row[2], row[3])
                 for row in reversed(rows)
             ]
 
@@ -365,40 +423,76 @@ class PythonServiceTruthStore:
 
         candidates = self._filter_candidates_by_mutation(candidates, mutation)
         if not candidates:
+            media_total = sum(1 for event in events if _is_media_payload(event.get("payload")))
+            if media_total:
+                logging.info(
+                    "truth_store filter dropped media candidates reason=mutation platform=%s conversation_key=%s media_total=%s",
+                    platform,
+                    conversation_key,
+                    media_total,
+                )
             return []
         candidate_fingerprints = [_event_message_fingerprint(event) for event in candidates]
         overlap = _longest_tail_overlap(history_fingerprints, candidate_fingerprints)
+        media_candidate_count = sum(1 for event in candidates if _is_media_payload(event.get("payload")))
         if overlap > 0:
-            selected: list[dict[str, Any]] = []
-            seen_new_ids: set[str] = set()
-            for event in candidates[overlap:]:
-                payload = event.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                platform_msg_id = _clean(payload.get("platform_msg_id"))
-                if platform_msg_id and (platform_msg_id in existing_ids or platform_msg_id in seen_new_ids):
-                    continue
-                if _direction(payload.get("direction"), payload.get("sender_role")) != "in":
-                    continue
-                selected.append(event)
-                if platform_msg_id:
-                    seen_new_ids.add(platform_msg_id)
-            return selected[-incremental_limit:]
+            selected = [
+                event
+                for event in candidates[overlap:]
+                if isinstance(event.get("payload"), dict)
+            ]
+            result = selected[-incremental_limit:]
+            logging.info(
+                "truth_store filter result platform=%s conversation_key=%s mode=sequence_overlap candidates=%s "
+                "media_candidates=%s overlap=%s selected=%s media_selected=%s existing_id_hits=%s",
+                platform,
+                conversation_key,
+                len(candidates),
+                media_candidate_count,
+                overlap,
+                len(result),
+                sum(1 for event in result if _is_media_payload(event.get("payload"))),
+                len(existing_ids),
+            )
+            return result
 
-        selected: list[dict[str, Any]] = []
-        seen_new_ids: set[str] = set()
-        for event in candidates:
+        last_existing_index = -1
+        for index, event in enumerate(candidates):
             payload = event.get("payload")
             if not isinstance(payload, dict):
                 continue
             platform_msg_id = _clean(payload.get("platform_msg_id"))
-            if not platform_msg_id or platform_msg_id in existing_ids or platform_msg_id in seen_new_ids:
-                continue
-            if _direction(payload.get("direction"), payload.get("sender_role")) != "in":
-                continue
-            selected.append(event)
-            seen_new_ids.add(platform_msg_id)
-        return selected[-incremental_limit:]
+            if platform_msg_id and platform_msg_id in existing_ids:
+                last_existing_index = index
+        if last_existing_index >= 0:
+            selected = [
+                event
+                for event in candidates[last_existing_index + 1 :]
+                if isinstance(event.get("payload"), dict)
+            ]
+            mode = "last_existing_id"
+        else:
+            selected = [
+                event
+                for event in candidates
+                if isinstance(event.get("payload"), dict)
+            ]
+            mode = "tail_without_overlap"
+        result = selected[-incremental_limit:]
+        logging.info(
+            "truth_store filter result platform=%s conversation_key=%s mode=%s candidates=%s "
+            "media_candidates=%s selected=%s media_selected=%s existing_id_hits=%s last_existing_index=%s",
+            platform,
+            conversation_key,
+            mode,
+            len(candidates),
+            media_candidate_count,
+            len(result),
+            sum(1 for event in result if _is_media_payload(event.get("payload"))),
+            len(existing_ids),
+            last_existing_index,
+        )
+        return result
 
     def _filter_candidates_by_mutation(
         self,
@@ -454,7 +548,7 @@ class PythonServiceTruthStore:
                 "platform": _clean(payload.get("platform")).lower(),
                 "account_id": _clean(payload.get("account_id")),
                 "conversation_key": _clean(params.get("conversation_key") or params.get("display_name")),
-                "occurred_at": "",
+                "occurred_at": _local_now_iso(),
                 "client_message_id": _clean(payload.get("client_message_id") or params.get("client_message_id")),
                 "payload": {
                     "display_name": _clean(params.get("display_name"))
@@ -827,6 +921,7 @@ class PythonServiceTruthStore:
             ).fetchone()
             conversation_id = int(row[0]) if row else 0
             if conversation_id > 0:
+                self._delete_conversation_message_children(conn, conversation_id)
                 conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
                 if mutation_type == "delete_conversation":
                     conn.execute(
@@ -878,6 +973,34 @@ class PythonServiceTruthStore:
             "mutation_id": mutation_id,
             "event": event,
         }
+
+    def _delete_conversation_message_children(self, conn: sqlite3.Connection, conversation_id: int) -> None:
+        if conversation_id <= 0:
+            return
+
+        for table_name in ("wechat_messages", "qianniu_messages"):
+            conn.execute(
+                f"""
+                DELETE FROM {table_name}
+                WHERE conversation_id = ?
+                   OR message_id IN (
+                        SELECT id FROM messages WHERE conversation_id = ?
+                   )
+                """,
+                (conversation_id, conversation_id),
+            )
+
+        if _table_exists(conn, "message_send_events"):
+            conn.execute(
+                """
+                DELETE FROM message_send_events
+                WHERE conversation_id = ?
+                   OR message_id IN (
+                        SELECT id FROM messages WHERE conversation_id = ?
+                   )
+                """,
+                (conversation_id, conversation_id),
+            )
 
     def _latest_mutation(
         self,
@@ -942,6 +1065,7 @@ class PythonServiceTruthStore:
         display_name = _customer_display_name(payload, conversation_key)
         observed_at = _sqlite_time(event.get("occurred_at"))
         content = _clean(payload.get("content"))
+        preserve_last_message = _is_history_sync_payload(payload)
 
         row = conn.execute(
             """
@@ -953,27 +1077,46 @@ class PythonServiceTruthStore:
         ).fetchone()
         if row:
             conv_id = int(row[0])
-            conn.execute(
-                """
-                UPDATE conversations
-                SET account_id = COALESCE(NULLIF(?, ''), account_id),
-                    customer_name = COALESCE(NULLIF(?, ''), customer_name),
-                    last_message = COALESCE(NULLIF(?, ''), last_message),
-                    last_time = COALESCE(NULLIF(?, ''), last_time),
-                    status = 'active',
-                    deleted_at = NULL,
-                    updated_at = COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
-                WHERE id = ?
-                """,
-                (
-                    account_id,
-                    display_name,
-                    content,
-                    observed_at,
-                    observed_at,
-                    conv_id,
-                ),
-            )
+            if preserve_last_message:
+                conn.execute(
+                    """
+                    UPDATE conversations
+                    SET account_id = COALESCE(NULLIF(?, ''), account_id),
+                        customer_name = COALESCE(NULLIF(?, ''), customer_name),
+                        status = 'active',
+                        deleted_at = NULL,
+                        updated_at = COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
+                    WHERE id = ?
+                    """,
+                    (
+                        account_id,
+                        display_name,
+                        observed_at,
+                        conv_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE conversations
+                    SET account_id = COALESCE(NULLIF(?, ''), account_id),
+                        customer_name = COALESCE(NULLIF(?, ''), customer_name),
+                        last_message = COALESCE(NULLIF(?, ''), last_message),
+                        last_time = COALESCE(NULLIF(?, ''), last_time),
+                        status = 'active',
+                        deleted_at = NULL,
+                        updated_at = COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
+                    WHERE id = ?
+                    """,
+                    (
+                        account_id,
+                        display_name,
+                        content,
+                        observed_at,
+                        observed_at,
+                        conv_id,
+                    ),
+                )
             self._upsert_platform_conversation(conn, conv_id, event, display_name)
             return conv_id
 
@@ -1066,6 +1209,8 @@ class PythonServiceTruthStore:
         sender_name = _clean(payload.get("sender_name"))
         content_type = _clean(payload.get("content_type")) or "text"
         normalized_status = _clean(status) or "observed"
+        if _is_history_sync_payload(payload):
+            message_time = self._history_message_time(conn, conversation_id, payload, fallback=message_time)
 
         existing = None
         if platform_msg_id:
@@ -1080,6 +1225,7 @@ class PythonServiceTruthStore:
             ).fetchone()
 
         if existing:
+            message_id = int(existing[0])
             conn.execute(
                 """
                 UPDATE messages
@@ -1112,10 +1258,20 @@ class PythonServiceTruthStore:
                     client_message_id,
                     normalized_status,
                     normalized_status,
-                    int(existing[0]),
+                    message_id,
                 ),
             )
-            self._upsert_platform_message(conn, int(existing[0]), conversation_id, event)
+            self._upsert_platform_message(conn, message_id, conversation_id, event)
+            logging.info(
+                "truth_store updated message row message_id=%s conversation_id=%s platform_msg_id=%s "
+                "client_message_id=%s content_type=%s content_len=%s",
+                message_id,
+                conversation_id,
+                platform_msg_id,
+                client_message_id,
+                content_type,
+                len(content),
+            )
             return
 
         cur = conn.execute(
@@ -1143,7 +1299,18 @@ class PythonServiceTruthStore:
                 message_time,
             ),
         )
-        self._upsert_platform_message(conn, int(cur.lastrowid), conversation_id, event)
+        message_id = int(cur.lastrowid)
+        self._upsert_platform_message(conn, message_id, conversation_id, event)
+        logging.info(
+            "truth_store inserted message row message_id=%s conversation_id=%s platform_msg_id=%s "
+            "client_message_id=%s content_type=%s content_len=%s",
+            message_id,
+            conversation_id,
+            platform_msg_id,
+            client_message_id,
+            content_type,
+            len(content),
+        )
 
     def _upsert_platform_message(
         self,
@@ -1265,6 +1432,46 @@ class PythonServiceTruthStore:
             """,
             params,
         )
+        logging.info(
+            "truth_store upserted platform message platform=%s message_id=%s conversation_id=%s "
+            "platform_msg_id=%s content_type=%s content_image_path=%s evidence_ref=%s",
+            platform,
+            message_id,
+            conversation_id,
+            platform_message_id,
+            _clean(payload.get("content_type")),
+            _clean(payload.get("content_image_path")),
+            evidence_ref,
+        )
+
+    def _history_message_time(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: int,
+        payload: dict[str, Any],
+        *,
+        fallback: str,
+    ) -> str:
+        meta = _metadata(payload)
+        try:
+            sequence = int(meta.get("history_sequence") or 0)
+        except (TypeError, ValueError):
+            sequence = 0
+        try:
+            total = max(1, int(meta.get("history_total") or 1))
+        except (TypeError, ValueError):
+            total = 1
+        row = conn.execute(
+            """
+            SELECT MIN(COALESCE(NULLIF(message_time, ''), NULLIF(created_at, ''), CURRENT_TIMESTAMP))
+            FROM messages
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        base = _parse_time(row[0] if row else "") or _parse_time(fallback) or datetime.now(timezone.utc)
+        offset = max(1, total - sequence)
+        return (base - timedelta(seconds=offset)).strftime("%Y-%m-%d %H:%M:%S")
 
     def _mark_outbound_result(self, conn: sqlite3.Connection, event: dict[str, Any], *, sent: bool) -> None:
         payload = event.get("payload") or {}

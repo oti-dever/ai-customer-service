@@ -1,4 +1,6 @@
 #include "database.h"
+#include "appdatauistatedao.h"
+#include "../utils/runtimemode.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -10,13 +12,21 @@
 
 namespace {
 
-QString defaultDatabasePath()
+QString clientCacheDatabasePath()
 {
     QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (dataDir.isEmpty())
         dataDir = QDir::homePath() + QStringLiteral("/.yy-ai-customer-service");
     QDir().mkpath(dataDir);
     return dataDir + QDir::separator() + QStringLiteral("client_cache.db");
+}
+
+QString appDataDatabasePath()
+{
+    const QString path = AppDataUiStateDao::resolvedAppDataDbPath();
+    const QFileInfo info(path);
+    QDir().mkpath(info.absolutePath());
+    return path;
 }
 
 bool copyDatabaseWithSidecars(const QString& sourcePath, const QString& targetPath)
@@ -86,10 +96,17 @@ bool Database::open(const QString& path)
 {
     if (m_path.isEmpty()) {
         if (path.isEmpty()) {
-            m_path = defaultDatabasePath();
-            migrateLegacyDatabaseIfNeeded(m_path);
+            if (RuntimeMode::isClientCacheDb()) {
+                m_path = clientCacheDatabasePath();
+                migrateLegacyDatabaseIfNeeded(m_path);
+                m_unifiedAppDataMode = false;
+            } else {
+                m_path = appDataDatabasePath();
+                m_unifiedAppDataMode = true;
+            }
         } else {
             m_path = path;
+            m_unifiedAppDataMode = false;
         }
     }
 
@@ -100,7 +117,8 @@ bool Database::open(const QString& path)
         qWarning() << "数据库打开失败:" << db.lastError().text();
         return false;
     }
-    qInfo() << "[Database] SQLite path:" << m_path << "(client local cache)";
+    qInfo() << "[Database] SQLite path:" << m_path
+            << (m_unifiedAppDataMode ? "(app data unified db)" : "(client local cache)");
 
 
     // Client cache uses SQLite WAL for local recovery.
@@ -111,6 +129,12 @@ bool Database::open(const QString& path)
         pragma.exec(QStringLiteral("PRAGMA busy_timeout=3000"));
         pragma.exec(QStringLiteral("PRAGMA foreign_keys=ON"));
     }
+    if (m_unifiedAppDataMode) {
+        if (!runClientPrivateMigrations())
+            return false;
+        return true;
+    }
+
     if (!runMigrations())
         return false;
     return normalizePlatformConversationKeys();
@@ -128,6 +152,7 @@ void Database::close()
         QSqlDatabase::removeDatabase(connectionName);
     }
     m_path.clear();
+    m_unifiedAppDataMode = false;
 }
 
 bool Database::isOpen() const
@@ -138,6 +163,129 @@ bool Database::isOpen() const
 QSqlDatabase Database::connection() const
 {
     return QSqlDatabase::database();
+}
+
+bool Database::runClientPrivateMigrations()
+{
+    QSqlQuery q(connection());
+
+    const char* requiredMigrations[] = {
+        "CREATE TABLE IF NOT EXISTS users ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  username TEXT UNIQUE NOT NULL,"
+        "  password_hash TEXT NOT NULL,"
+        "  salt TEXT NOT NULL,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS app_state ("
+        "  key TEXT PRIMARY KEY,"
+        "  value TEXT DEFAULT '',"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS message_send_events ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  message_id INTEGER NOT NULL,"
+        "  conversation_id INTEGER NOT NULL,"
+        "  phase TEXT NOT NULL,"
+        "  detail TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(message_id) REFERENCES messages(id)"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_send_events_conv_id ON message_send_events(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_send_events_message_id ON message_send_events(message_id)",
+
+        "CREATE TABLE IF NOT EXISTS ai_request_events ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  source TEXT NOT NULL,"
+        "  conversation_id INTEGER,"
+        "  message_id INTEGER,"
+        "  session_model_key TEXT DEFAULT '',"
+        "  model TEXT DEFAULT '',"
+        "  status TEXT NOT NULL DEFAULT 'started',"
+        "  trigger_tag TEXT DEFAULT '',"
+        "  started_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  completed_at DATETIME,"
+        "  duration_ms INTEGER DEFAULT 0,"
+        "  first_token_ms INTEGER DEFAULT 0,"
+        "  output_chars INTEGER DEFAULT 0,"
+        "  error_reason TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,"
+        "  FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE SET NULL"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_ai_request_events_started_at ON ai_request_events(started_at)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_request_events_session_status "
+        "  ON ai_request_events(session_model_key, status, id)",
+
+        "CREATE TABLE IF NOT EXISTS ai_request_stage_events ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  request_event_id INTEGER NOT NULL,"
+        "  conversation_id INTEGER NOT NULL,"
+        "  stage TEXT NOT NULL,"
+        "  detail TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(request_event_id) REFERENCES ai_request_events(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_ai_request_stage_events_conv_id "
+        "  ON ai_request_stage_events(conversation_id, id)",
+
+        "CREATE TABLE IF NOT EXISTS conversation_customer_profiles ("
+        "  conversation_id INTEGER PRIMARY KEY,"
+        "  profile_json TEXT NOT NULL DEFAULT '{}',"
+        "  source_model_key TEXT DEFAULT '',"
+        "  source_request_event_id INTEGER,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(source_request_event_id) REFERENCES ai_request_events(id) ON DELETE SET NULL"
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS ai_assistant_sessions ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  user_id INTEGER NOT NULL,"
+        "  model_key TEXT NOT NULL,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,"
+        "  UNIQUE(user_id, model_key)"
+        ")",
+
+        "CREATE TABLE IF NOT EXISTS ai_assistant_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  session_id INTEGER NOT NULL,"
+        "  role TEXT NOT NULL,"
+        "  content TEXT NOT NULL,"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(session_id) REFERENCES ai_assistant_sessions(id) ON DELETE CASCADE"
+        ")",
+
+        "CREATE INDEX IF NOT EXISTS idx_ai_assistant_messages_session_id "
+        "  ON ai_assistant_messages(session_id, id)",
+    };
+
+    const char* optionalMigrations[] = {
+        "ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN avatar_path TEXT DEFAULT ''",
+    };
+
+    for (const char* sql : requiredMigrations) {
+        if (!q.exec(sql)) {
+            qWarning() << "[Database] client private migration failed:" << q.lastError().text()
+                       << "\nSQL:" << sql;
+            return false;
+        }
+    }
+
+    for (const char* sql : optionalMigrations) {
+        if (!q.exec(sql))
+            qDebug() << "[Database] optional client private migration skipped:" << sql;
+    }
+
+    qInfo() << "[Database] client-private migrations complete";
+    return true;
 }
 
 bool Database::runMigrations()

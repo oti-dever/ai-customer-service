@@ -7,7 +7,9 @@
 #include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QSqlRecord>
 #include <QStringList>
+#include <QVariant>
 
 static ConversationInfo recordFromQuery(QSqlQuery& q);
 
@@ -75,6 +77,31 @@ QString displayKeyFromCanonical(const QString& platformConversationId)
     return platformConversationId.mid(lastSep + 1).trimmed();
 }
 
+QVariant rowValue(const QSqlQuery& q, const QString& name)
+{
+    const int idx = q.record().indexOf(name);
+    if (idx < 0)
+        return QVariant();
+    return q.value(idx);
+}
+
+QString rowString(const QSqlQuery& q, const QString& name, const QString& fallback = QString())
+{
+    const QVariant value = rowValue(q, name);
+    return value.isValid() && !value.isNull() ? value.toString() : fallback;
+}
+
+int rowInt(const QSqlQuery& q, const QString& name, int fallback = 0)
+{
+    const QVariant value = rowValue(q, name);
+    return value.isValid() && !value.isNull() ? value.toInt() : fallback;
+}
+
+QDateTime rowDateTime(const QSqlQuery& q, const QString& name)
+{
+    return rowValue(q, name).toDateTime();
+}
+
 std::optional<ConversationInfo> findLegacyShortConversation(const QString& platform,
                                                             const QString& platformConversationId)
 {
@@ -102,30 +129,43 @@ QString placeholders(const QString& prefix, int count)
     return items.join(QStringLiteral(", "));
 }
 
+bool tableHasColumn(const QString& tableName, const QString& columnName)
+{
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(QStringLiteral("PRAGMA table_info(%1)").arg(tableName));
+    if (!q.exec())
+        return false;
+    while (q.next()) {
+        if (q.value(1).toString() == columnName)
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
 static ConversationInfo recordFromQuery(QSqlQuery& q)
 {
     ConversationInfo c;
-    c.id = q.value("id").toInt();
-    c.platform = q.value("platform").toString();
-    c.platformConversationId = q.value("platform_conversation_id").toString();
-    c.customerName = q.value("customer_name").toString();
-    c.lastMessage = q.value("last_message").toString();
-    c.lastTime = q.value("last_time").toDateTime();
-    c.unreadCount = q.value("unread_count").toInt();
-    c.status = q.value("status").toString();
-    c.createdAt = q.value("created_at").toDateTime();
-    c.accountId = q.value("account_id").toString();
+    c.id = rowInt(q, QStringLiteral("id"));
+    c.platform = rowString(q, QStringLiteral("platform"));
+    c.platformConversationId = rowString(q, QStringLiteral("platform_conversation_id"));
+    c.customerName = rowString(q, QStringLiteral("customer_name"));
+    c.lastMessage = rowString(q, QStringLiteral("last_message"));
+    c.lastTime = rowDateTime(q, QStringLiteral("last_time"));
+    c.unreadCount = rowInt(q, QStringLiteral("unread_count"));
+    c.status = rowString(q, QStringLiteral("status"));
+    c.createdAt = rowDateTime(q, QStringLiteral("created_at"));
+    c.accountId = rowString(q, QStringLiteral("account_id"));
     c.sourceType = QStringLiteral("ui_observed");
     c.confidence = 100;
-    c.updatedAt = q.value("updated_at").toDateTime();
-    c.cacheScope = q.value("cache_scope").toString();
+    c.updatedAt = rowDateTime(q, QStringLiteral("updated_at"));
+    c.cacheScope = rowString(q, QStringLiteral("cache_scope"));
     if (c.cacheScope.isEmpty())
-        c.cacheScope = QStringLiteral("local_cache");
-    c.cacheOrigin = q.value("cache_origin").toString();
+        c.cacheScope = QStringLiteral("service_db");
+    c.cacheOrigin = rowString(q, QStringLiteral("cache_origin"));
     if (c.cacheOrigin.isEmpty())
-        c.cacheOrigin = QStringLiteral("legacy_runtime");
+        c.cacheOrigin = QStringLiteral("python_service_db");
     return c;
 }
 
@@ -403,7 +443,12 @@ QVector<ConversationInfo> ConversationDao::listByStatus(const QString& status, i
 QVector<ConversationInfo> ConversationDao::listAll(int limit, int offset)
 {
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare("SELECT * FROM conversations ORDER BY last_time DESC LIMIT :lim OFFSET :off");
+    const QString deletedFilter = tableHasColumn(QStringLiteral("conversations"), QStringLiteral("deleted_at"))
+        ? QStringLiteral("WHERE deleted_at IS NULL OR deleted_at = ''")
+        : QString();
+    q.prepare(QStringLiteral(
+        "SELECT * FROM conversations %1 "
+        "ORDER BY last_time DESC, id DESC LIMIT :lim OFFSET :off").arg(deletedFilter));
     q.bindValue(":lim", limit);
     q.bindValue(":off", offset);
     q.exec();

@@ -202,23 +202,33 @@ void PythonServiceController::onProcessStarted()
 
 void PythonServiceController::onProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
+    QProcess* finishedProcess = qobject_cast<QProcess*>(sender());
     qInfo() << "[PythonServiceController] process finished"
             << "exitCode=" << exitCode
             << "exitStatus=" << exitStatus
             << "stopRequested=" << m_stopRequested;
     m_startupPollTimer->stop();
+    if (finishedProcess) {
+        appendProcessOutput(finishedProcess->readAllStandardOutput());
+        appendProcessOutput(finishedProcess->readAllStandardError());
+        finishedProcess->disconnect(this);
+        if (finishedProcess == m_process)
+            m_process = nullptr;
+        finishedProcess->deleteLater();
+    }
     const bool normalStop = m_stopRequested || (exitStatus == QProcess::NormalExit && exitCode == 0);
     if (normalStop) {
         appendHumanLog(QStringLiteral("Python 服务已停止。"));
         setState(State::Stopped);
+        Ipc::IpcService::instance().markServiceUnavailable();
     } else {
         appendHumanLog(QStringLiteral("Python 服务意外退出，请查看上方提示或确认依赖是否完整。"));
         setState(State::Failed);
+        QTimer::singleShot(0, this, []() {
+            Ipc::IpcService::instance().connectToConfiguredService();
+        });
     }
     m_stopRequested = false;
-    QTimer::singleShot(0, this, []() {
-        Ipc::IpcService::instance().connectToConfiguredService();
-    });
 }
 
 void PythonServiceController::onProcessError(QProcess::ProcessError error)

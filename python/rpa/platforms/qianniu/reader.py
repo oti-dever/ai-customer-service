@@ -84,7 +84,41 @@ class QianniuReader:
         message_display, reused_message_display = self._resolve_message_display(active_chat_root, message_display)
         find_display_ms = (time.perf_counter() - stage_started_at) * 1000.0
 
+        stage_started_at = time.perf_counter()
+        message_web, reused_message_web = self._resolve_message_web(active_chat_root, message_web)
+        find_web_ms = (time.perf_counter() - stage_started_at) * 1000.0
+
         display_collect_ms = 0.0
+        web_collect_ms = 0.0
+        display_point_ms = 0.0
+        web_point_ms = 0.0
+        web_rect_ms = 0.0
+        copy_ms = 0.0
+
+        if message_web:
+            stage_started_at = time.perf_counter()
+            copied = copy_text_from_control(message_web)
+            copy_ms = (time.perf_counter() - stage_started_at) * 1000.0
+            if copied:
+                logger.info(
+                    "qianniu read_messages_timing stage=total ms=%.1f find_chat_ms=%.1f find_display_ms=%.1f display_collect_ms=%.1f display_rect_ms=%.1f display_point_ms=%.1f find_web_ms=%.1f web_collect_ms=%.1f web_rect_ms=%.1f web_point_ms=%.1f copy_ms=%.1f ok=True source=message_web_copy reused_chat_root=%s reused_message_display=%s reused_message_web=%s text_count=1",
+                    (time.perf_counter() - total_started_at) * 1000.0,
+                    find_chat_ms,
+                    find_display_ms,
+                    display_collect_ms,
+                    0.0,
+                    display_point_ms,
+                    find_web_ms,
+                    web_collect_ms,
+                    web_rect_ms,
+                    web_point_ms,
+                    copy_ms,
+                    reused_chat_root,
+                    reused_message_display,
+                    reused_message_web,
+                )
+                return MessageReadResult(ok=True, source="message_web_copy", texts=[copied])
+
         if message_display:
             stage_started_at = time.perf_counter()
             texts = collect_texts(message_display, max_depth=24, max_nodes=20000, preorder=True)
@@ -102,10 +136,6 @@ class QianniuReader:
                 )
                 return MessageReadResult(ok=True, source="message_display_accessible", texts=texts[-limit:])
 
-        stage_started_at = time.perf_counter()
-        message_web, reused_message_web = self._resolve_message_web(active_chat_root, message_web)
-        find_web_ms = (time.perf_counter() - stage_started_at) * 1000.0
-        web_collect_ms = 0.0
         if message_web:
             stage_started_at = time.perf_counter()
             texts = collect_texts(message_web, max_depth=24, max_nodes=20000, preorder=True)
@@ -150,8 +180,6 @@ class QianniuReader:
                     len(texts[-limit:]),
                 )
                 return MessageReadResult(ok=True, source="message_display_point_accessible", texts=texts[-limit:])
-        else:
-            display_point_ms = 0.0
 
         if not message_web:
             logger.info(
@@ -195,31 +223,6 @@ class QianniuReader:
                     len(texts[-limit:]),
                 )
                 return MessageReadResult(ok=True, source="message_web_point_accessible", texts=texts[-limit:])
-        else:
-            web_point_ms = 0.0
-
-        stage_started_at = time.perf_counter()
-        copied = copy_text_from_control(message_web)
-        copy_ms = (time.perf_counter() - stage_started_at) * 1000.0
-        if copied:
-            logger.info(
-                "qianniu read_messages_timing stage=total ms=%.1f find_chat_ms=%.1f find_display_ms=%.1f display_collect_ms=%.1f display_rect_ms=%.1f display_point_ms=%.1f find_web_ms=%.1f web_collect_ms=%.1f web_rect_ms=%.1f web_point_ms=%.1f copy_ms=%.1f ok=True source=message_web_copy reused_chat_root=%s reused_message_display=%s reused_message_web=%s text_count=1",
-                (time.perf_counter() - total_started_at) * 1000.0,
-                find_chat_ms,
-                find_display_ms,
-                display_collect_ms,
-                display_rect_ms,
-                display_point_ms,
-                find_web_ms,
-                web_collect_ms,
-                web_rect_ms,
-                web_point_ms,
-                copy_ms,
-                reused_chat_root,
-                reused_message_display,
-                reused_message_web,
-            )
-            return MessageReadResult(ok=True, source="message_web_copy", texts=[copied])
 
         logger.info(
             "qianniu read_messages_timing stage=total ms=%.1f find_chat_ms=%.1f find_display_ms=%.1f display_collect_ms=%.1f display_rect_ms=%.1f display_point_ms=%.1f find_web_ms=%.1f web_collect_ms=%.1f web_rect_ms=%.1f web_point_ms=%.1f copy_ms=%.1f ok=False source=message_web reused_chat_root=%s reused_message_display=%s reused_message_web=%s text_count=0",
@@ -488,8 +491,6 @@ def should_skip_accessible_text(value: str) -> bool:
         return True
     if "web_chat-packer/recent.html" in value:
         return True
-    if len(value) > 500 and len(re.findall(TIMESTAMP_PATTERN, value)) >= 2:
-        return True
     return False
 
 
@@ -527,9 +528,9 @@ def copy_text_from_control(control: Any) -> str:
     selected = False
     try:
         set_clipboard_text("")
-        rect = getattr(control, "BoundingRectangle", None)
+        rect = get_control_rect(control)
         if rect:
-            click_point(int((rect.left + rect.right) / 2), int((rect.top + rect.bottom) / 2))
+            click_control_rect(rect)
         try:
             control.SetFocus()
         except Exception:
@@ -537,13 +538,16 @@ def copy_text_from_control(control: Any) -> str:
         send_ctrl_key("A")
         selected = True
         send_ctrl_key("C")
-        return normalize_text(get_clipboard_text() or "")
+        copied = normalize_text(get_clipboard_text() or "")
+        if clear_control_selection(control, rect):
+            selected = False
+        return copied
     except Exception:
         return ""
     finally:
-        if selected and rect:
+        if selected:
             try:
-                click_point(int((rect.left + rect.right) / 2), int((rect.top + rect.bottom) / 2))
+                clear_control_selection(control, rect)
             except Exception:
                 pass
         if old_clipboard is not None:
@@ -551,6 +555,22 @@ def copy_text_from_control(control: Any) -> str:
                 set_clipboard_text(old_clipboard)
             except Exception:
                 pass
+
+
+def get_control_rect(control: Any) -> Any:
+    return getattr(control, "BoundingRectangle", None)
+
+
+def clear_control_selection(control: Any, fallback_rect: Any = None) -> bool:
+    rect = get_control_rect(control) or fallback_rect
+    if not rect:
+        return False
+    click_control_rect(rect)
+    return True
+
+
+def click_control_rect(rect: Any) -> None:
+    click_point(int((rect.left + rect.right) / 2), int((rect.top + rect.bottom) / 2))
 
 
 def parse_copied_messages(text: str) -> list[MessageRecord]:
@@ -584,7 +604,7 @@ class AccessibleHeader:
 
 
 def parse_accessible_messages(texts: list[str]) -> list[MessageRecord]:
-    lines = [normalize_accessible_line(text) for text in texts]
+    lines = expand_accessible_lines(texts)
     lines = [line for line in lines if line and not should_skip_accessible_parse_line(line)]
 
     messages: list[MessageRecord] = []
@@ -644,6 +664,65 @@ def parse_accessible_header(line: str) -> AccessibleHeader | None:
     return AccessibleHeader(sender=sender, timestamp=timestamp, raw=line, extra_body=extra_body)
 
 
+def expand_accessible_lines(texts: list[str]) -> list[str]:
+    lines: list[str] = []
+    for text in texts:
+        line = normalize_accessible_line(text)
+        if not line:
+            continue
+        parts = split_merged_accessible_line(line)
+        if parts:
+            lines.extend(parts)
+        else:
+            lines.append(line)
+    return lines
+
+
+def split_merged_accessible_line(line: str) -> list[str]:
+    matches = list(re.finditer(TIMESTAMP_PATTERN, line))
+    if len(matches) < 2:
+        return []
+
+    starts: list[int] = []
+    for match in matches:
+        starts.append(accessible_header_start(line, match.start()))
+    if sorted(set(starts)) != starts:
+        return []
+
+    parts: list[str] = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(line)
+        segment = line[start:end].strip()
+        if not segment:
+            continue
+        status = trailing_status(segment)
+        if status:
+            segment = segment[: -len(status)].strip()
+        if segment:
+            parts.append(segment)
+        if status:
+            parts.append(status)
+    return parts
+
+
+def accessible_header_start(line: str, timestamp_start: int) -> int:
+    index = timestamp_start
+    while index > 0 and line[index - 1].isspace():
+        index -= 1
+    while index > 0 and not line[index - 1].isspace():
+        index -= 1
+    return index
+
+
+def trailing_status(value: str) -> str:
+    for status in (READ_STATUS, UNREAD_STATUS):
+        if value == status:
+            return status
+        if value.endswith(" " + status):
+            return status
+    return ""
+
+
 def split_sender_and_inline_body(value: str) -> tuple[str, str]:
     parts = value.split(maxsplit=1)
     if len(parts) == 2 and looks_like_sender(parts[0]):
@@ -657,8 +736,6 @@ def looks_like_sender(value: str) -> bool:
 
 def should_skip_accessible_parse_line(line: str) -> bool:
     if should_skip_accessible_text(line):
-        return True
-    if len(line) > 300 and len(re.findall(TIMESTAMP_PATTERN, line)) >= 2:
         return True
     return False
 

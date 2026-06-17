@@ -153,12 +153,12 @@ void HelpCenterDialog::populateContent()
             "<p>点击「聚合接待」即可进入，浮窗类托管窗口会自动隐藏，切回具体平台项后自动恢复。</p>")
     });
     sections.append({
-        QStringLiteral("help_python_service"), QStringLiteral("\u2022 Python 服务端连接"),
+        QStringLiteral("help_python_service"), QStringLiteral("\u2022 本机 Python 服务"),
         QStringLiteral(
-            "<h3>Python 服务端连接</h3>"
-            "<p>在系统就绪页点击「Python 服务端」，可配置并测试客户端要连接的独立 Python 服务端地址。</p>"
-            "<p>C++ 客户端不再负责启动或停止 Python 服务端；微信、千牛等平台采集与自动化由 Python 服务端独立运行。</p>"
-            "<p>客户端连接成功后，聚合界面通过服务端推送和同步数据展示会话与消息；发送消息时由客户端向 Python 服务端提交命令。</p>"
+            "<h3>本机 Python 服务</h3>"
+            "<p>当前版本按单机客服工作台运行，客户端和 Python 服务默认在同一台电脑使用本机 <code>app_data.db</code>。</p>"
+            "<p>进入「聚合接待」后，可通过左侧工具栏的 Python 服务按钮启动或停止本机服务。</p>"
+            "<p>Python 服务负责监听微信、千牛等本机平台窗口，写入会话和消息；聚合界面直接读取本机统一库展示历史数据。</p>"
             "<p>各平台消息读写仍依赖窗口区域校准与配置文件等，请按软件内的校准向导或项目文档完成设置。</p>")
     });
     sections.append({
@@ -198,7 +198,7 @@ void HelpCenterDialog::populateContent()
         QStringLiteral(
             "<h3>故障排查</h3>"
             "<p>若遇到窗口嵌入、浮窗跟随或快速启动异常，可关注状态栏提示。</p>"
-            "<p>Python 服务端相关异常可先在「Python 服务端」窗口测试连接，再查看 Python 服务端自身日志；"
+            "<p>Python 服务相关异常可先在「聚合接待」左侧工具栏查看服务状态，再查看 Python 服务日志；"
             "亦可确认 Python 服务端依赖是否已按说明安装并正常运行。</p>")
     });
 

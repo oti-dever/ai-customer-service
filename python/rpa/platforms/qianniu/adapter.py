@@ -11,7 +11,7 @@ from .detector import QianniuDetector
 from .qianniu_logging import get_logger
 from .reader import MessageRecord, MessageReadResult, QianniuReader
 from .sender import QianniuSender
-from .sessions import QianniuSessionReader, SessionItem, session_titles_match
+from .sessions import QianniuSessionReader, SessionItem, normalize_session_title, session_titles_match
 from .uia import uia_guard
 
 logger = get_logger(__name__)
@@ -87,6 +87,10 @@ def _requested_display_name(display_name: Any, conversation_key: Any) -> str:
     return _display_name_from_key(key)
 
 
+def _session_unread_key(item: SessionItem) -> str:
+    return normalize_session_title(clean(getattr(item, "title", "")))
+
+
 class QianniuSidecarAdapter:
     def __init__(self, store: EventSink) -> None:
         self._store = store
@@ -99,6 +103,7 @@ class QianniuSidecarAdapter:
         self._observer_stop = threading.Event()
         self._observer_thread: threading.Thread | None = None
         self._observer_lock = threading.Lock()
+        self._handled_unread_session_keys: set[str] = set()
 
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
         started_at = time.perf_counter()
@@ -175,6 +180,7 @@ class QianniuSidecarAdapter:
 
     def _connect(self, params: dict[str, Any], request_id: str) -> dict[str, Any]:
         self._connected = True
+        self._handled_unread_session_keys.clear()
         health = self._probe()
         self._store.append(
             self._health_event(
@@ -193,6 +199,7 @@ class QianniuSidecarAdapter:
     def _disconnect(self, _params: dict[str, Any], _request_id: str) -> dict[str, Any]:
         self._connected = False
         self._stop_observer()
+        self._handled_unread_session_keys.clear()
         self._store.append(
             self._health_event(
                 healthy=False,
@@ -318,14 +325,18 @@ class QianniuSidecarAdapter:
             result, messages = self._reader.read_visible_messages_debug(limit=limit)
         read_ms = _elapsed_ms(read_started_at)
         emit_started_at = time.perf_counter()
+        raw_message_events = [
+            self._message_event(display_name, item, sequence_index=sequence_index)
+            for sequence_index, item in enumerate(messages)
+        ]
+        filtered_message_events = self._filter_unread_message_events(raw_message_events)
         emitted: list[dict[str, Any]] = []
-        for item in messages:
-            event = self._message_event(display_name, item)
+        for event in filtered_message_events:
             self._store.append(event)
             emitted.append(event)
         emit_ms = _elapsed_ms(emit_started_at)
         logger.info(
-            "qianniu fetch_visible_messages timing request_id=%s total_ms=%.1f read_ms=%.1f emit_ms=%.1f display_name=%s read_source=%s read_ok=%s messages=%s emitted=%s",
+            "qianniu fetch_visible_messages timing request_id=%s total_ms=%.1f read_ms=%.1f emit_ms=%.1f display_name=%s read_source=%s read_ok=%s messages=%s emitted=%s filtered=%s",
             _request_id,
             _elapsed_ms(started_at),
             read_ms,
@@ -335,6 +346,7 @@ class QianniuSidecarAdapter:
             result.ok,
             len(messages),
             len(emitted),
+            len(raw_message_events) - len(filtered_message_events),
         )
         return {
             "count": len(emitted),
@@ -355,6 +367,8 @@ class QianniuSidecarAdapter:
         sessions = self._sessions.read_visible_sessions(limit=100, detect_unread=True)
         sessions_ms = _elapsed_ms(sessions_started_at)
         unread_items = [item for item in sessions if item.unread]
+        unread_keys = {_session_unread_key(item) for item in unread_items}
+        self._handled_unread_session_keys.intersection_update(unread_keys)
         logger.info(
             "qianniu scan_unread_timing request_id=%s stage=read_visible_sessions ms=%.1f session_count=%s unread_count=%s limit=%s",
             _request_id,
@@ -378,7 +392,28 @@ class QianniuSidecarAdapter:
                 "processed": [],
             }
 
-        target = unread_items[0]
+        target = next(
+            (item for item in unread_items if _session_unread_key(item) not in self._handled_unread_session_keys),
+            None,
+        )
+        if target is None:
+            logger.info(
+                "qianniu scan_unread_timing request_id=%s stage=total ms=%.1f session_count=%s unread_count=%s skipped_handled=%s processed=0 messages=0",
+                _request_id,
+                _elapsed_ms(total_started_at),
+                len(sessions),
+                len(unread_items),
+                len(unread_items),
+            )
+            return {
+                "unread_count": len(unread_items),
+                "conversation_count": 0,
+                "message_count": 0,
+                "processed_count": 0,
+                "skipped_count": len(unread_items),
+                "processed": [],
+            }
+
         select_started_at = time.perf_counter()
         if hasattr(self._sessions, "select_session"):
             switched, method = self._sessions.select_session(target)
@@ -406,6 +441,7 @@ class QianniuSidecarAdapter:
                 "processed": [{"display_name": target.title, "error": method or "session_switch_failed"}],
             }
 
+        self._handled_unread_session_keys.add(_session_unread_key(target))
         emit_started_at = time.perf_counter()
         conversation_event = self._conversation_event(target)
         self._store.append(conversation_event)
@@ -418,7 +454,10 @@ class QianniuSidecarAdapter:
             read_result, messages = self._reader.read_visible_messages_debug(limit=limit)
         read_ms = _elapsed_ms(read_started_at)
         messages_emit_started_at = time.perf_counter()
-        message_events = [self._message_event(target.title, item) for item in messages]
+        message_events = [
+            self._message_event(target.title, item, sequence_index=sequence_index)
+            for sequence_index, item in enumerate(messages)
+        ]
         filtered_message_events = self._filter_unread_message_events(message_events)
         emitted_messages: list[dict[str, Any]] = []
         for event in filtered_message_events:
@@ -549,46 +588,47 @@ class QianniuSidecarAdapter:
                 last_detail = switch_method or "session_switch_failed"
                 continue
 
-            verify_started_at = time.perf_counter()
-            verified = self._selected_session(fresh=True)
-            verify_ms = _elapsed_ms(verify_started_at)
-            if verified and session_titles_match(verified.title, target):
+            header_started_at = time.perf_counter()
+            header_names = self._current_chat_header_names()
+            header_ms = _elapsed_ms(header_started_at)
+            matched_header = next((name for name in header_names if session_titles_match(name, target)), "")
+            if matched_header:
                 logger.info(
-                    "qianniu ensure_target_session timing target=%s attempt=%s stage=verified ok=True method=%s scan_ms=%.1f select_ms=%.1f verify_ms=%.1f selected=%s total_ms=%.1f",
+                    "qianniu ensure_target_session timing target=%s attempt=%s stage=header_verified ok=True method=%s scan_ms=%.1f select_ms=%.1f header_ms=%.1f header=%s total_ms=%.1f",
                     target,
                     attempt,
                     switch_method,
                     scan_ms,
                     select_ms,
-                    verify_ms,
-                    verified.title,
+                    header_ms,
+                    matched_header,
                     _elapsed_ms(started_at),
                 )
                 return EnsureSessionResult(
                     ok=True,
-                    stage="verified",
-                    method=f"fresh_scan+{switch_method}+verify_selected",
-                    selected_title=verified.title,
+                    stage="header_verified",
+                    method=f"fresh_scan+{switch_method}+verify_header",
+                    selected_title=matched_header,
                 )
 
-            last_detail = clean(getattr(verified, "title", "")) if verified else "selected_session_unavailable"
+            last_detail = "|".join(header_names[:5]) or "header_unavailable"
             logger.info(
-                "qianniu ensure_target_session timing target=%s attempt=%s stage=verify_target ok=False method=%s scan_ms=%.1f select_ms=%.1f verify_ms=%.1f selected_after=%s total_ms=%.1f",
+                "qianniu ensure_target_session timing target=%s attempt=%s stage=verify_header ok=False method=%s scan_ms=%.1f select_ms=%.1f header_ms=%.1f header_after=%s total_ms=%.1f",
                 target,
                 attempt,
                 switch_method,
                 scan_ms,
                 select_ms,
-                verify_ms,
+                header_ms,
                 last_detail,
                 _elapsed_ms(started_at),
             )
 
         return EnsureSessionResult(
             ok=False,
-            stage="verify_target",
-            method="fresh_scan+select+verify_selected",
-            detail="target_session_not_verified",
+            stage="verify_header",
+            method="fresh_scan+select+verify_header",
+            detail="target_session_header_not_verified",
             selected_title=last_detail,
         )
 
@@ -616,6 +656,22 @@ class QianniuSidecarAdapter:
         if not callable(selector):
             return False, "select_session_unavailable"
         return selector(item)
+
+    def _current_chat_header_names(self) -> list[str]:
+        getter = getattr(self._detector, "find_chat_header_names", None)
+        if not callable(getter):
+            return []
+        chat_root = self._current_session_chat_root()
+        try:
+            names = getter(chat_root)
+        except TypeError:
+            names = getter()
+        except Exception:
+            logger.exception("qianniu current chat header lookup failed")
+            return []
+        if not isinstance(names, list):
+            return []
+        return [clean(name) for name in names if clean(name)]
 
     def _send_message(self, params: dict[str, Any], request_id: str) -> dict[str, Any]:
         total_started_at = time.perf_counter()
@@ -796,7 +852,13 @@ class QianniuSidecarAdapter:
         }
         return self._event("conversation_observed", _conversation_key(self._account_id, item.title), payload)
 
-    def _message_event(self, display_name: str, item: MessageRecord) -> dict[str, Any]:
+    def _message_event(
+        self,
+        display_name: str,
+        item: MessageRecord,
+        *,
+        sequence_index: int | None = None,
+    ) -> dict[str, Any]:
         direction = clean(item.direction) or "unknown"
         sender_role = "customer" if direction == "inbound" else "agent" if direction == "outbound" else "unknown"
         raw_id = "|".join(
@@ -826,6 +888,7 @@ class QianniuSidecarAdapter:
                 "timestamp": clean(item.timestamp),
                 "status": clean(item.status),
                 "raw": clean(item.raw),
+                "visible_sequence_index": sequence_index,
             },
         }
         return self._event("message_observed", _conversation_key(self._account_id, display_name), payload)

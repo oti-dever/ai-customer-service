@@ -2085,7 +2085,8 @@ QWidget* MainWindow::buildReadyPage()
                                             qApp->style()->standardIcon(QStyle::SP_FileDialogListView)),
                                QStringLiteral("Python 服务端"));
     m_btnPythonServiceConnection = btnEmbed;
-    m_btnPythonServiceConnection->setToolTip(QStringLiteral("配置并测试独立 Python 服务端连接"));
+    m_btnPythonServiceConnection->setToolTip(QStringLiteral("配置并测试本机 Python 服务连接"));
+    m_btnPythonServiceConnection->hide();
     auto* btnStart = makeQuick(resourceIcon(QStringLiteral(":/quick_launch_application_icon.svg"),
                                             qApp->style()->standardIcon(QStyle::SP_DialogOkButton)),
                                QStringLiteral("快速启动应用"));
@@ -2127,7 +2128,6 @@ QWidget* MainWindow::buildReadyPage()
         }
     });
     quickLayout->addWidget(btnPick);
-    quickLayout->addWidget(btnEmbed);
     quickLayout->addWidget(btnStart);
     layout->addWidget(m_readyCard, 0, Qt::AlignHCenter);
     layout->addWidget(quickRow, 0, Qt::AlignHCenter);

@@ -9,6 +9,7 @@ private:
     Database() = default;
     ~Database() = default;
     QString m_path;
+    bool m_unifiedAppDataMode = false;
 public:
     static Database& getInstance() {
         static Database db;
@@ -19,6 +20,7 @@ public:
     bool isOpen() const;
     QSqlDatabase connection() const;
     bool runMigrations();
+    bool runClientPrivateMigrations();
     bool normalizePlatformConversationKeys();
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;

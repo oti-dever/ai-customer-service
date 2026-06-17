@@ -52,12 +52,36 @@ class WechatMediaExtractor:
         copier = file_copier or self.file_copier
         writer = evidence_writer or self.evidence_writer
 
+        if content_type in {"image", "emoji", "file", "video"}:
+            logger.info(
+                "wechat media extract start content_type=%s platform_msg_id=%s sample_name=%s "
+                "sample_kind=%s sample_class=%s sample_rect=%s",
+                content_type,
+                platform_msg_id,
+                getattr(sample, "name", ""),
+                getattr(sample, "kind", ""),
+                getattr(sample, "class_name", ""),
+                getattr(sample, "rect", ""),
+            )
+
         file_copy = copier(content_type, platform_msg_id, sample)
         file_copy_paths = list(getattr(file_copy, "artifact_paths", []) or []) if file_copy is not None else []
         evidence = None if file_copy_paths else writer.capture(content_type, platform_msg_id, sample)
 
         if file_copy is not None:
             metadata_fields.update(_metadata_from_file_copy(file_copy))
+            logger.info(
+                "wechat media context copy result content_type=%s platform_msg_id=%s status=%s "
+                "method=%s artifacts=%s sources=%s menu=%s error=%s",
+                content_type,
+                platform_msg_id,
+                getattr(file_copy, "status", ""),
+                getattr(file_copy, "method", ""),
+                file_copy_paths,
+                list(getattr(file_copy, "source_paths", []) or []),
+                getattr(file_copy, "menu_name", ""),
+                getattr(file_copy, "error", ""),
+            )
             if file_copy.artifact_paths:
                 metadata_fields["file_artifact_paths"] = file_copy.artifact_paths
                 if content_type == "image":
@@ -66,9 +90,30 @@ class WechatMediaExtractor:
 
         if evidence is not None:
             metadata_fields.update(_metadata_from_evidence(evidence))
+            logger.info(
+                "wechat media evidence result content_type=%s platform_msg_id=%s status=%s "
+                "method=%s path=%s error=%s",
+                content_type,
+                platform_msg_id,
+                getattr(evidence, "status", ""),
+                getattr(evidence, "method", ""),
+                getattr(evidence, "path", ""),
+                getattr(evidence, "error", ""),
+            )
             if evidence.path:
                 payload_fields["content_image_path"] = evidence.path
                 payload_fields["evidence_ref"] = evidence.path
+
+        if content_type in {"image", "emoji", "file", "video"}:
+            logger.info(
+                "wechat media extract done content_type=%s platform_msg_id=%s "
+                "content_image_path=%s evidence_ref=%s metadata_keys=%s",
+                content_type,
+                platform_msg_id,
+                payload_fields.get("content_image_path", ""),
+                payload_fields.get("evidence_ref", ""),
+                sorted(metadata_fields.keys()),
+            )
 
         return WechatMediaExtractionResult(payload_fields=payload_fields, metadata_fields=metadata_fields)
 

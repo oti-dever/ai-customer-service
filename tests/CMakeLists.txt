@@ -29,9 +29,11 @@ set(DATA_LAYER_SOURCES
     ${CMAKE_SOURCE_DIR}/src/models/unifiedmodels.cpp
     ${CMAKE_SOURCE_DIR}/src/core/types.cpp
     ${CMAKE_SOURCE_DIR}/src/data/database.cpp
+    ${CMAKE_SOURCE_DIR}/src/data/appdatauistatedao.cpp
     ${CMAKE_SOURCE_DIR}/src/data/conversationdao.cpp
     ${CMAKE_SOURCE_DIR}/src/data/messagedao.cpp
     ${CMAKE_SOURCE_DIR}/src/data/wechatmessagedao.cpp
+    ${CMAKE_SOURCE_DIR}/src/data/qianniuconversationdao.cpp
 )
 
 set(AI_CORE_SOURCES
@@ -106,6 +108,7 @@ qt_add_executable(yy_ai_customer_service_auth_tests
     ${CMAKE_SOURCE_DIR}/src/core/authmanager.cpp
     ${CMAKE_SOURCE_DIR}/src/data/userdao.cpp
     ${CMAKE_SOURCE_DIR}/src/data/database.cpp
+    ${CMAKE_SOURCE_DIR}/src/data/appdatauistatedao.cpp
     ${CMAKE_SOURCE_DIR}/src/models/unifiedmodels.cpp
     ${CMAKE_SOURCE_DIR}/src/core/types.cpp
     ${CMAKE_SOURCE_DIR}/src/utils/cryptoutil.cpp

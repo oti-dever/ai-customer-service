@@ -1,10 +1,8 @@
 #ifndef RUNTIMEMODE_H
 #define RUNTIMEMODE_H
 
-#include "appsettings.h"
-
-#include <QSettings>
 #include <QString>
+#include <QtGlobal>
 
 namespace RuntimeMode {
 
@@ -30,21 +28,12 @@ inline QString defaultMode()
 
 inline QString currentMode()
 {
-    QSettings settings = AppSettings::create();
-    QString mode = settings.value(QStringLiteral("runtime/mode"), defaultMode()).toString().trimmed();
-    if (mode == clientCacheDb() || mode == remoteService() || mode == singleHostServiceDb())
-        return mode;
     return defaultMode();
 }
 
 inline void setCurrentMode(const QString& mode)
 {
-    const QString normalized = mode.trimmed();
-    QSettings settings = AppSettings::create();
-    if (normalized == clientCacheDb() || normalized == remoteService() || normalized == singleHostServiceDb())
-        settings.setValue(QStringLiteral("runtime/mode"), normalized);
-    else
-        settings.setValue(QStringLiteral("runtime/mode"), defaultMode());
+    Q_UNUSED(mode);
 }
 
 inline bool isSingleHostServiceDb()
@@ -54,17 +43,17 @@ inline bool isSingleHostServiceDb()
 
 inline bool isRemoteService()
 {
-    return currentMode() == remoteService();
+    return false;
 }
 
 inline bool isClientCacheDb()
 {
-    return currentMode() == clientCacheDb();
+    return false;
 }
 
 inline bool ownsBusinessDatabase()
 {
-    return isSingleHostServiceDb() || isRemoteService();
+    return true;
 }
 
 } // namespace RuntimeMode

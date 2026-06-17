@@ -26,6 +26,8 @@ class VisibleMessageBatch:
     display_name: str
     samples: list[Any]
     context: ChatContext | None = None
+    scroll_count: int = 0
+    reached_top: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,115 @@ class WechatVisibleMessageReader:
             len(samples),
         )
         return VisibleMessageBatch(display_name=resolved_name, samples=samples, context=context)
+
+    def read_recent_history_messages(
+        self,
+        *,
+        display_name: str = "",
+        limit: int = 20,
+        max_scrolls: int = 10,
+        settle_ms: int = 500,
+        restore_bottom: bool = True,
+    ) -> VisibleMessageBatch:
+        limit = max(1, min(int(limit or 20), 50))
+        max_scrolls = max(0, min(int(max_scrolls or 10), 20))
+        settle_sec = max(0.05, min(int(settle_ms or 500), 3000) / 1000.0)
+
+        started_at = time.perf_counter()
+        win = self._detector.find_main_window_control()
+        if win is None:
+            raise RuntimeError("wechat_window_not_found")
+
+        resolved_name = (display_name or self._detector.current_chat_name(win) or "current").strip()
+        window_hwnd = int(getattr(win, "NativeWindowHandle", 0) or 0)
+        samples_by_key: dict[str, Any] = {}
+        ordered_keys: list[str] = []
+        latest_context: ChatContext | None = None
+        empty_scrolls = 0
+        reached_top = False
+        scroll_count = 0
+        message_list: Any | None = None
+
+        def collect_once() -> int:
+            nonlocal resolved_name, latest_context
+            before = len(samples_by_key)
+            batch = self.read_visible_messages(
+                display_name=resolved_name,
+                limit=max(limit, 40),
+                tail_only=False,
+            )
+            resolved_name = batch.display_name or resolved_name
+            latest_context = batch.context or latest_context
+            for sample in batch.samples:
+                key = _history_sample_key(sample)
+                if not key or key in samples_by_key:
+                    continue
+                samples_by_key[key] = sample
+                ordered_keys.append(key)
+            return len(samples_by_key) - before
+
+        collect_once()
+        while len(samples_by_key) < limit and scroll_count < max_scrolls:
+            win = self._detector.find_main_window_control()
+            if win is None:
+                raise RuntimeError("wechat_window_not_found")
+            message_list = _find_scrollable_message_list(self._detector, win)
+            if message_list is None:
+                if samples_by_key:
+                    logger.warning(
+                        "read_recent_history_messages cannot scroll because message list was not found; "
+                        "returning visible samples display_name=%s samples=%s",
+                        resolved_name,
+                        len(samples_by_key),
+                    )
+                    break
+                raise RuntimeError("wechat_message_list_not_found")
+            if not _scroll_message_list_up(message_list, window_hwnd=window_hwnd):
+                reached_top = True
+                break
+            scroll_count += 1
+            time.sleep(settle_sec)
+            added = collect_once()
+            if added <= 0:
+                empty_scrolls += 1
+                if empty_scrolls >= 3:
+                    reached_top = True
+                    break
+            else:
+                empty_scrolls = 0
+
+        if restore_bottom and message_list is not None:
+            _scroll_message_list_bottom(message_list, window_hwnd=window_hwnd)
+
+        context = latest_context or self.get_chat_context(win)
+        if not context.chat_title and resolved_name:
+            context = ChatContext(
+                platform=context.platform,
+                chat_title=resolved_name,
+                user_id=resolved_name,
+                is_group=context.is_group,
+                member_count=context.member_count,
+                session_id=context.session_id or self.build_session_id(resolved_name, context.is_group),
+            )
+
+        selected = [samples_by_key[key] for key in ordered_keys[-limit:]]
+        selected.sort(key=lambda item: (getattr(item, "top", 0), getattr(item, "left", 0), getattr(item, "right", 0), getattr(item, "kind", "")))
+        logger.info(
+            "read_recent_history_messages done display_name=%s requested=%s samples=%s scrolls=%s reached_top=%s total_ms=%.1f",
+            resolved_name,
+            limit,
+            len(selected),
+            scroll_count,
+            reached_top,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        return VisibleMessageBatch(
+            display_name=resolved_name,
+            samples=selected,
+            context=context,
+            scroll_count=scroll_count,
+            reached_top=reached_top,
+        )
 
     def get_chat_context(self, window_control: Any | None = None) -> ChatContext:
         window_control = window_control or self._detector.get_window_control()
@@ -367,6 +478,104 @@ class WechatVisibleMessageReader:
 def _find_message_list_root(win: Any) -> Any | None:
     candidates = find_message_list_candidates(win)
     return candidates[0].control if candidates and candidates[0].score >= 60 else None
+
+
+def _find_scrollable_message_list(detector: WechatDetector, win: Any) -> Any | None:
+    try:
+        message_list = detector._find_message_list(win)
+    except Exception:
+        message_list = None
+    if message_list is not None:
+        return message_list
+    message_list = _find_message_list_root(win)
+    if message_list is not None:
+        return message_list
+    try:
+        from rpa.platforms.wechat.uia import find_chat_message_list_control
+
+        return find_chat_message_list_control(win)
+    except Exception:
+        return None
+
+
+def _history_sample_key(sample: Any) -> str:
+    direction = getattr(sample, "direction", "") or getattr(sample, "sender_role", "")
+    content = " ".join(normalize_text(getattr(sample, "name", "")).split())
+    kind = normalize_text(getattr(sample, "kind", "")) or "text"
+    class_name = normalize_text(getattr(sample, "class_name", ""))
+    automation_id = normalize_text(getattr(sample, "automation_id", ""))
+    if not content:
+        return ""
+    return "\n".join([str(direction), kind, content, class_name, automation_id])
+
+
+def _scroll_message_list_up(message_list: Any, *, window_hwnd: int = 0) -> bool:
+    if message_list is None:
+        return False
+    try:
+        pattern = message_list.GetScrollPattern()
+        if pattern:
+            try:
+                pattern.Scroll(0, -3)
+                return True
+            except Exception:
+                try:
+                    pattern.SetScrollPercent(-1, max(0.0, float(pattern.VerticalScrollPercent) - 18.0))
+                    return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        message_list.WheelUp(wheelTimes=4, waitTime=0.02)
+        return True
+    except Exception:
+        pass
+    try:
+        import uiautomation as auto
+
+        auto.SendKeys("{PageUp}", waitTime=0.02)
+        return True
+    except Exception:
+        pass
+    try:
+        import win32api
+        import win32con
+        import win32gui
+
+        hwnd = int(getattr(message_list, "NativeWindowHandle", 0) or window_hwnd or 0)
+        if hwnd:
+            win32gui.PostMessage(hwnd, win32con.WM_MOUSEWHEEL, win32api.MAKELONG(0, 120 * 4), 0)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _scroll_message_list_bottom(message_list: Any, *, window_hwnd: int = 0) -> None:
+    if message_list is None:
+        return
+    try:
+        pattern = message_list.GetScrollPattern()
+        if pattern:
+            try:
+                pattern.SetScrollPercent(-1, 100.0)
+                return
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        message_list.WheelDown(wheelTimes=12, waitTime=0.01)
+        return
+    except Exception:
+        pass
+    try:
+        import uiautomation as auto
+
+        auto.SendKeys("{End}", waitTime=0.02)
+    except Exception:
+        pass
 
 
 def _safe_prop(control: Any, name: str) -> str:

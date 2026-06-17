@@ -27,6 +27,7 @@ public:
     bool isServiceAvailable() const { return m_serviceAvailable; }
     QString serviceEndpoint() const { return m_endpoint; }
     void setServiceEndpoint(const QString& endpoint);
+    void markServiceUnavailable();
     void loadConnectionSettings();
     void saveConnectionSettings() const;
     bool connectToConfiguredService(QString* errorOut = nullptr);

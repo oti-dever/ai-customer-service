@@ -76,6 +76,13 @@ QJsonObject mediaPayload(const OutgoingMessagePart& part,
     return payload;
 }
 
+bool isHistorySyncMessage(const PlatformMessage& msg)
+{
+    const QJsonObject meta = msg.metadata.value(QStringLiteral("metadata")).toObject();
+    return meta.value(QStringLiteral("history_sync")).toBool(false)
+        || meta.value(QStringLiteral("preserve_conversation_last_message")).toBool(false);
+}
+
 } // namespace
 
 MessageRouter::MessageRouter(QObject* parent)
@@ -325,6 +332,13 @@ void MessageRouter::sendMessage(int conversationId,
 
 void MessageRouter::onConversationObserved(const ConversationInfo& conv)
 {
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        qInfo() << "[MessageRouter] conversation observed ignored in service-owned database mode"
+                << "platform=" << conv.platform
+                << "conversation=" << conv.platformConversationId;
+        return;
+    }
+
     QElapsedTimer timer;
     timer.start();
     ConversationDao dao;
@@ -378,6 +392,15 @@ void MessageRouter::onConversationMessagesCleared(const QString& conversationId)
     if (!conv)
         return;
 
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        emit conversationMessagesCleared(conv->id);
+        qInfo() << "[MessageRouter] service-owned conversation messages cleared event"
+                << "platform=" << platformName
+                << "conversation=" << conversationId
+                << "conversationId=" << conv->id;
+        return;
+    }
+
     MessageDao msgDao;
     if (!msgDao.clearAllForConversation(conv->id))
         return;
@@ -407,6 +430,15 @@ void MessageRouter::onConversationDeleted(const QString& conversationId)
         return;
 
     const int localId = conv->id;
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        emit conversationDeleted(localId);
+        qInfo() << "[MessageRouter] service-owned conversation deleted event"
+                << "platform=" << platformName
+                << "conversation=" << conversationId
+                << "conversationId=" << localId;
+        return;
+    }
+
     if (!convDao.remove(localId))
         return;
     emit conversationDeleted(localId);
@@ -418,6 +450,14 @@ void MessageRouter::onConversationDeleted(const QString& conversationId)
 
 void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
 {
+    if (RuntimeMode::ownsBusinessDatabase()) {
+        qInfo() << "[MessageRouter] incoming message ignored in service-owned database mode"
+                << "platform=" << msg.platform
+                << "conversation=" << msg.platformConversationId
+                << "platformMsgId=" << msg.platformMsgId;
+        return;
+    }
+
     QElapsedTimer totalTimer;
     totalTimer.start();
     MessageDao msgDao;
@@ -473,8 +513,10 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
             msg.metadata);
     }
     stageTimer.restart();
-    convDao.updateLastMessage(convId, msg.content, now);
-    if (msg.direction == QLatin1String("in"))
+    const bool historySync = isHistorySyncMessage(msg);
+    if (!historySync)
+        convDao.updateLastMessage(convId, msg.content, now);
+    if (!historySync && msg.direction == QLatin1String("in"))
         convDao.incrementUnread(convId);
     const qint64 updateConversationElapsedMs = stageTimer.elapsed();
 
@@ -660,6 +702,9 @@ int MessageRouter::ensureConversation(const PlatformMessage& msg)
 {
     ConversationDao dao;
     auto existing = dao.findByPlatformId(msg.platform, msg.platformConversationId);
+    if (RuntimeMode::ownsBusinessDatabase())
+        return existing ? existing->id : -1;
+
     if (existing) {
         if (existing->status == QLatin1String("closed")) {
             dao.setStatus(existing->id, QStringLiteral("active"));

@@ -44,7 +44,6 @@
 #include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
-#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QFontMetrics>
@@ -52,6 +51,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QImage>
+#include <QImageReader>
 #include <QInputDialog>
 #include <QIcon>
 #include <QMenu>
@@ -68,6 +68,7 @@
 #include <QPainterPath>
 #include <QPalette>
 #include <QPixmap>
+#include <QPixmapCache>
 #include <QRegularExpression>
 #include <QResizeEvent>
 #include <QScrollBar>
@@ -256,6 +257,15 @@ ConversationInfo conversationInfoFromUnified(const Models::Conversation& conv)
     info.confidence = conv.confidence;
     info.updatedAt = conv.updatedAt;
     return info;
+}
+
+bool isHistorySyncMessage(const Models::Message& msg)
+{
+    const QJsonObject payload = msg.metadata.value(QStringLiteral("payload")).toObject();
+    const QJsonObject meta = payload.value(QStringLiteral("metadata")).toObject();
+    return meta.value(QStringLiteral("history_sync")).toBool(false)
+        || meta.value(QStringLiteral("suppress_auto_reply")).toBool(false)
+        || meta.value(QStringLiteral("preserve_conversation_last_message")).toBool(false);
 }
 
 /** 右栏性能指标卡：高度随列宽变化，与宽度一致，接近正方形。 */
@@ -655,6 +665,8 @@ public:
     explicit ModernMessageItemDelegate(QObject* parent = nullptr)
         : QStyledItemDelegate(parent)
     {
+        if (QPixmapCache::cacheLimit() < 32768)
+            QPixmapCache::setCacheLimit(32768);
     }
 
     void setSelfProfile(const QString& displayName, const QPixmap& avatar)
@@ -674,12 +686,21 @@ public:
             return { qMax(320, option.rect.width()), 48 };
 
         const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
+        const int rowWidth = qMax(320, option.rect.width());
+        const QString cacheKey = sizeHintCacheKey(msg, rowWidth, option.font);
+        if (const auto it = m_sizeHintCache.constFind(cacheKey); it != m_sizeHintCache.constEnd())
+            return it.value();
+
         const QFont bodyFont = bodyTextFont(option.font);
         const QFont statusFont = statusTextFont(option.font);
         const int bubbleMax = qMin(360, qMax(180, option.rect.width() - 170));
         const int bubbleWidth = messageBubbleWidth(msg, bubbleMax, bodyFont);
         const int h = messageMetaHeight(msg) + messageBubbleHeight(msg, bubbleWidth, bodyFont, statusFont) + 12;
-        return { qMax(320, option.rect.width()), qMax(60, h) };
+        const QSize result(rowWidth, qMax(60, h));
+        m_sizeHintCache.insert(cacheKey, result);
+        if (m_sizeHintCache.size() > 2000)
+            m_sizeHintCache.clear();
+        return result;
     }
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
@@ -833,25 +854,107 @@ private:
         return msg.content.trimmed();
     }
 
+    static QString mediaCacheBaseKey(const MessageRecord& msg)
+    {
+        if (msg.contentImagePath.isEmpty())
+            return {};
+        const QFileInfo info(msg.contentImagePath);
+        if (!info.exists() || !info.isFile())
+            return {};
+        return QStringLiteral("%1:%2:%3")
+            .arg(info.absoluteFilePath())
+            .arg(info.size())
+            .arg(info.lastModified().toMSecsSinceEpoch());
+    }
+
+    static QSize originalPreviewSize(const MessageRecord& msg)
+    {
+        const QString key = mediaCacheBaseKey(msg);
+        if (key.isEmpty())
+            return {};
+
+        static QHash<QString, QSize> sizeCache;
+        if (const auto it = sizeCache.constFind(key); it != sizeCache.constEnd())
+            return it.value();
+
+        QImageReader reader(msg.contentImagePath);
+        reader.setAutoTransform(true);
+        QSize size = reader.size();
+        if (!size.isValid()) {
+            const QPixmap pm = loadPreviewPixmap(msg);
+            size = pm.size();
+        }
+        if (!size.isEmpty()) {
+            sizeCache.insert(key, size);
+            if (sizeCache.size() > 2000)
+                sizeCache.clear();
+        }
+        return size;
+    }
+
     static QPixmap loadPreviewPixmap(const MessageRecord& msg)
     {
-        if (msg.contentImagePath.isEmpty() || !QFile::exists(msg.contentImagePath))
+        const QString key = mediaCacheBaseKey(msg);
+        if (key.isEmpty())
             return {};
-        QPixmap pm(msg.contentImagePath);
-        return pm.isNull() ? QPixmap() : pm;
+
+        QPixmap pm;
+        const QString cacheKey = QStringLiteral("aggregate.preview.original:%1").arg(key);
+        if (QPixmapCache::find(cacheKey, &pm))
+            return pm;
+
+        QImageReader reader(msg.contentImagePath);
+        reader.setAutoTransform(true);
+        const QImage image = reader.read();
+        if (image.isNull())
+            return {};
+
+        pm = QPixmap::fromImage(image);
+        QPixmapCache::insert(cacheKey, pm);
+        return pm;
+    }
+
+    static QPixmap loadScaledPreviewPixmap(const MessageRecord& msg, const QSize& targetSize,
+                                           Qt::AspectRatioMode aspectMode = Qt::KeepAspectRatio)
+    {
+        if (targetSize.isEmpty())
+            return {};
+
+        const QString key = mediaCacheBaseKey(msg);
+        if (key.isEmpty())
+            return {};
+
+        const QString modeKey = aspectMode == Qt::KeepAspectRatioByExpanding
+                                    ? QStringLiteral("expand")
+                                    : QStringLiteral("fit");
+        const QString cacheKey = QStringLiteral("aggregate.preview.scaled:%1:%2:%3x%4")
+                                     .arg(modeKey, key)
+                                     .arg(targetSize.width())
+                                     .arg(targetSize.height());
+        QPixmap pm;
+        if (QPixmapCache::find(cacheKey, &pm))
+            return pm;
+
+        const QPixmap original = loadPreviewPixmap(msg);
+        if (original.isNull())
+            return {};
+
+        pm = original.scaled(targetSize, aspectMode, Qt::SmoothTransformation);
+        QPixmapCache::insert(cacheKey, pm);
+        return pm;
     }
 
     static QSize messageImageSize(const MessageRecord& msg, int bubbleWidth)
     {
         if (!isImageLikeMessage(msg))
             return {};
-        QPixmap pm = loadPreviewPixmap(msg);
-        if (pm.isNull())
+        const QSize originalSize = originalPreviewSize(msg);
+        if (originalSize.isEmpty())
             return {};
         const int maxW = isEmojiMessage(msg) ? qMin(180, qMax(1, bubbleWidth - 24))
                                              : qMin(336, qMax(1, bubbleWidth - 24));
         const int maxH = isEmojiMessage(msg) ? 180 : 260;
-        const QSize bounded = pm.size().scaled(maxW, maxH, Qt::KeepAspectRatio);
+        const QSize bounded = originalSize.scaled(maxW, maxH, Qt::KeepAspectRatio);
         return { qMax(1, bounded.width()), qMax(1, bounded.height()) };
     }
 
@@ -859,7 +962,7 @@ private:
     {
         if (isMediaCardMessage(msg))
             return {};
-        if (isImageLikeMessage(msg) && !loadPreviewPixmap(msg).isNull())
+        if (isImageLikeMessage(msg) && !originalPreviewSize(msg).isEmpty())
             return {};
         if (!msg.content.trimmed().isEmpty())
             return msg.content;
@@ -920,8 +1023,7 @@ private:
             return (msg.direction == QLatin1String("out") ? 84 : 76)
                    + messageStatusBlockHeight(msg, statusFont);
         if (isVideoMessage(msg)) {
-            const QPixmap preview = loadPreviewPixmap(msg);
-            const int previewH = preview.isNull() ? 112 : 150;
+            const int previewH = originalPreviewSize(msg).isEmpty() ? 112 : 150;
             return previewH + 44 + messageStatusBlockHeight(msg, statusFont);
         }
 
@@ -1030,10 +1132,11 @@ private:
         int contentY = bubbleRect.top() + 8;
         const QSize imageSize = messageImageSize(msg, bubbleW);
         if (imageSize.height() > 0) {
-            QPixmap pm(msg.contentImagePath);
-            pm = pm.scaled(imageSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-            painter->drawPixmap(QRect(bubbleRect.left() + 12, contentY, pm.width(), pm.height()), pm);
-            contentY += pm.height() + 6;
+            const QPixmap pm = loadScaledPreviewPixmap(msg, imageSize);
+            if (!pm.isNull()) {
+                painter->drawPixmap(QRect(bubbleRect.left() + 12, contentY, pm.width(), pm.height()), pm);
+                contentY += pm.height() + 6;
+            }
         }
 
         const int statusReserve = outgoing ? messageStatusBlockHeight(msg, statusFont) + 3 : 7;
@@ -1094,11 +1197,13 @@ private:
     {
         const int statusReserve = outgoing ? messageStatusBlockHeight(msg, statusFont) : 0;
         const QRect previewRect = bubbleRect.adjusted(10, 10, -10, -(44 + statusReserve));
-        QPixmap preview = loadPreviewPixmap(msg);
+        QPixmap preview = loadScaledPreviewPixmap(
+            msg,
+            previewRect.size(),
+            Qt::KeepAspectRatioByExpanding);
 
         painter->setPen(Qt::NoPen);
         if (!preview.isNull()) {
-            preview = preview.scaled(previewRect.size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
             const QRect src((preview.width() - previewRect.width()) / 2,
                             (preview.height() - previewRect.height()) / 2,
                             previewRect.width(),
@@ -1174,9 +1279,26 @@ private:
         }
     }
 
+    static QString sizeHintCacheKey(const MessageRecord& msg, int rowWidth, const QFont& font)
+    {
+        return QStringList{
+            QString::number(rowWidth),
+            font.toString(),
+            QString::number(msg.id),
+            QString::number(msg.syncStatus),
+            msg.errorReason,
+            msg.content,
+            msg.contentImagePath,
+            msg.contentType,
+            msg.originalTimestamp,
+            msg.direction,
+        }.join(QChar(0x1f));
+    }
+
     QString m_selfDisplayName;
     QPixmap m_selfAvatarPixmap;
     QPixmap m_customerAvatarPixmap;
+    mutable QHash<QString, QSize> m_sizeHintCache;
 };
 
 class MessageListView final : public QListView
@@ -1308,8 +1430,11 @@ void showAggregateWarning(QWidget* parent, const QString& title, const QString& 
 bool pythonServiceStartupBackfillEnabled()
 {
     QSettings settings = AppSettings::create();
+    const bool defaultBackfill = RuntimeMode::isSingleHostServiceDb()
+        ? false
+        : RuntimeMode::ownsBusinessDatabase();
     return settings.value(QStringLiteral("pythonService/startupBackfillEnabled"),
-                          RuntimeMode::ownsBusinessDatabase()).toBool();
+                          defaultBackfill).toBool();
 }
 
 bool isImageFilePath(const QString& path)
@@ -1376,6 +1501,30 @@ MessageRecord serviceMessageRecord(const QJsonObject& object, int localConversat
     record.cacheScope = QStringLiteral("service_db");
     record.cacheOrigin = QStringLiteral("python_service_db");
     return record;
+}
+
+ConversationInfo serviceConversationInfo(const QJsonObject& object)
+{
+    ConversationInfo info;
+    info.id = object.value(QStringLiteral("id")).toInt();
+    info.platform = object.value(QStringLiteral("platform")).toString().trimmed().toLower();
+    info.platformConversationId =
+        object.value(QStringLiteral("platform_conversation_id")).toString().trimmed();
+    info.accountId = object.value(QStringLiteral("account_id")).toString().trimmed();
+    info.customerName = object.value(QStringLiteral("customer_name")).toString().trimmed();
+    if (info.customerName.isEmpty())
+        info.customerName = info.platformConversationId;
+    info.lastMessage = object.value(QStringLiteral("last_message")).toString();
+    info.lastTime = serviceDateTime(object, QStringLiteral("last_time"));
+    info.unreadCount = object.value(QStringLiteral("unread_count")).toInt(0);
+    info.status = object.value(QStringLiteral("status")).toString(QStringLiteral("active"));
+    info.createdAt = serviceDateTime(object, QStringLiteral("created_at"));
+    info.updatedAt = serviceDateTime(object, QStringLiteral("updated_at"));
+    info.sourceType = QStringLiteral("python_service_truth");
+    info.confidence = 100;
+    info.cacheScope = QStringLiteral("service_db");
+    info.cacheOrigin = QStringLiteral("python_service_db");
+    return info;
 }
 
 bool isVideoFilePath(const QString& path)
@@ -1905,7 +2054,9 @@ void AggregateChatForm::refreshLocalUserProfile()
 
 AggregateChatForm::~AggregateChatForm()
 {
+    shutdownTransientWork();
     delete m_conversationService;
+    m_conversationService = nullptr;
 }
 
 void AggregateChatForm::setupUI()
@@ -2046,6 +2197,8 @@ void AggregateChatForm::schedulePythonServiceBackfill(int delayMs)
 {
     if (!RuntimeMode::ownsBusinessDatabase())
         return;
+    if (RuntimeMode::isSingleHostServiceDb())
+        return;
     if (!m_pythonServiceAvailable)
         return;
     if (!pythonServiceStartupBackfillEnabled())
@@ -2069,6 +2222,12 @@ void AggregateChatForm::showEvent(QShowEvent* event)
     QWidget::showEvent(event);
     scheduleChatInputRelayout();
     scheduleAdaptiveRelayout(false);
+}
+
+void AggregateChatForm::closeEvent(QCloseEvent* event)
+{
+    shutdownTransientWork();
+    QWidget::closeEvent(event);
 }
 
 void AggregateChatForm::resizeEvent(QResizeEvent* event)
@@ -2357,6 +2516,9 @@ void AggregateChatForm::relayoutChatInputOverlay()
     m_messageView->setGeometry(0, 0, w, h);
     m_chatInputPanel->setGeometry(0, h - ih, w, ih);
     m_chatInputPanel->raise();
+    updateNewMessageHintGeometry();
+    if (m_btnNewMessages)
+        m_btnNewMessages->raise();
     updateMessageListBottomReserve(ih);
     m_chatInputOverlayHost->update();
 }
@@ -2402,11 +2564,38 @@ void AggregateChatForm::connectSignals()
         PythonServiceController::instance().refreshConnectionState();
         refreshPythonServiceButtonUi();
         refreshPlatformListenStateFromService();
+        updateWechatHistorySyncButtonUi();
         if (available && pythonServiceStartupBackfillEnabled())
             backfillFromPythonService();
     });
     connect(&ipc, &Ipc::IpcService::platformEventReceived, this, [this](const QJsonObject& event) {
         const QString eventType = event.value(QStringLiteral("event_type")).toString();
+        if (eventType == QLatin1String("history_sync_completed")) {
+            const QJsonObject payload = event.value(QStringLiteral("payload")).toObject();
+            const int inserted = payload.value(QStringLiteral("inserted_count")).toInt();
+            const int duplicates = payload.value(QStringLiteral("duplicate_count")).toInt();
+            m_wechatHistorySyncInProgress = false;
+            updateWechatHistorySyncButtonUi();
+            showStatusMessage(QStringLiteral("历史同步完成：新增 %1 条，跳过 %2 条").arg(inserted).arg(duplicates), 5000);
+            if (RuntimeMode::isSingleHostServiceDb())
+                reloadFromLocalCache();
+            else
+                refreshVisibleConversationMessages();
+            return;
+        }
+        const bool changesConversationData =
+            eventType == QLatin1String("conversation_observed")
+            || eventType == QLatin1String("message_observed")
+            || eventType == QLatin1String("message_sent")
+            || eventType == QLatin1String("send_failed")
+            || eventType == QLatin1String("conversation_messages_cleared")
+            || eventType == QLatin1String("conversation_deleted");
+        if (RuntimeMode::isSingleHostServiceDb() && changesConversationData) {
+            QTimer::singleShot(0, this, [this]() {
+                reloadFromLocalCache();
+            });
+            return;
+        }
         if (eventType == QLatin1String("message_observed")
             || eventType == QLatin1String("message_sent")
             || eventType == QLatin1String("send_failed")) {
@@ -2579,6 +2768,97 @@ void AggregateChatForm::refreshPythonServiceButtonUi()
         tip += QStringLiteral("\n左键：启动本机 Python 服务（debug 模式）\n右键：查看服务状态和运行日志");
     }
     m_btnPythonService->setToolTip(tip);
+    updateWechatHistorySyncButtonUi();
+}
+
+bool AggregateChatForm::currentConversationIsWechat() const
+{
+    if (m_currentConvId <= 0)
+        return false;
+    ConversationDao dao;
+    const auto conv = dao.findById(m_currentConvId);
+    return conv && conv->platform == QLatin1String("wechat");
+}
+
+void AggregateChatForm::updateWechatHistorySyncButtonUi()
+{
+    if (!m_btnSyncWechatHistory)
+        return;
+    const bool visible = currentConversationIsWechat();
+    const bool enabled = visible && m_pythonServiceAvailable && !m_wechatHistorySyncInProgress;
+    m_btnSyncWechatHistory->setVisible(visible);
+    m_btnSyncWechatHistory->setEnabled(enabled);
+    if (!visible)
+        m_btnSyncWechatHistory->setToolTip(QStringLiteral("同步当前会话最近历史"));
+    else if (m_wechatHistorySyncInProgress)
+        m_btnSyncWechatHistory->setToolTip(QStringLiteral("正在同步当前会话最近历史"));
+    else if (!m_pythonServiceAvailable)
+        m_btnSyncWechatHistory->setToolTip(QStringLiteral("Python 服务未连接，无法同步历史"));
+    else
+        m_btnSyncWechatHistory->setToolTip(QStringLiteral("同步当前会话最近历史"));
+}
+
+void AggregateChatForm::onSyncWechatHistoryClicked()
+{
+    if (m_currentConvId <= 0 || m_wechatHistorySyncInProgress)
+        return;
+    ConversationDao dao;
+    const auto conv = dao.findById(m_currentConvId);
+    if (!conv || conv->platform != QLatin1String("wechat")) {
+        showStatusMessage(QStringLiteral("仅支持同步微信会话历史"), 3000);
+        return;
+    }
+    QString serviceError;
+    if (!Ipc::IpcService::instance().connectToConfiguredService(&serviceError)) {
+        showStatusMessage(QStringLiteral("Python 服务未连接：%1").arg(serviceError), 5000);
+        return;
+    }
+
+    bool ok = false;
+    const int limit = QInputDialog::getInt(
+        this,
+        QStringLiteral("同步当前会话最近历史"),
+        QStringLiteral("需要同步的最近消息条数（最多 50 条）："),
+        20,
+        1,
+        50,
+        1,
+        &ok);
+    if (!ok)
+        return;
+
+    m_wechatHistorySyncInProgress = true;
+    updateWechatHistorySyncButtonUi();
+    showStatusMessage(QStringLiteral("正在同步当前会话最近历史"), 3000);
+
+    Ipc::PlatformCommandRequest request;
+    request.commandType = QStringLiteral("sync_history_messages");
+    request.platform = QStringLiteral("wechat");
+    request.accountId = conv->accountId.isEmpty() ? QStringLiteral("wechat") : conv->accountId;
+    request.taskId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.parameters.insert(QStringLiteral("conversation_key"), conv->platformConversationId);
+    request.parameters.insert(QStringLiteral("display_name"), conv->customerName);
+    request.parameters.insert(QStringLiteral("limit"), limit);
+    request.parameters.insert(QStringLiteral("max_scrolls"), 10);
+    request.parameters.insert(QStringLiteral("settle_ms"), 500);
+    request.parameters.insert(QStringLiteral("restore_bottom"), true);
+    request.parameters.insert(QStringLiteral("allow_foreground"), true);
+
+    const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 35000);
+    m_wechatHistorySyncInProgress = false;
+    updateWechatHistorySyncButtonUi();
+    if (response.status != Ipc::ResponseStatus::Success) {
+        showStatusMessage(QStringLiteral("历史同步失败：%1").arg(response.errorMessage), 5000);
+        return;
+    }
+    const QJsonObject result = response.result;
+    const int inserted = result.value(QStringLiteral("inserted_count")).toInt();
+    const int duplicates = result.value(QStringLiteral("duplicate_count")).toInt();
+    showStatusMessage(QStringLiteral("历史同步完成：新增 %1 条，跳过 %2 条").arg(inserted).arg(duplicates), 5000);
+    if (RuntimeMode::isSingleHostServiceDb())
+        reloadFromLocalCache();
+    else
+        refreshVisibleConversationMessages();
 }
 
 void AggregateChatForm::onPythonServiceButtonClicked()
@@ -2985,6 +3265,19 @@ QWidget* AggregateChatForm::buildCenterPanel()
     m_chatHeader->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
     m_chatHeader->setContentsMargins(4, 0, 0, 0);
     headerLayout->addWidget(m_chatHeader, 1);
+    m_btnSyncWechatHistory = new QToolButton(m_chatHeaderBar);
+    m_btnSyncWechatHistory->setObjectName(QStringLiteral("aggregateSyncWechatHistoryButton"));
+    m_btnSyncWechatHistory->setIcon(QIcon(QStringLiteral(":/aggregate_reception_icons/sync_hitstory_messages_icon.svg")));
+    m_btnSyncWechatHistory->setIconSize(QSize(20, 20));
+    m_btnSyncWechatHistory->setToolTip(QStringLiteral("同步当前会话最近历史"));
+    m_btnSyncWechatHistory->setAccessibleName(QStringLiteral("同步当前会话最近历史"));
+    m_btnSyncWechatHistory->setCursor(Qt::PointingHandCursor);
+    m_btnSyncWechatHistory->setAutoRaise(true);
+    m_btnSyncWechatHistory->setFixedSize(32, 32);
+    m_btnSyncWechatHistory->setVisible(false);
+    connect(m_btnSyncWechatHistory, &QToolButton::clicked,
+            this, &AggregateChatForm::onSyncWechatHistoryClicked);
+    headerLayout->addWidget(m_btnSyncWechatHistory, 0, Qt::AlignVCenter);
     chatLayout->addWidget(m_chatHeaderBar);
 
     m_chatInputOverlayHost = new QWidget(m_chatArea);
@@ -3016,6 +3309,32 @@ QWidget* AggregateChatForm::buildCenterPanel()
     connect(m_messageView, &QListView::clicked, this, [this](const QModelIndex& index) {
         const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
         openMessageMedia(msg);
+    });
+    if (QScrollBar* sb = m_messageView->verticalScrollBar()) {
+        connect(sb, &QScrollBar::valueChanged, this, [this]() {
+            updateMessageScrollState();
+        });
+        connect(sb, &QScrollBar::rangeChanged, this, [this]() {
+            updateMessageScrollState();
+        });
+    }
+
+    m_btnNewMessages = new QToolButton(m_chatInputOverlayHost);
+    m_btnNewMessages->setObjectName(QStringLiteral("aggregateNewMessageHint"));
+    m_btnNewMessages->setText(QStringLiteral("新消息"));
+    m_btnNewMessages->setCursor(Qt::PointingHandCursor);
+    m_btnNewMessages->setAutoRaise(false);
+    m_btnNewMessages->setVisible(false);
+    m_btnNewMessages->setStyleSheet(QStringLiteral(
+        "QToolButton#aggregateNewMessageHint{"
+        "background:#FFFFFF;color:#0F172A;border:1px solid #CBD5E1;"
+        "border-radius:14px;padding:4px 12px;font-size:12px;"
+        "}"
+        "QToolButton#aggregateNewMessageHint:hover{background:#F8FAFC;border-color:#38BDF8;}"
+        "QToolButton#aggregateNewMessageHint:pressed{background:#E0F2FE;}"));
+    connect(m_btnNewMessages, &QToolButton::clicked, this, [this]() {
+        clearPendingNewMessageHint();
+        scheduleScrollChatToBottom(true);
     });
 
     m_chatInputPanel = new QWidget(m_chatInputOverlayHost);
@@ -3549,6 +3868,8 @@ QWidget* AggregateChatForm::buildRightPanel()
         if (m_sendTimelineToggle)
             m_sendTimelineToggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
         updateRightBarSendSectionStretch();
+        if (expanded)
+            pollSendTimeline();
     });
     m_sendTimelineBody->setVisible(false);
 
@@ -4252,11 +4573,12 @@ void AggregateChatForm::persistCurrentDraft()
 
     ConversationDao dao;
     const QString content = m_inputEdit->toPlainText();
-    dao.saveCachedDraft(m_currentConvId, content);
     if (RuntimeMode::isSingleHostServiceDb()) {
         const auto conv = dao.findById(m_currentConvId);
         if (conv)
             AppDataUiStateDao().saveDraft(conv->platform, conv->platformConversationId, content);
+    } else {
+        dao.saveCachedDraft(m_currentConvId, content);
     }
     m_draftAttachments[m_currentConvId] = m_composeAttachments;
 }
@@ -4267,14 +4589,15 @@ void AggregateChatForm::restoreDraftForConversation(int conversationId)
         return;
 
     ConversationDao dao;
-    QString draft = conversationId > 0 ? dao.cachedDraftForConversation(conversationId) : QString();
+    QString draft = RuntimeMode::isSingleHostServiceDb()
+        ? QString()
+        : (conversationId > 0 ? dao.cachedDraftForConversation(conversationId) : QString());
     if (RuntimeMode::isSingleHostServiceDb() && conversationId > 0) {
         const auto conv = dao.findById(conversationId);
         if (conv) {
             const QString appDataDraft =
                 AppDataUiStateDao().draftForConversation(conv->platform, conv->platformConversationId);
-            if (!appDataDraft.isEmpty())
-                draft = appDataDraft;
+            draft = appDataDraft;
         }
     }
     m_restoringDraft = true;
@@ -4328,7 +4651,12 @@ void AggregateChatForm::refreshConversationList()
     QVector<ConversationInfo> conversations;
     QHash<int, QString> lastDirections;
     bool loadedFromService = false;
-    if (RuntimeMode::ownsBusinessDatabase() && m_pythonServiceAvailable) {
+    if (RuntimeMode::isSingleHostServiceDb()) {
+        conversations = mgr.allConversations();
+        lastDirections = msgDao.lastCachedDirectionsByConversation();
+        qInfo() << "[AggregateChatForm] conversation list loaded from app data db"
+                << "count=" << conversations.size();
+    } else if (RuntimeMode::ownsBusinessDatabase() && m_pythonServiceAvailable) {
         Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
         QString error;
         const QJsonObject response = Ipc::IpcService::instance().fetchConversationList(
@@ -4339,22 +4667,18 @@ void AggregateChatForm::refreshConversationList()
             &error);
         if (status == Ipc::ResponseStatus::Success
             && response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("success")) {
-            ConversationDao conversationDao;
             const QJsonArray rows = response.value(QStringLiteral("conversations")).toArray();
             conversations.reserve(rows.size());
             for (const QJsonValue& value : rows) {
                 const QJsonObject object = value.toObject();
                 if (object.isEmpty())
                     continue;
-                const int localId = conversationDao.upsertSnapshotCacheConversation(object);
-                if (localId <= 0)
+                const ConversationInfo conv = serviceConversationInfo(object);
+                if (conv.id <= 0 || conv.platform.isEmpty() || conv.platformConversationId.isEmpty())
                     continue;
-                const auto conv = conversationDao.findById(localId);
-                if (!conv)
-                    continue;
-                conversations.push_back(*conv);
+                conversations.push_back(conv);
                 lastDirections.insert(
-                    localId,
+                    conv.id,
                     object.value(QStringLiteral("last_direction")).toString().trimmed().toLower());
             }
             loadedFromService = true;
@@ -4369,7 +4693,7 @@ void AggregateChatForm::refreshConversationList()
         }
     }
 
-    if (!loadedFromService) {
+    if (!RuntimeMode::isSingleHostServiceDb() && !loadedFromService) {
         conversations = mgr.allConversations();
         lastDirections = msgDao.lastCachedDirectionsByConversation();
     }
@@ -4385,6 +4709,9 @@ void AggregateChatForm::reloadFromLocalCache()
     if (m_currentConvId > 0
         && m_conversationListModel
         && m_conversationListModel->containsConversation(m_currentConvId)) {
+        const bool hadRenderedMessages = m_messageListModel && !m_messageListModel->messages().isEmpty();
+        const int previousMessageCount = m_messageListModel ? m_messageListModel->messages().size() : 0;
+        const bool wasNearBottom = isMessageViewNearBottom();
         const auto messages = ConversationManager::instance().messages(m_currentConvId);
         if (!m_messageListModel)
             m_messageListModel = new MessageListModel(this);
@@ -4399,7 +4726,12 @@ void AggregateChatForm::reloadFromLocalCache()
             setChatHeaderTitle(QStringLiteral("%1 (%2)").arg(conv->customerName, conv->platform));
             updateCustomerInfo(*conv);
         }
-        scheduleScrollChatToBottom();
+        const int addedMessages = qMax(0, messages.size() - previousMessageCount);
+        if (!hadRenderedMessages || wasNearBottom) {
+            scheduleScrollChatToBottom(true);
+        } else if (addedMessages > 0) {
+            showPendingNewMessageHint(addedMessages);
+        }
         qInfo() << "[AggregateChatForm] reloaded current conversation from local cache:"
                 << m_currentConvId << "messages=" << messages.size();
         return;
@@ -4420,6 +4752,11 @@ void AggregateChatForm::reloadFromDatabase()
 
 void AggregateChatForm::applyCacheSnapshotToLocalCache(const QJsonObject& snapshot)
 {
+    if (RuntimeMode::isSingleHostServiceDb()) {
+        qInfo() << "[AggregateChatForm] cache snapshot skipped in single-host service DB mode";
+        return;
+    }
+
     if (snapshot.value(QStringLiteral("status")).toString() != QLatin1String("success"))
         return;
 
@@ -4536,6 +4873,9 @@ void AggregateChatForm::applyCacheSnapshotToLocalCache(const QJsonObject& snapsh
 
 QVector<MessageRecord> AggregateChatForm::messagesForDisplay(int conversationId) const
 {
+    if (RuntimeMode::isSingleHostServiceDb())
+        return ConversationManager::instance().messages(conversationId);
+
     if (!RuntimeMode::ownsBusinessDatabase() || !m_pythonServiceAvailable)
         return ConversationManager::instance().messages(conversationId);
 
@@ -4722,6 +5062,7 @@ void AggregateChatForm::showConversation(int conversationId)
         m_pendingStickyConvId = -1;
 
     m_currentConvId = conversationId;
+    clearPendingNewMessageHint();
     auto& mgr = ConversationManager::instance();
     mgr.selectConversation(conversationId);
 
@@ -4744,6 +5085,7 @@ void AggregateChatForm::showConversation(int conversationId)
 
     m_centerStack->setCurrentWidget(m_chatArea);
     updateCompactHeaderControls();
+    updateWechatHistorySyncButtonUi();
     restoreDraftForConversation(conversationId);
     m_inputEdit->setFocus();
 
@@ -4804,11 +5146,14 @@ void AggregateChatForm::refreshVisibleConversationMessages()
 
     auto* sb = m_messageView->verticalScrollBar();
     const bool wasNearBottom = !sb || sb->value() >= sb->maximum() - 24;
+    const int previousMessageCount = m_messageListModel ? m_messageListModel->messages().size() : 0;
     m_messageListModel->setConversationMessages(m_currentConvId, messages);
     renderConversationMessagesFromModel();
     m_currentMessageSignature = m_messageListModel->signature();
     if (wasNearBottom)
-        scheduleScrollChatToBottom();
+        scheduleScrollChatToBottom(true);
+    else if (messages.size() > previousMessageCount)
+        showPendingNewMessageHint(messages.size() - previousMessageCount);
 }
 
 void AggregateChatForm::scrollToBottom()
@@ -4817,19 +5162,78 @@ void AggregateChatForm::scrollToBottom()
         return;
     auto* sb = m_messageView->verticalScrollBar();
     sb->setValue(sb->maximum());
+    m_messageViewNearBottom = true;
+    clearPendingNewMessageHint();
 }
 
-void AggregateChatForm::scheduleScrollChatToBottom()
+void AggregateChatForm::scheduleScrollChatToBottom(bool force)
 {
-    QTimer::singleShot(100, this, [this]() {
+    if (!force && !isMessageViewNearBottom())
+        return;
+
+    QTimer::singleShot(100, this, [this, force]() {
         if (!m_messageView)
             return;
+        if (!force && !isMessageViewNearBottom())
+            return;
         m_messageView->viewport()->update();
-        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         scrollToBottom();
         // QScrollArea 内容高度偶发晚一帧才更新，再拉一次
         QTimer::singleShot(0, this, [this]() { scrollToBottom(); });
     });
+}
+
+bool AggregateChatForm::isMessageViewNearBottom(int tolerancePx) const
+{
+    if (!m_messageView)
+        return true;
+    const QScrollBar* sb = m_messageView->verticalScrollBar();
+    if (!sb)
+        return true;
+    return sb->value() >= sb->maximum() - qMax(0, tolerancePx);
+}
+
+void AggregateChatForm::updateMessageScrollState()
+{
+    const bool nearBottom = isMessageViewNearBottom();
+    m_messageViewNearBottom = nearBottom;
+    if (nearBottom)
+        clearPendingNewMessageHint();
+}
+
+void AggregateChatForm::showPendingNewMessageHint(int count)
+{
+    if (!m_btnNewMessages)
+        return;
+    m_pendingNewMessageCount = qMax(1, m_pendingNewMessageCount + qMax(1, count));
+    m_btnNewMessages->setText(m_pendingNewMessageCount > 1
+                                  ? QStringLiteral("%1 条新消息").arg(m_pendingNewMessageCount)
+                                  : QStringLiteral("新消息"));
+    updateNewMessageHintGeometry();
+    m_btnNewMessages->setVisible(true);
+    m_btnNewMessages->raise();
+}
+
+void AggregateChatForm::clearPendingNewMessageHint()
+{
+    m_pendingNewMessageCount = 0;
+    if (m_btnNewMessages)
+        m_btnNewMessages->setVisible(false);
+}
+
+void AggregateChatForm::updateNewMessageHintGeometry()
+{
+    if (!m_btnNewMessages || !m_chatInputOverlayHost)
+        return;
+    const QSize hintSize = m_btnNewMessages->sizeHint() + QSize(12, 2);
+    const int w = qBound(88, hintSize.width(), 180);
+    const int h = 28;
+    int bottomY = m_chatInputOverlayHost->height() - 88;
+    if (m_chatInputPanel)
+        bottomY = m_chatInputPanel->geometry().top();
+    const int x = qMax(12, (m_chatInputOverlayHost->width() - w) / 2);
+    const int y = qMax(12, bottomY - h - 12);
+    m_btnNewMessages->setGeometry(x, y, w, h);
 }
 
 void AggregateChatForm::updateCustomerInfo(const ConversationInfo& /*conv*/)
@@ -4851,6 +5255,8 @@ void AggregateChatForm::resetSendTimelineForConversation()
 void AggregateChatForm::pollSendTimeline()
 {
     if (m_currentConvId <= 0 || !m_sendTimeline)
+        return;
+    if (!m_sendTimelineBody || !m_sendTimelineBody->isVisible())
         return;
 
     struct TimelineLine {
@@ -4901,6 +5307,7 @@ void AggregateChatForm::onClearSendTimeline()
 void AggregateChatForm::showCenterEmptyState()
 {
     abortAggregateAiRequest();
+    clearPendingNewMessageHint();
     m_centerStack->setCurrentWidget(m_centerEmptyState);
     updateAggregateAiControlsVisibility();
     updateCompactHeaderControls();
@@ -5089,9 +5496,10 @@ void AggregateChatForm::onSendClicked()
     m_draftAttachments.remove(m_currentConvId);
     ConversationDao convDao;
     const auto conv = convDao.findById(m_currentConvId);
-    convDao.clearCachedDraft(m_currentConvId);
     if (RuntimeMode::isSingleHostServiceDb() && conv)
         AppDataUiStateDao().clearDraft(conv->platform, conv->platformConversationId);
+    else
+        convDao.clearCachedDraft(m_currentConvId);
     ConversationManager::instance().sendPayload(m_currentConvId, payload);
     schedulePythonServiceBackfill(300);
     qInfo() << "[AggregateChatForm] send click timing"
@@ -5140,7 +5548,19 @@ void AggregateChatForm::onUnifiedMessageReceived(int conversationId, const Model
     QElapsedTimer timer;
     timer.start();
     const MessageRecord record = messageRecordFromUnified(message);
-    if (message.direction == Models::MessageDirection::Outbound)
+    if (isHistorySyncMessage(message)) {
+        if (conversationId == m_currentConvId) {
+            auto messages = messagesForDisplay(conversationId);
+            if (!messages.isEmpty()) {
+                m_messageListModel->setConversationMessages(conversationId, messages);
+                renderConversationMessagesFromModel();
+            } else {
+                appendMessageBubble(record);
+            }
+            m_currentMessageSignature = m_messageListModel ? m_messageListModel->signature() : m_currentMessageSignature;
+        }
+        refreshConversationList();
+    } else if (message.direction == Models::MessageDirection::Outbound)
         onSentOk(conversationId, record);
     else
         onNewMessage(conversationId, record);
@@ -5159,6 +5579,7 @@ void AggregateChatForm::onUnifiedConversationUpdated(const Models::Conversation&
         const ConversationInfo info = conversationInfoFromUnified(conversation);
         updateCustomerInfo(info);
         setChatHeaderTitle(QStringLiteral("%1 (%2)").arg(info.customerName, info.platform));
+        updateWechatHistorySyncButtonUi();
     }
     refreshConversationList();
 }
@@ -5168,6 +5589,7 @@ void AggregateChatForm::onConversationMessagesCleared(int conversationId)
     if (m_pendingStickyConvId == conversationId)
         m_pendingStickyConvId = -1;
     if (conversationId == m_currentConvId) {
+        clearPendingNewMessageHint();
         m_lastBubbleDate = QDate();
         renderConversationMessages({});
         m_currentMessageSignature = buildMessageSignature({});
@@ -5182,12 +5604,14 @@ void AggregateChatForm::onConversationDeleted(int conversationId)
     if (m_pendingStickyConvId == conversationId)
         m_pendingStickyConvId = -1;
     if (conversationId == m_currentConvId) {
+        clearPendingNewMessageHint();
         m_currentConvId = -1;
         m_lastBubbleDate = QDate();
         renderConversationMessages({});
         m_currentMessageSignature = buildMessageSignature({});
         showCenterEmptyState();
         showRightEmptyState();
+        updateWechatHistorySyncButtonUi();
         if (m_inputEdit)
             m_inputEdit->clear();
     }
@@ -5204,8 +5628,12 @@ void AggregateChatForm::onNewMessage(int conversationId, const MessageRecord& ms
     if (m_currentConvId <= 0) {
         showConversation(conversationId);
     } else if (conversationId == m_currentConvId) {
+        const bool wasNearBottom = isMessageViewNearBottom();
         appendMessageBubble(msg);
-        scheduleScrollChatToBottom();
+        if (wasNearBottom)
+            scheduleScrollChatToBottom(true);
+        else
+            showPendingNewMessageHint();
     }
     refreshConversationList();
     showStatusMessage(QStringLiteral("新消息: %1").arg(msg.content.left(30)), 3000);
@@ -5228,7 +5656,7 @@ void AggregateChatForm::onSentOk(int conversationId, const MessageRecord& msg)
         m_pendingStickyConvId = conversationId;
     if (conversationId == m_currentConvId) {
         appendMessageBubble(msg);
-        scheduleScrollChatToBottom();
+        scheduleScrollChatToBottom(true);
     }
     refreshConversationList();
     qInfo() << "[AggregateChatForm] outbound message UI timing"
@@ -5528,6 +5956,70 @@ void AggregateChatForm::clearStreamingSession(IAiStreamingSession*& session)
     session->abort();
     session->deleteLater();
     session = nullptr;
+}
+
+void AggregateChatForm::destroyStreamingSessionNow(IAiStreamingSession*& session)
+{
+    if (!session)
+        return;
+    IAiStreamingSession* doomed = session;
+    session = nullptr;
+    doomed->disconnect(this);
+    doomed->abort();
+    delete doomed;
+}
+
+void AggregateChatForm::shutdownTransientWork()
+{
+    if (m_shuttingDown)
+        return;
+    m_shuttingDown = true;
+
+    if (m_messageRefreshTimer)
+        m_messageRefreshTimer->stop();
+    if (m_sendTimelineTimer)
+        m_sendTimelineTimer->stop();
+    if (m_draftSaveTimer)
+        m_draftSaveTimer->stop();
+    if (m_pythonBackfillTimer)
+        m_pythonBackfillTimer->stop();
+    if (m_adaptiveRelayoutTimer)
+        m_adaptiveRelayoutTimer->stop();
+    if (m_chatInputRelayoutTimer)
+        m_chatInputRelayoutTimer->stop();
+
+    if (m_modelSheetWidthAnim) {
+        QVariantAnimation* anim = m_modelSheetWidthAnim;
+        m_modelSheetWidthAnim = nullptr;
+        anim->stop();
+        delete anim;
+    }
+
+    if (m_chatInputOverlayHost)
+        m_chatInputOverlayHost->removeEventFilter(this);
+
+    if (!m_aggregateAiIpcRequestId.isEmpty()) {
+        Ipc::IpcService::instance().cancelRequest(m_aggregateAiIpcRequestId);
+        m_aggregateAiIpcRequestId.clear();
+    }
+
+    destroyStreamingSessionNow(m_aggregateAiSession);
+    destroyStreamingSessionNow(m_autoReplySession);
+    destroyStreamingSessionNow(m_customerProfileSession);
+
+    m_aggregateAiGenerating = false;
+    m_autoReplyBusy = false;
+    m_customerProfileBusy = false;
+    m_autoReplyTargetConvId = -1;
+    m_aggregateAiRequestEventId = 0;
+    m_autoReplyRequestEventId = 0;
+    m_customerProfileRequestEventId = 0;
+
+    auto& mgr = ConversationManager::instance();
+    disconnect(&mgr, nullptr, this, nullptr);
+    auto& ipc = Ipc::IpcService::instance();
+    disconnect(&ipc, nullptr, this, nullptr);
+    disconnect(&PythonServiceController::instance(), nullptr, this, nullptr);
 }
 
 void AggregateChatForm::refreshAggregateAiModelButtonUi()
