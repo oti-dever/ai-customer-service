@@ -224,6 +224,7 @@ private:
     QLabel* m_platformSectionTitle = nullptr;
     QCheckBox* m_chkListenWechat = nullptr;
     QCheckBox* m_chkListenQianniu = nullptr;
+    QCheckBox* m_chkListenPdd = nullptr;
     QPushButton* m_btnStartPlatformListening = nullptr;
     QPushButton* m_btnStopPlatformListening = nullptr;
     QLabel* m_platformListenStatusLabel = nullptr;

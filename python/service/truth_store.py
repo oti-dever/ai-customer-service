@@ -8,8 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from rpa.db.connection import open_db
+from rpa.platforms.pdd_web.pdd_logging import get_logger as get_pdd_logger
 
 from .cache_snapshot import resolved_snapshot_db_path
+
+PDD_LOGGER = get_pdd_logger(__name__)
 
 
 def _clean(value: Any) -> str:
@@ -124,6 +127,14 @@ def _message_fingerprint(direction: Any, sender_role: Any, content: Any, content
     return f"{_direction(direction, sender_role)}\n{normalized_type}\n{normalized_content}"
 
 
+def _within_time_window(left: Any, right: Any, *, hours: int) -> bool:
+    left_dt = _parse_time(left)
+    right_dt = _parse_time(right)
+    if left_dt is None or right_dt is None:
+        return False
+    return abs(left_dt - right_dt) <= timedelta(hours=hours)
+
+
 def _event_message_fingerprint(event: dict[str, Any]) -> str:
     payload = event.get("payload") or {}
     return _message_fingerprint(
@@ -150,6 +161,13 @@ def _metadata(payload: Any) -> dict[str, Any]:
 def _is_history_sync_payload(payload: Any) -> bool:
     meta = _metadata(payload)
     return bool(meta.get("history_sync") or meta.get("preserve_conversation_last_message"))
+
+
+def _unread_count_from_payload(payload: dict[str, Any]) -> int:
+    try:
+        return max(0, int(payload.get("unread_count") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -514,7 +532,8 @@ class PythonServiceTruthStore:
                 payload = event.get("payload")
                 if not isinstance(payload, dict):
                     continue
-                if _direction(payload.get("direction"), payload.get("sender_role")) != "in":
+                platform = _clean(event.get("platform")).lower()
+                if platform != "pdd_web" and _direction(payload.get("direction"), payload.get("sender_role")) != "in":
                     continue
             selected.append(event)
         return selected
@@ -662,6 +681,22 @@ class PythonServiceTruthStore:
             );
             CREATE INDEX IF NOT EXISTS idx_qianniu_conversations_key
               ON qianniu_conversations(qianniu_account_id, qianniu_conversation_key);
+            CREATE TABLE IF NOT EXISTS qq_conversations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              conversation_id INTEGER NOT NULL UNIQUE,
+              qq_account_id TEXT DEFAULT '',
+              qq_conversation_key TEXT DEFAULT '',
+              display_name TEXT DEFAULT '',
+              last_unread_badge INTEGER DEFAULT 0,
+              last_observed_at DATETIME,
+              last_health_status TEXT DEFAULT '',
+              raw_payload_json TEXT DEFAULT '',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_qq_conversations_key
+              ON qq_conversations(qq_account_id, qq_conversation_key);
             CREATE TABLE IF NOT EXISTS wechat_messages (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               message_id INTEGER NOT NULL UNIQUE,
@@ -720,6 +755,35 @@ class PythonServiceTruthStore:
               FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_qianniu_messages_conv_id ON qianniu_messages(conversation_id);
+            CREATE TABLE IF NOT EXISTS qq_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              message_id INTEGER NOT NULL UNIQUE,
+              conversation_id INTEGER NOT NULL,
+              qq_account_id TEXT DEFAULT '',
+              qq_conversation_key TEXT DEFAULT '',
+              qq_display_name TEXT DEFAULT '',
+              platform_message_id TEXT DEFAULT '',
+              direction TEXT DEFAULT '',
+              sender_role TEXT DEFAULT '',
+              raw_sender TEXT DEFAULT '',
+              raw_timestamp_text TEXT DEFAULT '',
+              parser_source TEXT DEFAULT '',
+              source_type TEXT DEFAULT '',
+              confidence INTEGER DEFAULT 0,
+              verification_status TEXT DEFAULT '',
+              original_timestamp TEXT DEFAULT '',
+              content_image_path TEXT DEFAULT '',
+              role_method TEXT DEFAULT '',
+              role_confidence REAL DEFAULT 0,
+              bubble_rect TEXT DEFAULT '',
+              message_list_rect TEXT DEFAULT '',
+              evidence_ref TEXT DEFAULT '',
+              raw_payload_json TEXT DEFAULT '',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_qq_messages_conv_id ON qq_messages(conversation_id);
             CREATE TABLE IF NOT EXISTS rpa_events (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               event_id TEXT UNIQUE,
@@ -812,7 +876,9 @@ class PythonServiceTruthStore:
             "ALTER TABLE wechat_messages ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
             "INSERT OR IGNORE INTO wechat_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'wechat'",
             "INSERT OR IGNORE INTO qianniu_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'qianniu'",
+            "INSERT OR IGNORE INTO qq_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'qq'",
             "CREATE INDEX IF NOT EXISTS idx_qianniu_messages_platform_message_id ON qianniu_messages(platform_message_id)",
+            "CREATE INDEX IF NOT EXISTS idx_qq_messages_platform_message_id ON qq_messages(platform_message_id)",
             "ALTER TABLE conversations DROP COLUMN source_type",
             "ALTER TABLE conversations DROP COLUMN confidence",
             "ALTER TABLE conversations DROP COLUMN cache_scope",
@@ -890,6 +956,14 @@ class PythonServiceTruthStore:
         )
         effective_at = _utc_now()
         path = self._db_path or resolved_snapshot_db_path()
+        if normalized_platform == "pdd_web":
+            PDD_LOGGER.info(
+                "truth_store mutation start type=%s conversation_key=%s account_id=%s db_path=%s",
+                mutation_type,
+                normalized_key,
+                _clean(account_id),
+                path,
+            )
         conn = open_db(path)
         try:
             self._ensure_schema(conn)
@@ -920,6 +994,13 @@ class PythonServiceTruthStore:
                 (normalized_platform, normalized_key),
             ).fetchone()
             conversation_id = int(row[0]) if row else 0
+            if normalized_platform == "pdd_web":
+                PDD_LOGGER.info(
+                    "truth_store mutation located conversation_id=%s type=%s conversation_key=%s",
+                    conversation_id,
+                    mutation_type,
+                    normalized_key,
+                )
             if conversation_id > 0:
                 self._delete_conversation_message_children(conn, conversation_id)
                 conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
@@ -962,6 +1043,14 @@ class PythonServiceTruthStore:
             }
             self._append_event_log(conn, event)
             conn.commit()
+            if normalized_platform == "pdd_web":
+                PDD_LOGGER.info(
+                    "truth_store mutation committed type=%s conversation_key=%s mutation_id=%s event_type=%s",
+                    mutation_type,
+                    normalized_key,
+                    mutation_id,
+                    event_type,
+                )
         finally:
             conn.close()
 
@@ -978,7 +1067,7 @@ class PythonServiceTruthStore:
         if conversation_id <= 0:
             return
 
-        for table_name in ("wechat_messages", "qianniu_messages"):
+        for table_name in ("wechat_messages", "qianniu_messages", "qq_messages"):
             conn.execute(
                 f"""
                 DELETE FROM {table_name}
@@ -1054,6 +1143,15 @@ class PythonServiceTruthStore:
             payload = event.get("payload")
             if not isinstance(payload, dict):
                 return False
+            if platform == "pdd_web":
+                PDD_LOGGER.info(
+                    "truth_store accepts pdd_web message after delete conversation_key=%s direction=%s sender_role=%s platform_msg_id=%s",
+                    conversation_key,
+                    _direction(payload.get("direction"), payload.get("sender_role")),
+                    _clean(payload.get("sender_role")),
+                    _clean(payload.get("platform_msg_id")),
+                )
+                return True
             return _direction(payload.get("direction"), payload.get("sender_role")) == "in"
         return True
 
@@ -1066,6 +1164,8 @@ class PythonServiceTruthStore:
         observed_at = _sqlite_time(event.get("occurred_at"))
         content = _clean(payload.get("content"))
         preserve_last_message = _is_history_sync_payload(payload)
+        event_type = _clean(event.get("event_type"))
+        unread_count = _unread_count_from_payload(payload) if event_type == "conversation_observed" else None
 
         row = conn.execute(
             """
@@ -1103,6 +1203,7 @@ class PythonServiceTruthStore:
                         customer_name = COALESCE(NULLIF(?, ''), customer_name),
                         last_message = COALESCE(NULLIF(?, ''), last_message),
                         last_time = COALESCE(NULLIF(?, ''), last_time),
+                        unread_count = CASE WHEN ? IS NULL THEN unread_count ELSE ? END,
                         status = 'active',
                         deleted_at = NULL,
                         updated_at = COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
@@ -1113,6 +1214,8 @@ class PythonServiceTruthStore:
                         display_name,
                         content,
                         observed_at,
+                        unread_count,
+                        unread_count,
                         observed_at,
                         conv_id,
                     ),
@@ -1125,7 +1228,7 @@ class PythonServiceTruthStore:
             INSERT INTO conversations
             (platform, platform_conversation_id, account_id, customer_name,
              last_message, last_time, unread_count, status, updated_at)
-            VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), 0, 'active',
+            VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, 'active',
                     COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
             """,
             (
@@ -1135,6 +1238,7 @@ class PythonServiceTruthStore:
                 display_name or conversation_key,
                 content,
                 observed_at,
+                int(unread_count or 0),
                 observed_at,
             ),
         )
@@ -1223,6 +1327,17 @@ class PythonServiceTruthStore:
                 "SELECT id FROM messages WHERE client_message_id = ? LIMIT 1",
                 (client_message_id,),
             ).fetchone()
+        if existing is None:
+            existing = self._find_matching_pdd_web_outbound_echo(
+                conn,
+                conversation_id,
+                event,
+                direction=direction,
+                sender=sender,
+                content=content,
+                content_type=content_type,
+                platform_msg_id=platform_msg_id,
+            )
 
         if existing:
             message_id = int(existing[0])
@@ -1312,6 +1427,64 @@ class PythonServiceTruthStore:
             len(content),
         )
 
+    def _find_matching_pdd_web_outbound_echo(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: int,
+        event: dict[str, Any],
+        *,
+        direction: str,
+        sender: str,
+        content: str,
+        content_type: str,
+        platform_msg_id: str,
+    ) -> sqlite3.Row | None:
+        if (
+            conversation_id <= 0
+            or _clean(event.get("platform")).lower() != "pdd_web"
+            or _clean(event.get("event_type")) != "message_observed"
+            or direction != "out"
+            or sender != "agent"
+            or not platform_msg_id
+            or not content
+        ):
+            return None
+
+        event_time = event.get("occurred_at")
+        target_fingerprint = _message_fingerprint(direction, sender, content, content_type)
+        rows = conn.execute(
+            """
+            SELECT id, client_message_id, content, content_type, message_time, created_at, updated_at
+            FROM messages
+            WHERE conversation_id = ?
+              AND direction = 'out'
+              AND sender = 'agent'
+              AND status IN ('pending', 'sent')
+              AND COALESCE(platform_message_id, '') = ''
+            ORDER BY id DESC
+            LIMIT 10
+            """,
+            (conversation_id,),
+        ).fetchall()
+        for row in rows:
+            if _message_fingerprint(direction, sender, row[2], row[3]) != target_fingerprint:
+                continue
+            if not (
+                _within_time_window(event_time, row[4], hours=12)
+                or _within_time_window(event_time, row[5], hours=12)
+                or _within_time_window(event_time, row[6], hours=12)
+            ):
+                continue
+            PDD_LOGGER.info(
+                "truth_store merged pdd_web outbound dom echo message_id=%s client_message_id=%s platform_msg_id=%s content_len=%s",
+                int(row[0]),
+                _clean(row[1]),
+                platform_msg_id,
+                len(content),
+            )
+            return row
+        return None
+
     def _upsert_platform_message(
         self,
         conn: sqlite3.Connection,
@@ -1320,14 +1493,14 @@ class PythonServiceTruthStore:
         event: dict[str, Any],
     ) -> None:
         platform = _clean(event.get("platform")).lower()
-        if platform not in {"wechat", "qianniu"} or message_id <= 0 or conversation_id <= 0:
+        if platform not in {"wechat", "qianniu", "qq"} or message_id <= 0 or conversation_id <= 0:
             return
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         account_id = _clean(event.get("account_id"))
         conversation_key = _clean(event.get("conversation_key"))
         platform_message_id = _clean(payload.get("platform_msg_id"))
         evidence_ref = _clean(payload.get("evidence_ref") or payload.get("content_image_path"))
-        table_prefix = "wechat" if platform == "wechat" else "qianniu"
+        table_prefix = platform
         display_column = f"{table_prefix}_display_name"
         account_column = f"{table_prefix}_account_id"
         key_column = f"{table_prefix}_conversation_key"

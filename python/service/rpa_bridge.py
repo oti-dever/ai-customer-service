@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from rpa.platforms.qianniu.adapter import PLATFORM_QIANNIU, QianniuSidecarAdapter
+from rpa.platforms.pdd_web.adapter import PLATFORM_PDD_WEB, PddWebSidecarAdapter
 from rpa.platforms.wechat.adapter import PLATFORM_WECHAT, WechatSidecarAdapter, clean, payload_status
 from .app_database import ensure_app_database_schema
 from .truth_store import PythonServiceTruthStore
@@ -450,9 +451,11 @@ class RpaBridge:
         self.store = RpaEventStore(truth_store=self._truth_store)
         self._wechat = WechatSidecarAdapter(self.store)
         self._qianniu = QianniuSidecarAdapter(self.store)
+        self._pdd_web = PddWebSidecarAdapter(self.store)
         self._adapters = {
             PLATFORM_WECHAT: self._wechat,
             PLATFORM_QIANNIU: self._qianniu,
+            PLATFORM_PDD_WEB: self._pdd_web,
         }
         self._event_client = _EventPushClient()
         self._command_server = _CommandWebSocketServer(self, command_ws_host, command_ws_port)
@@ -647,14 +650,25 @@ class RpaBridge:
             observer_thread = getattr(adapter, "_observer_thread", None)
             observer_running = bool(observer_thread is not None and observer_thread.is_alive())
             account_id = clean(getattr(adapter, "_account_id", ""))
+            health: dict[str, Any] = {}
+            try:
+                raw_health = adapter.health()
+                if isinstance(raw_health, dict):
+                    raw_detail = raw_health.get("health")
+                    health = raw_detail if isinstance(raw_detail, dict) else {}
+            except Exception:
+                logging.exception("failed to collect platform health platform=%s", platform)
             return {
                 "platform": platform,
                 "display_name": display_name,
                 "registered": True,
                 "connected": connected,
-                "listening": connected and observer_running,
+                "listening": connected and (observer_running or platform == PLATFORM_PDD_WEB),
                 "observer_running": observer_running,
                 "account_id": account_id,
+                "health": health,
+                "healthy": bool(health.get("healthy")),
+                "reason": clean(health.get("reason")),
             }
 
         return {
@@ -663,6 +677,7 @@ class RpaBridge:
             "platforms": [
                 adapter_status(PLATFORM_WECHAT, "微信", self._wechat),
                 adapter_status(PLATFORM_QIANNIU, "千牛", self._qianniu),
+                adapter_status(PLATFORM_PDD_WEB, "PDD Web", self._pdd_web),
             ],
         }
 

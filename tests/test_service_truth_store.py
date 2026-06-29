@@ -220,6 +220,77 @@ class ServiceTruthStoreTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_pdd_outbound_dom_echo_merges_with_sent_command(self):
+        with temporary_directory() as tmp:
+            db_path = Path(tmp) / "service.db"
+            truth_store = PythonServiceTruthStore(db_path)
+            store = RpaEventStore(truth_store=truth_store)
+            original_local_now_iso = truth_store_module._local_now_iso
+
+            try:
+                truth_store_module._local_now_iso = lambda: "2026-06-03T21:01:59+08:00"
+                truth_store.persist_outbound_command(
+                    {
+                        "command": "send_message",
+                        "platform": "pdd_web",
+                        "account_id": "acct-1",
+                        "client_message_id": "pdd-cmid-1",
+                        "parameters": {
+                            "conversation_key": "pdd_web:acct-1:buyer-1",
+                            "display_name": "buyer-1",
+                            "text": "test reply",
+                            "client_message_id": "pdd-cmid-1",
+                        },
+                    }
+                )
+            finally:
+                truth_store_module._local_now_iso = original_local_now_iso
+
+            store.append(
+                {
+                    "event_id": "evt-pdd-sent-1",
+                    "event_type": "message_sent",
+                    "platform": "pdd_web",
+                    "account_id": "acct-1",
+                    "conversation_key": "pdd_web:acct-1:buyer-1",
+                    "occurred_at": "2026-06-03T13:02:00Z",
+                    "payload": {
+                        "client_message_id": "pdd-cmid-1",
+                        "status": "sent",
+                    },
+                }
+            )
+            store.append(
+                {
+                    **_message_event(
+                        "pdd-dom-msg-1",
+                        "outbound",
+                        "agent",
+                        "test reply",
+                        platform="pdd_web",
+                        conversation_key="pdd_web:acct-1:buyer-1",
+                    ),
+                    "occurred_at": "2026-06-03T13:02:05Z",
+                }
+            )
+
+            conn = sqlite3.connect(str(db_path))
+            try:
+                messages = conn.execute(
+                    """
+                    SELECT platform_message_id, client_message_id, direction,
+                           content, sender, status
+                    FROM messages
+                    ORDER BY id
+                    """
+                ).fetchall()
+                self.assertEqual(
+                    messages,
+                    [("pdd-dom-msg-1", "pdd-cmid-1", "out", "test reply", "agent", "sent")],
+                )
+            finally:
+                conn.close()
+
     def test_replay_events_reads_persisted_event_log_after_restart(self):
         with temporary_directory() as tmp:
             db_path = Path(tmp) / "service.db"
@@ -472,6 +543,78 @@ class ServiceTruthStoreTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_pdd_delete_conversation_accepts_new_inbound_and_outbound_messages(self):
+        with temporary_directory() as tmp:
+            db_path = Path(tmp) / "service.db"
+            truth_store = PythonServiceTruthStore(db_path)
+            event_store = RpaEventStore(truth_store=truth_store)
+            event_store.append(
+                _message_event(
+                    "pdd-before-delete",
+                    "inbound",
+                    "customer",
+                    "before delete",
+                    platform="pdd_web",
+                    conversation_key="pdd_web:acct-1:buyer-1",
+                )
+            )
+
+            result = truth_store.delete_conversation(
+                "pdd_web",
+                "pdd_web:acct-1:buyer-1",
+                account_id="acct-1",
+                operator="tester",
+            )
+            self.assertEqual(result["status"], "success")
+
+            event_store.append(
+                {
+                    **_message_event(
+                        "pdd-new-out",
+                        "outbound",
+                        "agent",
+                        "new outbound",
+                        platform="pdd_web",
+                        conversation_key="pdd_web:acct-1:buyer-1",
+                    ),
+                    "occurred_at": "2999-01-01T00:00:00",
+                }
+            )
+            event_store.append(
+                {
+                    **_message_event(
+                        "pdd-new-in",
+                        "inbound",
+                        "customer",
+                        "new inbound",
+                        platform="pdd_web",
+                        conversation_key="pdd_web:acct-1:buyer-1",
+                    ),
+                    "occurred_at": "2999-01-01T00:01:00",
+                }
+            )
+
+            conn = sqlite3.connect(str(db_path))
+            try:
+                messages = conn.execute(
+                    "SELECT platform_message_id, direction, content FROM messages ORDER BY id"
+                ).fetchall()
+                self.assertEqual(
+                    messages,
+                    [
+                        ("pdd-new-out", "out", "new outbound"),
+                        ("pdd-new-in", "in", "new inbound"),
+                    ],
+                )
+                conv = conn.execute(
+                    "SELECT status, deleted_at, last_message FROM conversations"
+                ).fetchone()
+                self.assertEqual(conv[0], "active")
+                self.assertIn(conv[1], (None, ""))
+                self.assertEqual(conv[2], "new inbound")
+            finally:
+                conn.close()
+
 
 def _message_event(
     platform_msg_id: str,
@@ -480,13 +623,15 @@ def _message_event(
     content: str,
     *,
     content_type: str = "text",
+    platform: str = "qianniu",
+    conversation_key: str = "qianniu:acct-1:buyer-1",
 ) -> dict:
     return {
         "event_id": f"evt-{platform_msg_id}",
         "event_type": "message_observed",
-        "platform": "qianniu",
+        "platform": platform,
         "account_id": "acct-1",
-        "conversation_key": "qianniu:acct-1:buyer-1",
+        "conversation_key": conversation_key,
         "occurred_at": "2026-06-03T13:01:00",
         "payload": {
             "platform_msg_id": platform_msg_id,

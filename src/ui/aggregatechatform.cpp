@@ -2898,6 +2898,8 @@ QStringList AggregateChatForm::selectedPlatformListenTargets() const
         platforms.append(QStringLiteral("wechat"));
     if (m_chkListenQianniu && m_chkListenQianniu->isChecked())
         platforms.append(QStringLiteral("qianniu"));
+    if (m_chkListenPdd && m_chkListenPdd->isChecked())
+        platforms.append(QStringLiteral("pdd_web"));
     return platforms;
 }
 
@@ -2920,6 +2922,10 @@ void AggregateChatForm::updatePlatformListenStatusLabel()
         || ConversationManager::instance().isPlatformListening(QStringLiteral("qianniu"))) {
         listening.append(QStringLiteral("千牛"));
     }
+    if (m_serviceListeningPlatforms.contains(QStringLiteral("pdd_web"))
+        || ConversationManager::instance().isPlatformListening(QStringLiteral("pdd_web"))) {
+        listening.append(QStringLiteral("PDD"));
+    }
     if (m_registeredListenPlatforms.isEmpty()) {
         m_platformListenStatusLabel->setText(QStringLiteral("暂无已注册平台"));
         return;
@@ -2936,6 +2942,8 @@ void AggregateChatForm::setPlatformListenControlsEnabled(bool enabled)
         m_chkListenWechat->setEnabled(enabled && m_registeredListenPlatforms.contains(QStringLiteral("wechat")));
     if (m_chkListenQianniu)
         m_chkListenQianniu->setEnabled(enabled && m_registeredListenPlatforms.contains(QStringLiteral("qianniu")));
+    if (m_chkListenPdd)
+        m_chkListenPdd->setEnabled(enabled && m_registeredListenPlatforms.contains(QStringLiteral("pdd_web")));
     if (m_btnStartPlatformListening)
         m_btnStartPlatformListening->setEnabled(enabled);
     if (m_btnStopPlatformListening)
@@ -3089,8 +3097,11 @@ QWidget* AggregateChatForm::buildLeftPanel()
     m_chkListenWechat->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
     m_chkListenQianniu = new QCheckBox(QStringLiteral("千牛"), listenCheckRow);
     m_chkListenQianniu->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
+    m_chkListenPdd = new QCheckBox(QStringLiteral("PDD"), listenCheckRow);
+    m_chkListenPdd->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
     listenCheckLayout->addWidget(m_chkListenWechat);
     listenCheckLayout->addWidget(m_chkListenQianniu);
+    listenCheckLayout->addWidget(m_chkListenPdd);
     listenCheckLayout->addStretch(1);
     listenLayout->addWidget(listenCheckRow);
 

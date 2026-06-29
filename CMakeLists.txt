@@ -60,6 +60,7 @@ set(SOURCES
     src/services/platforms/iplatformadapter.cpp
     src/services/platforms/simplatformadapter.cpp
     src/services/platforms/qianniurp_adapter.cpp
+    src/services/platforms/pddweb_adapter.cpp
     src/services/platforms/wechatrp_adapter.cpp
     src/services/app/conversationappservice.cpp
     src/services/app/aichatappservice.cpp
@@ -117,6 +118,7 @@ set(HEADERS
     src/services/platforms/iplatformadapter.h
     src/services/platforms/simplatformadapter.h
     src/services/platforms/qianniurp_adapter.h
+    src/services/platforms/pddweb_adapter.h
     src/services/platforms/wechatrp_adapter.h
     src/services/app/conversationappservice.h
     src/services/app/aichatappservice.h
