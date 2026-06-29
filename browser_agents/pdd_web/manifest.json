@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "YY PDD Web Page Agent",
+  "version": "0.1.0",
+  "description": "Local page agent for observing Pinduoduo customer-service pages.",
+  "permissions": [],
+  "host_permissions": [
+    "https://*.pinduoduo.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mms.pinduoduo.com/chat-merchant/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}
