@@ -187,6 +187,13 @@ def build_cache_snapshot(
                 message_content_image_terms.append("qm.content_image_path")
             if "evidence_ref" in qianniu_columns:
                 message_evidence_terms.append("qm.evidence_ref")
+        if _table_exists(conn, "qq_messages"):
+            qq_columns = _table_columns(conn, "qq_messages")
+            message_joins.append("LEFT JOIN qq_messages qqm ON qqm.message_id = m.id")
+            if "content_image_path" in qq_columns:
+                message_content_image_terms.append("qqm.content_image_path")
+            if "evidence_ref" in qq_columns:
+                message_evidence_terms.append("qqm.evidence_ref")
         if "content_image_path" in message_columns:
             message_content_image_terms.append("m.content_image_path")
         if "evidence_ref" in message_columns:
@@ -461,6 +468,13 @@ def build_conversation_messages(
                 message_content_image_terms.append("qm.content_image_path")
             if "evidence_ref" in qianniu_columns:
                 message_evidence_terms.append("qm.evidence_ref")
+        if _table_exists(conn, "qq_messages"):
+            qq_columns = _table_columns(conn, "qq_messages")
+            message_joins.append("LEFT JOIN qq_messages qqm ON qqm.message_id = m.id")
+            if "content_image_path" in qq_columns:
+                message_content_image_terms.append("qqm.content_image_path")
+            if "evidence_ref" in qq_columns:
+                message_evidence_terms.append("qqm.evidence_ref")
         if "content_image_path" in message_columns:
             message_content_image_terms.append("m.content_image_path")
         if "evidence_ref" in message_columns:

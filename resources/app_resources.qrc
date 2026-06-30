@@ -42,6 +42,7 @@
         <file>aggregate_reception_icons/doudian_logo_selected_icon.svg</file>
         <file>aggregate_reception_icons/wechat_logo_normal_icon.svg</file>
         <file>aggregate_reception_icons/wechat_logo_selected_icon.svg</file>
+        <file>aggregate_reception_icons/qq_logo_icon.svg</file>
         <file>aggregate_reception_icons/clear_output_normal_icon.svg</file>
         <file>aggregate_reception_icons/clear_output_selected_icon.svg</file>
         <file>aggregate_reception_icons/runtime_icon.svg</file>
@@ -57,6 +58,7 @@
         <file>aggregate_reception_icons/stop_auto_reply_icon.svg</file>
         <file>aggregate_reception_icons/sync_hitstory_messages_icon.svg</file>
         <file>aggregate_reception_icons/customer_default_avatar.png</file>
+        <file>aggregate_reception_icons/customer_avatar_icon.svg</file>
         <file>question_mark_icon.svg</file>
         <file>bug_log_icon.svg</file>
         <file>before_pinning.svg</file>

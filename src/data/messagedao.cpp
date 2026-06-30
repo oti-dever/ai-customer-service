@@ -1,6 +1,7 @@
 #include "messagedao.h"
 #include "database.h"
 #include "qianniuconversationdao.h"
+#include "qqmessagedao.h"
 #include "wechatmessagedao.h"
 #include <QDebug>
 #include <QJsonObject>
@@ -151,15 +152,16 @@ QString messageSelectProjection()
 {
     return QStringLiteral(
         "SELECT m.*, "
-        "COALESCE(wm.original_timestamp, qm.original_timestamp, '') AS original_timestamp, "
-        "COALESCE(NULLIF(wm.content_image_path, ''), NULLIF(qm.content_image_path, ''), "
-        "NULLIF(wm.evidence_ref, ''), NULLIF(qm.evidence_ref, ''), '') AS content_image_path, "
-        "COALESCE(wm.source_type, qm.source_type, '') AS source_type, "
-        "COALESCE(wm.confidence, qm.confidence) AS confidence, "
-        "COALESCE(wm.verification_status, qm.verification_status, '') AS verification_status "
+        "COALESCE(wm.original_timestamp, qm.original_timestamp, qqm.original_timestamp, '') AS original_timestamp, "
+        "COALESCE(NULLIF(wm.content_image_path, ''), NULLIF(qm.content_image_path, ''), NULLIF(qqm.content_image_path, ''), "
+        "NULLIF(wm.evidence_ref, ''), NULLIF(qm.evidence_ref, ''), NULLIF(qqm.evidence_ref, ''), '') AS content_image_path, "
+        "COALESCE(wm.source_type, qm.source_type, qqm.source_type, '') AS source_type, "
+        "COALESCE(wm.confidence, qm.confidence, qqm.confidence) AS confidence, "
+        "COALESCE(wm.verification_status, qm.verification_status, qqm.verification_status, '') AS verification_status "
         "FROM messages m "
         "LEFT JOIN wechat_messages wm ON wm.message_id = m.id "
-        "LEFT JOIN qianniu_messages qm ON qm.message_id = m.id ");
+        "LEFT JOIN qianniu_messages qm ON qm.message_id = m.id "
+        "LEFT JOIN qq_messages qqm ON qqm.message_id = m.id ");
 }
 
 bool tableExists(const QString& tableName)
@@ -655,13 +657,14 @@ std::optional<LatestInboundSnapshot> MessageDao::latestInboundSnapshot(int conve
 
     QSqlQuery q(Database::getInstance().connection());
     q.prepare(QStringLiteral(
-        "SELECT m.content, coalesce(wm.evidence_ref, qm.evidence_ref, '') "
+        "SELECT m.content, coalesce(wm.evidence_ref, qm.evidence_ref, qqm.evidence_ref, '') "
         "FROM messages m "
         "LEFT JOIN wechat_messages wm ON wm.message_id = m.id "
         "LEFT JOIN qianniu_messages qm ON qm.message_id = m.id "
+        "LEFT JOIN qq_messages qqm ON qqm.message_id = m.id "
         "WHERE m.conversation_id = :cid AND m.direction = 'in' AND "
         "(length(trim(coalesce(m.content, ''))) > 0 "
-        " OR length(trim(coalesce(wm.evidence_ref, qm.evidence_ref, ''))) > 0) "
+        " OR length(trim(coalesce(wm.evidence_ref, qm.evidence_ref, qqm.evidence_ref, ''))) > 0) "
         "ORDER BY m.id DESC LIMIT 1"));
     q.bindValue(QStringLiteral(":cid"), conversationId);
     if (!q.exec()) {
@@ -776,6 +779,9 @@ bool MessageDao::clearAllForConversation(int conversationId)
     } else if (platform == QLatin1String("qianniu")) {
         QianniuConversationDao qianniuDao;
         qianniuDao.deleteForConversation(conversationId);
+    } else if (platform == QLatin1String("qq")) {
+        QQMessageDao qqDao;
+        qqDao.deleteForConversation(conversationId);
     }
     return true;
 }

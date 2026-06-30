@@ -15,12 +15,15 @@ from urllib.parse import urlparse
 
 from rpa.platforms.qianniu.adapter import PLATFORM_QIANNIU, QianniuSidecarAdapter
 from rpa.platforms.pdd_web.adapter import PLATFORM_PDD_WEB, PddWebSidecarAdapter
+from rpa.platforms.pdd_web.pdd_logging import get_logger as get_pdd_logger
+from rpa.platforms.qq.adapter import PLATFORM_QQ, QQSidecarAdapter
 from rpa.platforms.wechat.adapter import PLATFORM_WECHAT, WechatSidecarAdapter, clean, payload_status
 from .app_database import ensure_app_database_schema
 from .truth_store import PythonServiceTruthStore
 
 
 MUTATION_OBSERVATION_QUIET_SECONDS = 3.0
+PDD_LOGGER = get_pdd_logger(__name__)
 
 
 def normalize_platform(value: Any) -> str:
@@ -452,10 +455,12 @@ class RpaBridge:
         self._wechat = WechatSidecarAdapter(self.store)
         self._qianniu = QianniuSidecarAdapter(self.store)
         self._pdd_web = PddWebSidecarAdapter(self.store)
+        self._qq = QQSidecarAdapter(self.store)
         self._adapters = {
             PLATFORM_WECHAT: self._wechat,
             PLATFORM_QIANNIU: self._qianniu,
             PLATFORM_PDD_WEB: self._pdd_web,
+            PLATFORM_QQ: self._qq,
         }
         self._event_client = _EventPushClient()
         self._command_server = _CommandWebSocketServer(self, command_ws_host, command_ws_port)
@@ -534,6 +539,14 @@ class RpaBridge:
                 or params.get("conversation_key")
                 or params.get("display_name")
             )
+            if platform == PLATFORM_PDD_WEB:
+                PDD_LOGGER.info(
+                    "PDD conversation mutation request type=%s conversation_key=%s account_id=%s keys=%s",
+                    mutation_type,
+                    conversation_key,
+                    clean(payload.get("account_id") or params.get("account_id")),
+                    sorted(payload.keys()),
+                )
             if not platform or not conversation_key:
                 return {
                     "status": "error",
@@ -543,32 +556,57 @@ class RpaBridge:
 
             active = self._mutation_blocker(platform)
             if active:
+                if platform == PLATFORM_PDD_WEB:
+                    PDD_LOGGER.info(
+                        "PDD conversation mutation blocked type=%s conversation_key=%s blocker=%s",
+                        mutation_type,
+                        conversation_key,
+                        active,
+                    )
                 return {
                     "status": "error",
                     "error": active["error"],
                     "result": active,
                 }
 
-            if mutation_type == "delete_conversation":
-                result = self._truth_store.delete_conversation(
-                    platform,
-                    conversation_key,
-                    account_id=clean(payload.get("account_id") or params.get("account_id")),
-                    operator=clean(payload.get("operator") or params.get("operator")),
-                    reason=clean(payload.get("reason") or params.get("reason")),
-                )
-            else:
-                result = self._truth_store.clear_conversation_messages(
-                    platform,
-                    conversation_key,
-                    account_id=clean(payload.get("account_id") or params.get("account_id")),
-                    operator=clean(payload.get("operator") or params.get("operator")),
-                    reason=clean(payload.get("reason") or params.get("reason")),
-                )
+            try:
+                if mutation_type == "delete_conversation":
+                    result = self._truth_store.delete_conversation(
+                        platform,
+                        conversation_key,
+                        account_id=clean(payload.get("account_id") or params.get("account_id")),
+                        operator=clean(payload.get("operator") or params.get("operator")),
+                        reason=clean(payload.get("reason") or params.get("reason")),
+                    )
+                else:
+                    result = self._truth_store.clear_conversation_messages(
+                        platform,
+                        conversation_key,
+                        account_id=clean(payload.get("account_id") or params.get("account_id")),
+                        operator=clean(payload.get("operator") or params.get("operator")),
+                        reason=clean(payload.get("reason") or params.get("reason")),
+                    )
+            except Exception:
+                if platform == PLATFORM_PDD_WEB:
+                    PDD_LOGGER.exception(
+                        "PDD conversation mutation raised type=%s conversation_key=%s",
+                        mutation_type,
+                        conversation_key,
+                    )
+                raise
 
             event = result.get("event")
             if isinstance(event, dict):
                 self.store.append(event)
+            if platform == PLATFORM_PDD_WEB:
+                PDD_LOGGER.info(
+                    "PDD conversation mutation result type=%s conversation_key=%s status=%s error=%s event_type=%s",
+                    mutation_type,
+                    conversation_key,
+                    result.get("status", ""),
+                    result.get("error", ""),
+                    event.get("event_type") if isinstance(event, dict) else "",
+                )
             return {
                 "status": result.get("status", "success"),
                 "error": result.get("error", ""),
@@ -658,12 +696,13 @@ class RpaBridge:
                     health = raw_detail if isinstance(raw_detail, dict) else {}
             except Exception:
                 logging.exception("failed to collect platform health platform=%s", platform)
+            listening = connected and (observer_running or platform == PLATFORM_PDD_WEB)
             return {
                 "platform": platform,
                 "display_name": display_name,
                 "registered": True,
                 "connected": connected,
-                "listening": connected and (observer_running or platform == PLATFORM_PDD_WEB),
+                "listening": listening,
                 "observer_running": observer_running,
                 "account_id": account_id,
                 "health": health,
@@ -677,7 +716,8 @@ class RpaBridge:
             "platforms": [
                 adapter_status(PLATFORM_WECHAT, "微信", self._wechat),
                 adapter_status(PLATFORM_QIANNIU, "千牛", self._qianniu),
-                adapter_status(PLATFORM_PDD_WEB, "PDD Web", self._pdd_web),
+                adapter_status(PLATFORM_PDD_WEB, "拼多多", self._pdd_web),
+                adapter_status(PLATFORM_QQ, "QQ", self._qq),
             ],
         }
 

@@ -1,6 +1,7 @@
 #include "conversationdao.h"
 #include "wechatmessagedao.h"
 #include "qianniuconversationdao.h"
+#include "qqmessagedao.h"
 #include "database.h"
 #include <QDebug>
 #include <QJsonObject>
@@ -730,6 +731,9 @@ bool ConversationDao::remove(int id)
     } else if (ok && conv && conv->platform == QLatin1String("qianniu")) {
         QianniuConversationDao qianniuDao;
         qianniuDao.deleteForConversation(id);
+    } else if (ok && conv && conv->platform == QLatin1String("qq")) {
+        QQMessageDao qqDao;
+        qqDao.deleteForConversation(id);
     }
     return ok;
 }

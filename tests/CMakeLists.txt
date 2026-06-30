@@ -34,6 +34,7 @@ set(DATA_LAYER_SOURCES
     ${CMAKE_SOURCE_DIR}/src/data/messagedao.cpp
     ${CMAKE_SOURCE_DIR}/src/data/wechatmessagedao.cpp
     ${CMAKE_SOURCE_DIR}/src/data/qianniuconversationdao.cpp
+    ${CMAKE_SOURCE_DIR}/src/data/qqmessagedao.cpp
 )
 
 set(AI_CORE_SOURCES

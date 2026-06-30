@@ -12,6 +12,7 @@
 #include "../data/messagedao.h"
 #include "../data/messagesendeventdao.h"
 #include "../data/qianniuconversationdao.h"
+#include "../data/qqmessagedao.h"
 #include "../data/wechatmessagedao.h"
 #include "../services/app/aichatappservice.h"
 #include "../services/app/conversationappservice.h"
@@ -105,7 +106,7 @@ namespace {
 constexpr int kAggregateRightBarModelIconBoxSide = 58;
 constexpr int kAggregateRightBarModelIconDrawSide = 56;
 constexpr int kAggregateConversationPanelDefaultWidth = 248;
-constexpr int kAggregateConversationPanelMinWidth = 236;
+constexpr int kAggregateConversationPanelMinWidth = 208;
 constexpr int kAggregateConversationPanelMaxWidth = 320;
 constexpr int kAggregateConversationPanelHideBreakpoint = 740;
 constexpr int kAggregateConversationPanelShowBreakpoint = 860;
@@ -113,9 +114,23 @@ constexpr int kAggregateConversationPanelCollapseSlop = 2;
 constexpr int kAggregateRightPanelMinWidth = 208;
 constexpr int kAggregateRightPanelPreferredMinWidth = 240;
 constexpr int kAggregateRightPanelMaxWidth = 288;
-constexpr int kAggregateChatWithRightMinWidth = 430;
+constexpr int kAggregateChatWithRightMinWidth = 360;
 constexpr int kAggregateRightPanelAutoHideBreakpoint = 700;
 constexpr int kAggregateMetricSingleColumnBreakpoint = 252;
+
+QString listenPlatformDisplayName(const QString& platform)
+{
+    const QString value = platform.trimmed().toLower();
+    if (value == QLatin1String("wechat"))
+        return QStringLiteral("微信");
+    if (value == QLatin1String("qianniu"))
+        return QStringLiteral("千牛");
+    if (value == QLatin1String("pdd_web") || value == QLatin1String("pdd"))
+        return QStringLiteral("拼多多");
+    if (value == QLatin1String("qq"))
+        return QStringLiteral("QQ");
+    return platform;
+}
 
 class ComposeTextEdit final : public QPlainTextEdit
 {
@@ -268,6 +283,36 @@ bool isHistorySyncMessage(const Models::Message& msg)
         || meta.value(QStringLiteral("preserve_conversation_last_message")).toBool(false);
 }
 
+QString conversationPlatformIconPath(const QString& platform)
+{
+    const QString value = platform.trimmed().toLower();
+    if (value == QLatin1String("qianniu"))
+        return QStringLiteral(":/aggregate_reception_icons/qianniu_logo_selected_icon.svg");
+    if (value == QLatin1String("pdd_web") || value == QLatin1String("pdd"))
+        return QStringLiteral(":/aggregate_reception_icons/pdd_logo_selected_icon.svg");
+    if (value == QLatin1String("douyin") || value == QLatin1String("doudian"))
+        return QStringLiteral(":/aggregate_reception_icons/doudian_logo_selected_icon.svg");
+    if (value == QLatin1String("wechat"))
+        return QStringLiteral(":/aggregate_reception_icons/wechat_logo_selected_icon.svg");
+    if (value == QLatin1String("qq"))
+        return QStringLiteral(":/aggregate_reception_icons/qq_logo_icon.svg");
+    return {};
+}
+
+QColor conversationPlatformAvatarBackground(const QString& platform)
+{
+    const QString value = platform.trimmed().toLower();
+    if (value == QLatin1String("wechat"))
+        return QColor(QStringLiteral("#DDF7E7"));
+    if (value == QLatin1String("pdd_web") || value == QLatin1String("pdd"))
+        return QColor(QStringLiteral("#FFE8E8"));
+    if (value == QLatin1String("douyin") || value == QLatin1String("doudian"))
+        return QColor(QStringLiteral("#FFE8EF"));
+    if (value == QLatin1String("qq"))
+        return QColor(QStringLiteral("#E5F0FF"));
+    return QColor(QStringLiteral("#DFF2FC"));
+}
+
 /** 右栏性能指标卡：高度随列宽变化，与宽度一致，接近正方形。 */
 class AggregateRightMetricCardFrame final : public QFrame
 {
@@ -340,26 +385,37 @@ public:
             painter->drawRoundedRect(r, 6, 6);
         }
 
-        const QColor avatarColor =
-            conv.platform == QLatin1String("wechat") ? QColor(QStringLiteral("#57C17A"))
-            : conv.platform == QLatin1String("pdd_web")  ? QColor(QStringLiteral("#F2A93B"))
-            : conv.platform == QLatin1String("douyin")   ? QColor(QStringLiteral("#EE4D5A"))
-                                                         : QColor(QStringLiteral("#20B8E8"));
         const int avatarSide = 44;
         const QRect avatarRect(r.left() + 8, r.top() + (r.height() - avatarSide) / 2, avatarSide, avatarSide);
-        painter->setBrush(avatarColor.lighter(172));
+        painter->setBrush(conversationPlatformAvatarBackground(conv.platform));
         painter->setPen(Qt::NoPen);
         painter->drawEllipse(avatarRect);
-        painter->setBrush(avatarColor);
+        painter->setBrush(QColor(QStringLiteral("#FFFFFF")));
         painter->drawEllipse(avatarRect.adjusted(4, 4, -4, -4));
-        painter->setPen(Qt::white);
-        QFont avatarFont(option.font);
-        avatarFont.setBold(true);
-        painter->setFont(avatarFont);
-        const QString avatarText = conv.customerName.trimmed().isEmpty()
-                                        ? QStringLiteral("?")
-                                        : conv.customerName.left(1);
-        painter->drawText(avatarRect, Qt::AlignCenter, avatarText);
+
+        const QString platformIcon = conversationPlatformIconPath(conv.platform);
+        const int iconSide = 24;
+        const QRect iconRect(avatarRect.center().x() - iconSide / 2,
+                             avatarRect.center().y() - iconSide / 2,
+                             iconSide,
+                             iconSide);
+        const QPixmap platformPixmap = platformIcon.isEmpty()
+                                           ? QPixmap()
+                                           : QIcon(platformIcon).pixmap(iconSide, iconSide);
+        if (!platformPixmap.isNull()) {
+            painter->drawPixmap(iconRect, platformPixmap);
+        } else {
+            painter->setBrush(QColor(QStringLiteral("#20B8E8")));
+            painter->drawEllipse(avatarRect.adjusted(4, 4, -4, -4));
+            painter->setPen(Qt::white);
+            QFont avatarFont(option.font);
+            avatarFont.setBold(true);
+            painter->setFont(avatarFont);
+            const QString avatarText = conv.customerName.trimmed().isEmpty()
+                                            ? QStringLiteral("?")
+                                            : conv.customerName.left(1);
+            painter->drawText(avatarRect, Qt::AlignCenter, avatarText);
+        }
 
         const QRect textRect(avatarRect.right() + 8, r.top() + 8,
                              qMax(1, r.right() - avatarRect.right() - 14), r.height() - 16);
@@ -377,31 +433,27 @@ public:
         if (conv.lastTime.isValid()) {
             timeStr = conv.lastTime.date() == QDate::currentDate()
                           ? conv.lastTime.toString(QStringLiteral("HH:mm"))
-                          : conv.lastTime.toString(QStringLiteral("M-dd"));
+                          : conv.lastTime.toString(QStringLiteral("MM/dd"));
         }
         QFont smallFont(option.font);
-        const QFontMetrics timeFm(smallFont);
-        const int titleTimeGap = 8;
-        const int timeWidth = timeStr.isEmpty() ? 0 : qMin(46, qMax(30, timeFm.horizontalAdvance(timeStr) + 2));
-        const int titleMaxWidth = qMax(1, textRect.width() - (timeWidth > 0 ? timeWidth + titleTimeGap : 0));
-        const int titleNaturalWidth = titleFm.horizontalAdvance(conv.customerName);
-        const bool titleFits = titleNaturalWidth <= titleMaxWidth;
-        const int titleDrawWidth = titleFits ? titleNaturalWidth + 2 : titleMaxWidth;
+        constexpr int kTitleTimeGap = 8;
+        constexpr int kTimeColumnWidth = 48;
+        const int timeWidth = timeStr.isEmpty() ? 0 : kTimeColumnWidth;
+        const QRect timeRect(textRect.right() - timeWidth + 1, titleY, timeWidth, titleFm.height());
+        const int titleRight = timeWidth > 0 ? timeRect.left() - kTitleTimeGap : textRect.right();
+        const int titleMaxWidth = qMax(1, titleRight - textRect.left() + 1);
 
         painter->setFont(titleFont);
         painter->setPen(QColor(QStringLiteral("#111827")));
         const QString title = titleFm.elidedText(conv.customerName, Qt::ElideRight, titleMaxWidth);
-        painter->drawText(QRect(textRect.left(), titleY, titleDrawWidth, titleFm.height()),
+        painter->drawText(QRect(textRect.left(), titleY, titleMaxWidth, titleFm.height()),
                           Qt::AlignLeft | Qt::AlignVCenter, title);
 
         painter->setFont(smallFont);
         painter->setPen(QColor(QStringLiteral("#9CA3AF")));
         if (timeWidth > 0) {
-            const int timeX = titleFits
-                                  ? qMin(textRect.right() - timeWidth, textRect.left() + titleDrawWidth + titleTimeGap)
-                                  : textRect.right() - timeWidth;
-            painter->drawText(QRect(timeX, titleY, timeWidth, titleFm.height()),
-                              Qt::AlignLeft | Qt::AlignVCenter, timeStr);
+            painter->drawText(timeRect,
+                              Qt::AlignRight | Qt::AlignVCenter, timeStr);
         }
 
         QFont previewFont(option.font);
@@ -413,9 +465,10 @@ public:
         if (hasPreview) {
             painter->setFont(previewFont);
             painter->setPen(QColor(QStringLiteral("#4B5563")));
-            preview = bodyFm.elidedText(preview, Qt::ElideRight, textRect.width() - (conv.unreadCount > 0 ? 22 : 0));
+            const int previewWidth = qMax(1, textRect.width() - (conv.unreadCount > 0 ? 26 : 0));
+            preview = bodyFm.elidedText(preview, Qt::ElideRight, previewWidth);
             painter->drawText(QRect(textRect.left(), titleY + titleFm.height() + 8,
-                                    textRect.width() - (conv.unreadCount > 0 ? 22 : 0), bodyFm.height() + 4),
+                                    previewWidth, bodyFm.height() + 4),
                               Qt::AlignLeft | Qt::AlignTop, preview);
         }
 
@@ -530,14 +583,9 @@ public:
         const int topY = rowRect.top() + qMax(0, (rowRect.height() - totalBubbleH) / 2);
 
         const QRect avatarRect(avatarX, topY + metaH, avatarSide, avatarSide);
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(outgoing ? QColor(QStringLiteral("#5C8DF6")) : QColor(QStringLiteral("#E5E7EB")));
-        painter->drawRoundedRect(avatarRect, avatarSide / 2, avatarSide / 2);
         const QPixmap& avatarPixmap = outgoing ? m_selfAvatarPixmap : m_customerAvatarPixmap;
         if (!avatarPixmap.isNull())
             painter->drawPixmap(avatarRect, avatarPixmap);
-        painter->setPen(outgoing ? Qt::white : QColor(QStringLiteral("#64748B")));
-        painter->drawText(avatarRect, Qt::AlignCenter, outgoing ? QStringLiteral("我") : QStringLiteral("客"));
 
         if (outgoing) {
             const QRect metaRect(rowRect.left(), topY, bubbleX + bubbleW - rowRect.left(), metaH);
@@ -622,7 +670,8 @@ private:
 
     static int messageMetaHeight(const MessageRecord& msg)
     {
-        return (!msg.senderName.isEmpty() || msg.createdAt.isValid() || !msg.originalTimestamp.isEmpty()) ? 18 : 0;
+        Q_UNUSED(msg)
+        return 0;
     }
 
     static int messageImageHeight(const MessageRecord& msg, int bubbleWidth)
@@ -680,20 +729,26 @@ public:
         m_customerAvatarPixmap = avatar;
     }
 
+    void clearSizeHintCache()
+    {
+        m_sizeHintCache.clear();
+    }
+
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
     {
         if (index.data(MessageListModel::IsSeparatorRole).toBool())
-            return { qMax(320, option.rect.width()), 48 };
+            return { qMax(1, option.rect.width()), 48 };
 
         const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
-        const int rowWidth = qMax(320, option.rect.width());
+        const int rowWidth = qMax(1, option.rect.width());
         const QString cacheKey = sizeHintCacheKey(msg, rowWidth, option.font);
         if (const auto it = m_sizeHintCache.constFind(cacheKey); it != m_sizeHintCache.constEnd())
             return it.value();
 
         const QFont bodyFont = bodyTextFont(option.font);
         const QFont statusFont = statusTextFont(option.font);
-        const int bubbleMax = qMin(360, qMax(180, option.rect.width() - 170));
+        const MessageLayoutMetrics metrics = messageLayoutMetrics(QRect(0, 0, rowWidth, 1));
+        const int bubbleMax = metrics.bubbleMax;
         const int bubbleWidth = messageBubbleWidth(msg, bubbleMax, bodyFont);
         const int h = messageMetaHeight(msg) + messageBubbleHeight(msg, bubbleWidth, bodyFont, statusFont) + 12;
         const QSize result(rowWidth, qMax(60, h));
@@ -709,17 +764,19 @@ public:
         painter->setRenderHint(QPainter::Antialiasing);
 
         if (index.data(MessageListModel::IsSeparatorRole).toBool()) {
-            paintDateSeparator(painter, option, index.data(MessageListModel::SeparatorDateRole).toDate());
+            paintDateSeparator(painter, option, index.data(MessageListModel::SeparatorTextRole).toString());
             painter->restore();
             return;
         }
 
         const MessageRecord msg = index.data(MessageListModel::MessageRole).value<MessageRecord>();
         const bool outgoing = msg.direction == QLatin1String("out");
-        const QRect rowRect = option.rect.adjusted(24, 3, -24, -3);
-        const int avatarSide = 40;
-        const int gap = 12;
-        const int bubbleMax = qMin(360, qMax(180, rowRect.width() - avatarSide - gap - 96));
+        const MessageLayoutMetrics metrics = messageLayoutMetrics(option.rect);
+        const QRect rowRect = metrics.rowRect;
+        const QRect laneRect = metrics.laneRect;
+        const int avatarSide = metrics.avatarSide;
+        const int gap = metrics.gap;
+        const int bubbleMax = metrics.bubbleMax;
         const QFont bodyFont = bodyTextFont(option.font);
         const QFont metaFont = metaTextFont(option.font);
         const QFont statusFont = statusTextFont(option.font);
@@ -727,7 +784,7 @@ public:
         const int metaH = messageMetaHeight(msg);
         const int bubbleH = messageBubbleHeight(msg, bubbleW, bodyFont, statusFont);
         const int totalH = metaH + bubbleH;
-        const int avatarX = outgoing ? rowRect.right() - avatarSide : rowRect.left();
+        const int avatarX = outgoing ? laneRect.right() - avatarSide + 1 : laneRect.left();
         const int bubbleX = outgoing ? avatarX - gap - bubbleW : avatarX + avatarSide + gap;
         const int topY = rowRect.top() + qMax(0, (rowRect.height() - totalH) / 2);
 
@@ -748,6 +805,45 @@ public:
     }
 
 private:
+    struct MessageLayoutMetrics {
+        QRect rowRect;
+        QRect laneRect;
+        int avatarSide = 40;
+        int gap = 12;
+        int bubbleMax = 1;
+    };
+
+    static MessageLayoutMetrics messageLayoutMetrics(const QRect& optionRect)
+    {
+        const int viewportW = qMax(1, optionRect.width());
+        const int sidePad = viewportW < 340 ? 10 : (viewportW < 520 ? 16 : 24);
+        QRect rowRect = optionRect.adjusted(sidePad, 3, -sidePad, -3);
+        if (rowRect.width() < 1) {
+            rowRect = QRect(optionRect.left() + sidePad,
+                            optionRect.top() + 3,
+                            qMax(1, viewportW - sidePad * 2),
+                            qMax(1, optionRect.height() - 6));
+        }
+
+        const int laneMax = 760;
+        const int laneW = qMax(1, qMin(rowRect.width(), laneMax));
+        const int laneLeft = rowRect.left() + qMax(0, (rowRect.width() - laneW) / 2);
+        QRect laneRect(laneLeft, rowRect.top(), laneW, rowRect.height());
+
+        MessageLayoutMetrics metrics;
+        metrics.rowRect = rowRect;
+        metrics.laneRect = laneRect;
+        metrics.avatarSide = laneW < 300 ? 32 : (laneW < 420 ? 36 : 40);
+        metrics.gap = laneW < 300 ? 8 : 12;
+
+        const int contentAvailable = qMax(1, laneW - metrics.avatarSide - metrics.gap);
+        const qreal widthRatio = laneW < 360 ? 0.72 : 0.68;
+        const int proportionalMax = qMax(1, qRound(laneW * widthRatio));
+        const int hardMax = laneW < 420 ? 360 : 420;
+        metrics.bubbleMax = qMax(1, qMin(qMin(hardMax, proportionalMax), contentAvailable));
+        return metrics;
+    }
+
     static QFont bodyTextFont(const QFont& base)
     {
         QFont f(base);
@@ -780,7 +876,8 @@ private:
 
     static int messageMetaHeight(const MessageRecord& msg)
     {
-        return (!msg.senderName.isEmpty() || msg.createdAt.isValid() || !msg.originalTimestamp.isEmpty()) ? 18 : 0;
+        Q_UNUSED(msg)
+        return 0;
     }
 
     static QString normalizedContentType(const MessageRecord& msg)
@@ -1046,13 +1143,11 @@ private:
         return lineH + 5 + ((msg.syncStatus == 12 && !msg.errorReason.isEmpty()) ? lineH + 3 : 0);
     }
 
-    void paintDateSeparator(QPainter* painter, const QStyleOptionViewItem& option, const QDate& date) const
+    void paintDateSeparator(QPainter* painter, const QStyleOptionViewItem& option, const QString& text) const
     {
-        const QString text = date == QDate::currentDate()
-                                 ? QStringLiteral("今天")
-                                 : date.toString(QStringLiteral("yyyy/MM/dd"));
+        const QString label = text.trimmed().isEmpty() ? QStringLiteral("--:--") : text.trimmed();
         QFontMetrics fm(option.font);
-        const QSize textSize(fm.horizontalAdvance(text) + 24, 28);
+        const QSize textSize(fm.horizontalAdvance(label) + 24, 28);
         const QRect pill(QPoint(option.rect.center().x() - textSize.width() / 2,
                                 option.rect.center().y() - textSize.height() / 2),
                          textSize);
@@ -1060,22 +1155,15 @@ private:
         painter->setBrush(QColor(QStringLiteral("#E5E7EB")));
         painter->drawRoundedRect(pill, 14, 14);
         painter->setPen(QColor(QStringLiteral("#6B7280")));
-        painter->drawText(pill, Qt::AlignCenter, text);
+        painter->drawText(pill, Qt::AlignCenter, label);
     }
 
     void paintAvatar(QPainter* painter, const QRect& avatarRect, bool outgoing, const QFont& baseFont) const
     {
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(QColor(QStringLiteral("#20B8E8")));
-        painter->drawEllipse(avatarRect);
+        Q_UNUSED(baseFont)
         const QPixmap& avatarPixmap = outgoing ? m_selfAvatarPixmap : m_customerAvatarPixmap;
         if (!avatarPixmap.isNull())
             painter->drawPixmap(avatarRect, avatarPixmap);
-        QFont avatarFont(baseFont);
-        avatarFont.setBold(true);
-        painter->setFont(avatarFont);
-        painter->setPen(Qt::white);
-        painter->drawText(avatarRect, Qt::AlignCenter, outgoing ? QStringLiteral("我") : QStringLiteral("客"));
     }
 
     void paintMeta(QPainter* painter, const QRect& metaRect, const MessageRecord& msg,
@@ -1309,6 +1397,23 @@ public:
     void setBottomReserve(int px)
     {
         setViewportMargins(0, 0, 0, qMax(0, px));
+    }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override
+    {
+        const bool widthChanged = !event->oldSize().isValid()
+                                  || event->oldSize().width() != event->size().width();
+        if (widthChanged) {
+            if (auto* delegate = dynamic_cast<ModernMessageItemDelegate*>(itemDelegate()))
+                delegate->clearSizeHintCache();
+        }
+        QListView::resizeEvent(event);
+        if (widthChanged) {
+            doItemsLayout();
+            if (QWidget* vp = viewport())
+                vp->update();
+        }
     }
 };
 
@@ -2016,14 +2121,18 @@ void AggregateChatForm::loadSelfBubbleIdentity()
 
     {
         const QString customerRes = QStringLiteral(
-            ":/aggregate_reception_icons/customer_default_avatar.png");
+            ":/aggregate_reception_icons/customer_avatar_icon.svg");
         QPixmap customerPm;
-        QImage cimg(customerRes);
-        if (!cimg.isNull()) {
-            customerPm = QPixmap::fromImage(
-                cimg.scaled(QSize(kAvatarLogical, kAvatarLogical) * dpr, Qt::KeepAspectRatio,
-                            Qt::SmoothTransformation));
-            customerPm.setDevicePixelRatio(dpr);
+        {
+            QPixmap canvas(QSize(kAvatarLogical, kAvatarLogical) * dpr);
+            canvas.setDevicePixelRatio(dpr);
+            canvas.fill(Qt::transparent);
+            QSvgRenderer renderer(customerRes);
+            if (renderer.isValid()) {
+                QPainter painter(&canvas);
+                renderer.render(&painter, QRectF(0, 0, canvas.width(), canvas.height()));
+                customerPm = canvas;
+            }
         }
         if (customerPm.isNull()) {
             QPixmap canvas(QSize(kAvatarLogical, kAvatarLogical) * dpr);
@@ -2081,7 +2190,7 @@ void AggregateChatForm::setupUI()
     m_hSplitter->setStretchFactor(0, 0);
     m_hSplitter->setStretchFactor(1, 1);
     m_hSplitter->setStretchFactor(2, 0);
-    m_hSplitter->setCollapsible(0, true);
+    m_hSplitter->setCollapsible(0, false);
     m_hSplitter->setCollapsible(1, false);
     m_hSplitter->setCollapsible(2, true);
     m_hSplitter->setHandleWidth(1);
@@ -2128,6 +2237,10 @@ void AggregateChatForm::setupStyles()
 
 void AggregateChatForm::backfillFromPythonService()
 {
+    if (RuntimeMode::isSingleHostServiceDb()) {
+        qInfo() << "[AggregateChatForm] python service backfill skipped in single-host unified DB mode";
+        return;
+    }
     if (!pythonServiceStartupBackfillEnabled()) {
         qInfo() << "[AggregateChatForm] python service startup backfill disabled by settings";
         return;
@@ -2140,6 +2253,8 @@ void AggregateChatForm::backfillFromPythonService()
     const QStringList platforms = {
         QStringLiteral("wechat"),
         QStringLiteral("qianniu"),
+        QStringLiteral("pdd_web"),
+        QStringLiteral("qq"),
     };
     for (const QString& platform : platforms) {
         Ipc::ResponseStatus replayStatus = Ipc::ResponseStatus::Error;
@@ -2332,32 +2447,13 @@ void AggregateChatForm::updateAdaptiveConversationLayout(bool fromUserSplitter)
 
     updateRightBarAdaptiveLayout();
 
-    if (desiredMode == AggregateAdaptiveLayoutMode::Wide) {
-        m_compactConversationListForced = false;
-        if (m_leftPanelHidden && modeChanged)
-            setConversationPanelHidden(false);
-        else
-            updateCompactHeaderControls();
-        return;
-    }
-
-    if (m_compactConversationListForced) {
-        updateCompactHeaderControls();
-        return;
-    }
-
-    const QList<int> sizes = m_hSplitter->sizes();
-    const int leftWidth = sizes.value(0, 0);
-    const bool draggedToMinimum =
-        fromUserSplitter
-        && leftWidth <= kAggregateConversationPanelMinWidth + kAggregateConversationPanelCollapseSlop;
-    const bool shouldHideLeft =
-        desiredMode != AggregateAdaptiveLayoutMode::Wide || draggedToMinimum;
-    if (!m_leftPanelHidden && (modeChanged || draggedToMinimum) && shouldHideLeft) {
-        setConversationPanelHidden(true);
-        return;
-    }
-
+    Q_UNUSED(fromUserSplitter)
+    Q_UNUSED(modeChanged)
+    m_compactConversationListForced = false;
+    if (m_centerPanel && !m_centerPanel->isVisible())
+        m_centerPanel->show();
+    if (m_leftPanelHidden)
+        setConversationPanelHidden(false);
     updateCompactHeaderControls();
 }
 
@@ -2411,7 +2507,7 @@ void AggregateChatForm::updateRightBarAdaptiveLayout()
 
 void AggregateChatForm::setConversationPanelHidden(bool hidden)
 {
-    if (!m_hSplitter || !m_leftPanel)
+    if (!m_hSplitter || !m_leftPanel || !m_centerPanel)
         return;
     if (m_leftPanelHidden == hidden) {
         updateCompactHeaderControls();
@@ -2430,9 +2526,12 @@ void AggregateChatForm::setConversationPanelHidden(bool hidden)
                                           kAggregateConversationPanelMaxWidth);
         m_compactConversationListForced = false;
         m_leftPanelHidden = true;
+        m_centerPanel->show();
         m_leftPanel->hide();
         m_hSplitter->setSizes({0, centerWidth + qMax(0, leftWidth), rightWidth});
     } else {
+        if (m_centerPanel && !m_centerPanel->isVisible())
+            m_centerPanel->show();
         const int totalWidth = qMax(m_hSplitter->width(), centerWidth + rightWidth + m_lastLeftPanelWidth);
         const int restoreLeft = qBound(kAggregateConversationPanelMinWidth,
                                        m_lastLeftPanelWidth,
@@ -2453,8 +2552,7 @@ void AggregateChatForm::updateCompactHeaderControls()
 {
     if (!m_btnBackToConversationList)
         return;
-    const bool onChat = m_centerStack && m_centerStack->currentWidget() == m_chatArea;
-    m_btnBackToConversationList->setVisible(m_leftPanelHidden && onChat);
+    m_btnBackToConversationList->setVisible(false);
 }
 
 void AggregateChatForm::setRightBarHidden(bool hidden)
@@ -2565,7 +2663,7 @@ void AggregateChatForm::connectSignals()
         refreshPythonServiceButtonUi();
         refreshPlatformListenStateFromService();
         updateWechatHistorySyncButtonUi();
-        if (available && pythonServiceStartupBackfillEnabled())
+        if (available && !RuntimeMode::isSingleHostServiceDb() && pythonServiceStartupBackfillEnabled())
             backfillFromPythonService();
     });
     connect(&ipc, &Ipc::IpcService::platformEventReceived, this, [this](const QJsonObject& event) {
@@ -2648,8 +2746,10 @@ QWidget* AggregateChatForm::buildLeftToolBar()
         { ":/aggregate_reception_icons/pdd_logo_selected_icon.svg", "拼多多" },
         { ":/aggregate_reception_icons/doudian_logo_selected_icon.svg", "抖店" },
         { ":/aggregate_reception_icons/wechat_logo_selected_icon.svg", "微信" },
+        { ":/aggregate_reception_icons/qq_logo_icon.svg", "QQ" },
     };
-    for (int i = 0; i < 5; ++i) {
+    const int itemCount = int(sizeof(kItems) / sizeof(kItems[0]));
+    for (int i = 0; i < itemCount; ++i) {
         auto* btn = new QToolButton(bar);
         btn->setObjectName(QStringLiteral("aggregateToolBarButton"));
         btn->setCheckable(true);
@@ -2712,8 +2812,10 @@ void AggregateChatForm::updatePlatformToolBarButtonIcons()
         ":/aggregate_reception_icons/pdd_logo_selected_icon.svg",
         ":/aggregate_reception_icons/doudian_logo_selected_icon.svg",
         ":/aggregate_reception_icons/wechat_logo_selected_icon.svg",
+        ":/aggregate_reception_icons/qq_logo_icon.svg",
     };
-    for (int i = 0; i < 5; ++i) {
+    const int iconCount = int(sizeof(kIcons) / sizeof(kIcons[0]));
+    for (int i = 0; i < iconCount; ++i) {
         auto* b = qobject_cast<QToolButton*>(m_platformButtonGroup->button(i));
         if (!b)
             continue;
@@ -2900,6 +3002,8 @@ QStringList AggregateChatForm::selectedPlatformListenTargets() const
         platforms.append(QStringLiteral("qianniu"));
     if (m_chkListenPdd && m_chkListenPdd->isChecked())
         platforms.append(QStringLiteral("pdd_web"));
+    if (m_chkListenQQ && m_chkListenQQ->isChecked())
+        platforms.append(QStringLiteral("qq"));
     return platforms;
 }
 
@@ -2916,15 +3020,19 @@ void AggregateChatForm::updatePlatformListenStatusLabel()
     QStringList listening;
     if (m_serviceListeningPlatforms.contains(QStringLiteral("wechat"))
         || ConversationManager::instance().isPlatformListening(QStringLiteral("wechat"))) {
-        listening.append(QStringLiteral("微信"));
+        listening.append(listenPlatformDisplayName(QStringLiteral("wechat")));
     }
     if (m_serviceListeningPlatforms.contains(QStringLiteral("qianniu"))
         || ConversationManager::instance().isPlatformListening(QStringLiteral("qianniu"))) {
-        listening.append(QStringLiteral("千牛"));
+        listening.append(listenPlatformDisplayName(QStringLiteral("qianniu")));
     }
     if (m_serviceListeningPlatforms.contains(QStringLiteral("pdd_web"))
         || ConversationManager::instance().isPlatformListening(QStringLiteral("pdd_web"))) {
-        listening.append(QStringLiteral("PDD"));
+        listening.append(listenPlatformDisplayName(QStringLiteral("pdd_web")));
+    }
+    if (m_serviceListeningPlatforms.contains(QStringLiteral("qq"))
+        || ConversationManager::instance().isPlatformListening(QStringLiteral("qq"))) {
+        listening.append(listenPlatformDisplayName(QStringLiteral("qq")));
     }
     if (m_registeredListenPlatforms.isEmpty()) {
         m_platformListenStatusLabel->setText(QStringLiteral("暂无已注册平台"));
@@ -2944,6 +3052,8 @@ void AggregateChatForm::setPlatformListenControlsEnabled(bool enabled)
         m_chkListenQianniu->setEnabled(enabled && m_registeredListenPlatforms.contains(QStringLiteral("qianniu")));
     if (m_chkListenPdd)
         m_chkListenPdd->setEnabled(enabled && m_registeredListenPlatforms.contains(QStringLiteral("pdd_web")));
+    if (m_chkListenQQ)
+        m_chkListenQQ->setEnabled(enabled && m_registeredListenPlatforms.contains(QStringLiteral("qq")));
     if (m_btnStartPlatformListening)
         m_btnStartPlatformListening->setEnabled(enabled);
     if (m_btnStopPlatformListening)
@@ -2983,7 +3093,12 @@ void AggregateChatForm::refreshPlatformListenStateFromService()
     } else {
         qWarning() << "[AggregateChatForm] fetch platform statuses failed"
                    << Ipc::toString(status) << error;
-        m_registeredListenPlatforms = { QStringLiteral("wechat"), QStringLiteral("qianniu") };
+        m_registeredListenPlatforms = {
+            QStringLiteral("wechat"),
+            QStringLiteral("qianniu"),
+            QStringLiteral("pdd_web"),
+            QStringLiteral("qq"),
+        };
         m_serviceListeningPlatforms.clear();
     }
 
@@ -3002,9 +3117,17 @@ void AggregateChatForm::onStartPlatformListeningClicked()
     QStringList started;
     for (const QString& platform : platforms) {
         if (ConversationManager::instance().startPlatformListening(platform))
-            started.append(platform == QLatin1String("wechat") ? QStringLiteral("微信") : QStringLiteral("千牛"));
+            started.append(listenPlatformDisplayName(platform));
     }
     refreshPlatformListenStateFromService();
+    if (started.isEmpty()) {
+        for (const QString& platform : platforms) {
+            if (m_serviceListeningPlatforms.contains(platform)
+                || ConversationManager::instance().isPlatformListening(platform)) {
+                started.append(listenPlatformDisplayName(platform));
+            }
+        }
+    }
     if (started.isEmpty()) {
         showStatusMessage(QStringLiteral("平台监听启动失败，请检查 Python 服务"), 5000);
         return;
@@ -3023,7 +3146,7 @@ void AggregateChatForm::onStopPlatformListeningClicked()
     QStringList stopped;
     for (const QString& platform : platforms) {
         if (ConversationManager::instance().stopPlatformListening(platform))
-            stopped.append(platform == QLatin1String("wechat") ? QStringLiteral("微信") : QStringLiteral("千牛"));
+            stopped.append(listenPlatformDisplayName(platform));
     }
     refreshPlatformListenStateFromService();
     if (stopped.isEmpty()) {
@@ -3053,6 +3176,9 @@ void AggregateChatForm::updatePlatformSectionTitle()
         break;
     case AggregatePlatformFilter::Wechat:
         t = QStringLiteral("微信");
+        break;
+    case AggregatePlatformFilter::QQ:
+        t = QStringLiteral("QQ");
         break;
     }
     m_platformSectionTitle->setText(t);
@@ -3097,11 +3223,14 @@ QWidget* AggregateChatForm::buildLeftPanel()
     m_chkListenWechat->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
     m_chkListenQianniu = new QCheckBox(QStringLiteral("千牛"), listenCheckRow);
     m_chkListenQianniu->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
-    m_chkListenPdd = new QCheckBox(QStringLiteral("PDD"), listenCheckRow);
+    m_chkListenPdd = new QCheckBox(QStringLiteral("拼多多"), listenCheckRow);
     m_chkListenPdd->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
+    m_chkListenQQ = new QCheckBox(QStringLiteral("QQ"), listenCheckRow);
+    m_chkListenQQ->setObjectName(QStringLiteral("aggregatePlatformListenCheck"));
     listenCheckLayout->addWidget(m_chkListenWechat);
     listenCheckLayout->addWidget(m_chkListenQianniu);
     listenCheckLayout->addWidget(m_chkListenPdd);
+    listenCheckLayout->addWidget(m_chkListenQQ);
     listenCheckLayout->addStretch(1);
     listenLayout->addWidget(listenCheckRow);
 
@@ -3180,6 +3309,7 @@ QWidget* AggregateChatForm::buildLeftPanel()
     m_leftStack->setObjectName(QStringLiteral("aggregateLeftStack"));
     m_conversationList = new QListView(panel);
     m_conversationList->setObjectName("aggregateConversationList");
+    m_conversationList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_conversationList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_conversationList->setSelectionMode(QAbstractItemView::SingleSelection);
     m_conversationList->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -3267,7 +3397,7 @@ QWidget* AggregateChatForm::buildCenterPanel()
     m_btnBackToConversationList->setFixedSize(32, 32);
     m_btnBackToConversationList->setVisible(false);
     connect(m_btnBackToConversationList, &QToolButton::clicked, this, [this]() {
-        m_compactConversationListForced = true;
+        m_compactConversationListForced = false;
         setConversationPanelHidden(false);
     });
     headerLayout->addWidget(m_btnBackToConversationList, 0, Qt::AlignVCenter);
@@ -3305,6 +3435,7 @@ QWidget* AggregateChatForm::buildCenterPanel()
     m_messageView->setSelectionMode(QAbstractItemView::NoSelection);
     m_messageView->setFocusPolicy(Qt::NoFocus);
     m_messageView->setUniformItemSizes(false);
+    m_messageView->setResizeMode(QListView::Adjust);
     m_messageView->setMouseTracking(true);
     m_messageView->setModel(m_messageListModel);
     m_messageItemDelegate = new ModernMessageItemDelegate(m_messageView);
@@ -4661,53 +4792,10 @@ void AggregateChatForm::refreshConversationList()
                                         m_pendingStickyConvId);
     QVector<ConversationInfo> conversations;
     QHash<int, QString> lastDirections;
-    bool loadedFromService = false;
-    if (RuntimeMode::isSingleHostServiceDb()) {
-        conversations = mgr.allConversations();
-        lastDirections = msgDao.lastCachedDirectionsByConversation();
-        qInfo() << "[AggregateChatForm] conversation list loaded from app data db"
-                << "count=" << conversations.size();
-    } else if (RuntimeMode::ownsBusinessDatabase() && m_pythonServiceAvailable) {
-        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
-        QString error;
-        const QJsonObject response = Ipc::IpcService::instance().fetchConversationList(
-            QString(),
-            500,
-            5000,
-            &status,
-            &error);
-        if (status == Ipc::ResponseStatus::Success
-            && response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("success")) {
-            const QJsonArray rows = response.value(QStringLiteral("conversations")).toArray();
-            conversations.reserve(rows.size());
-            for (const QJsonValue& value : rows) {
-                const QJsonObject object = value.toObject();
-                if (object.isEmpty())
-                    continue;
-                const ConversationInfo conv = serviceConversationInfo(object);
-                if (conv.id <= 0 || conv.platform.isEmpty() || conv.platformConversationId.isEmpty())
-                    continue;
-                conversations.push_back(conv);
-                lastDirections.insert(
-                    conv.id,
-                    object.value(QStringLiteral("last_direction")).toString().trimmed().toLower());
-            }
-            loadedFromService = true;
-            qInfo() << "[AggregateChatForm] conversation list loaded from service"
-                    << "serviceCount=" << rows.size()
-                    << "mappedCount=" << conversations.size();
-        } else {
-            qWarning() << "[AggregateChatForm] service conversation list fetch failed; fallback local cache"
-                       << "status=" << Ipc::toString(status)
-                       << "error=" << error
-                       << "serviceError=" << response.value(QStringLiteral("error")).toString();
-        }
-    }
-
-    if (!RuntimeMode::isSingleHostServiceDb() && !loadedFromService) {
-        conversations = mgr.allConversations();
-        lastDirections = msgDao.lastCachedDirectionsByConversation();
-    }
+    conversations = mgr.allConversations();
+    lastDirections = msgDao.lastCachedDirectionsByConversation();
+    qInfo() << "[AggregateChatForm] conversation list loaded from unified db"
+            << "count=" << conversations.size();
     m_conversationListModel->setSourceConversations(conversations, lastDirections);
     renderConversationListFromModel();
     return;
@@ -4859,6 +4947,17 @@ void AggregateChatForm::applyCacheSnapshotToLocalCache(const QJsonObject& snapsh
                         message.value(QStringLiteral("platform_message_id")).toString(
                             message.value(QStringLiteral("platform_msg_id")).toString()),
                         message);
+                } else if (conversationPlatform == QLatin1String("qq")) {
+                    QQMessageDao qqDao;
+                    qqDao.createMessageExtension(
+                        messageId,
+                        conversationId,
+                        accountId,
+                        platformConversationId,
+                        displayName,
+                        message.value(QStringLiteral("platform_message_id")).toString(
+                            message.value(QStringLiteral("platform_msg_id")).toString()),
+                        message);
                 }
             }
         }
@@ -4884,48 +4983,7 @@ void AggregateChatForm::applyCacheSnapshotToLocalCache(const QJsonObject& snapsh
 
 QVector<MessageRecord> AggregateChatForm::messagesForDisplay(int conversationId) const
 {
-    if (RuntimeMode::isSingleHostServiceDb())
-        return ConversationManager::instance().messages(conversationId);
-
-    if (!RuntimeMode::ownsBusinessDatabase() || !m_pythonServiceAvailable)
-        return ConversationManager::instance().messages(conversationId);
-
-    const auto conv = m_conversationService
-                          ? m_conversationService->conversationById(conversationId)
-                          : std::optional<ConversationInfo>();
-    if (!conv)
-        return ConversationManager::instance().messages(conversationId);
-
-    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
-    QString error;
-    const QJsonObject response = Ipc::IpcService::instance().fetchConversationMessages(
-        conv->platform,
-        conv->platformConversationId,
-        500,
-        5000,
-        &status,
-        &error);
-    if (status != Ipc::ResponseStatus::Success
-        || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) != QLatin1String("success")) {
-        qWarning() << "[AggregateChatForm] service messages fetch failed; fallback local cache"
-                   << "conversationId=" << conversationId
-                   << "platform=" << conv->platform
-                   << "conversationKey=" << conv->platformConversationId
-                   << "status=" << Ipc::toString(status)
-                   << "error=" << error
-                   << "serviceError=" << response.value(QStringLiteral("error")).toString();
-        return ConversationManager::instance().messages(conversationId);
-    }
-
-    QVector<MessageRecord> messages;
-    const QJsonArray rows = response.value(QStringLiteral("messages")).toArray();
-    messages.reserve(rows.size());
-    for (const QJsonValue& value : rows) {
-        const QJsonObject object = value.toObject();
-        if (!object.isEmpty())
-            messages.push_back(serviceMessageRecord(object, conversationId));
-    }
-    return messages;
+    return ConversationManager::instance().messages(conversationId);
 }
 
 #if 0

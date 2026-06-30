@@ -41,6 +41,7 @@ set(SOURCES
     src/data/customerprofiledao.cpp
     src/data/wechatmessagedao.cpp
     src/data/qianniuconversationdao.cpp
+    src/data/qqmessagedao.cpp
     src/data/aiassistantdao.cpp
     src/utils/logger.cpp
     src/utils/cryptoutil.cpp
@@ -61,6 +62,7 @@ set(SOURCES
     src/services/platforms/simplatformadapter.cpp
     src/services/platforms/qianniurp_adapter.cpp
     src/services/platforms/pddweb_adapter.cpp
+    src/services/platforms/qqrpa_adapter.cpp
     src/services/platforms/wechatrp_adapter.cpp
     src/services/app/conversationappservice.cpp
     src/services/app/aichatappservice.cpp
@@ -97,6 +99,7 @@ set(HEADERS
     src/data/customerprofiledao.h
     src/data/wechatmessagedao.h
     src/data/qianniuconversationdao.h
+    src/data/qqmessagedao.h
     src/data/aiassistantdao.h
     src/utils/logger.h
     src/utils/cryptoutil.h
@@ -119,6 +122,7 @@ set(HEADERS
     src/services/platforms/simplatformadapter.h
     src/services/platforms/qianniurp_adapter.h
     src/services/platforms/pddweb_adapter.h
+    src/services/platforms/qqrpa_adapter.h
     src/services/platforms/wechatrp_adapter.h
     src/services/app/conversationappservice.h
     src/services/app/aichatappservice.h

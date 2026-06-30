@@ -49,7 +49,7 @@ class QCloseEvent;
 class QResizeEvent;
 
 /** 左侧平台工具条：与库中 `conversations.platform` 一致（如 qianniu、pdd_web、douyin、wechat）。 */
-enum class AggregatePlatformFilter { All = 0, Qianniu = 1, Pdd = 2, Doudian = 3, Wechat = 4 };
+enum class AggregatePlatformFilter { All = 0, Qianniu = 1, Pdd = 2, Doudian = 3, Wechat = 4, QQ = 5 };
 enum class AggregateConversationTab { All = 0, Pending = 1, Replied = 2 };
 enum class AggregateAdaptiveLayoutMode { Unknown = -1, Wide = 0, Medium = 1, Compact = 2 };
 
@@ -225,6 +225,7 @@ private:
     QCheckBox* m_chkListenWechat = nullptr;
     QCheckBox* m_chkListenQianniu = nullptr;
     QCheckBox* m_chkListenPdd = nullptr;
+    QCheckBox* m_chkListenQQ = nullptr;
     QPushButton* m_btnStartPlatformListening = nullptr;
     QPushButton* m_btnStopPlatformListening = nullptr;
     QLabel* m_platformListenStatusLabel = nullptr;

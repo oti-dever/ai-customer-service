@@ -22,8 +22,10 @@ BUSINESS_FACT_TABLES = [
     "messages",
     "wechat_conversations",
     "qianniu_conversations",
+    "qq_conversations",
     "wechat_messages",
     "qianniu_messages",
+    "qq_messages",
     "rpa_events",
     "conversation_mutations",
 ]
@@ -31,9 +33,11 @@ BUSINESS_FACT_TABLES = [
 DELETE_ORDER = [
     "wechat_messages",
     "qianniu_messages",
+    "qq_messages",
     "messages",
     "wechat_conversations",
     "qianniu_conversations",
+    "qq_conversations",
     "conversations",
     "rpa_events",
     "conversation_mutations",

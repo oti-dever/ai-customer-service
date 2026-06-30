@@ -2,6 +2,7 @@
 #include "../data/conversationdao.h"
 #include "../data/messagedao.h"
 #include "../data/qianniuconversationdao.h"
+#include "../data/qqmessagedao.h"
 #include "../data/wechatmessagedao.h"
 #include "../services/platforms/iplatformadapter.h"
 #include "../utils/runtimemode.h"
@@ -290,6 +291,15 @@ void MessageRouter::sendMessage(int conversationId,
                 conv->customerName,
                 QString(),
                 payload);
+        } else if (conv->platform == QLatin1String("qq")) {
+            QQMessageDao().createMessageExtension(
+                msgId,
+                conversationId,
+                conv->accountId,
+                conv->platformConversationId,
+                conv->customerName,
+                QString(),
+                payload);
         }
     }
 
@@ -511,6 +521,14 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
             msg.platformConversationId,
             msg.customerName,
             msg.metadata);
+    } else if (msg.platform == QLatin1String("qq")) {
+        QQMessageDao qqDao;
+        qqDao.upsertConversation(
+            convId,
+            QString(),
+            msg.platformConversationId,
+            msg.customerName,
+            msg.metadata);
     }
     stageTimer.restart();
     const bool historySync = isHistorySyncMessage(msg);
@@ -539,6 +557,16 @@ void MessageRouter::onIncomingMessage(const PlatformMessage& msg)
         } else if (msg.platform == QLatin1String("qianniu")) {
             QianniuConversationDao qianniuDao;
             qianniuDao.createMessageExtension(
+                msgId,
+                convId,
+                QString(),
+                msg.platformConversationId,
+                msg.customerName,
+                msg.platformMsgId,
+                msg.metadata);
+        } else if (msg.platform == QLatin1String("qq")) {
+            QQMessageDao qqDao;
+            qqDao.createMessageExtension(
                 msgId,
                 convId,
                 QString(),

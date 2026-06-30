@@ -4,6 +4,7 @@
 #include "../core/types.h"
 #include "../models/unifiedmodels.h"
 #include <QAbstractListModel>
+#include <QDateTime>
 #include <QVector>
 
 class MessageListModel : public QAbstractListModel
@@ -14,6 +15,7 @@ public:
         MessageIdRole = Qt::UserRole + 1,
         IsSeparatorRole,
         SeparatorDateRole,
+        SeparatorTextRole,
         MessageRole,
         MessageStatusRole,
     };
@@ -44,6 +46,7 @@ private:
     struct Row {
         bool separator = false;
         QDate separatorDate;
+        QString separatorText;
         MessageRecord message;
     };
 

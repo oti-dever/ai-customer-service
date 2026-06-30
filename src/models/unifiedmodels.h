@@ -13,6 +13,7 @@ enum class PlatformType {
     Mock,
     PddWeb,
     QianniuPc,
+    QQPc,
     WechatPc,
     GenericWeb,
     GenericPc,

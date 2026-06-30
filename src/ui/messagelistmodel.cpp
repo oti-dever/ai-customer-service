@@ -1,7 +1,45 @@
 #include "messagelistmodel.h"
 
+#include <QDateTime>
 #include <QSet>
 #include <QStringList>
+
+namespace {
+
+constexpr qint64 kMessageTimeSeparatorIntervalSecs = 10 * 60;
+
+QDateTime displayMessageTime(const MessageRecord& message)
+{
+    return message.createdAt.isValid() ? message.createdAt : QDateTime::currentDateTime();
+}
+
+QString messageTimeSeparatorText(const QDateTime& time, const QDateTime& previousTime)
+{
+    const QDate date = time.date();
+    if (!previousTime.isValid() || previousTime.date() != date) {
+        const QDate today = QDate::currentDate();
+        QString dayText;
+        if (date == today)
+            dayText = QStringLiteral("今天");
+        else if (date == today.addDays(-1))
+            dayText = QStringLiteral("昨天");
+        else
+            dayText = date.toString(QStringLiteral("MM/dd"));
+        return QStringLiteral("%1 %2").arg(dayText, time.toString(QStringLiteral("HH:mm")));
+    }
+    return time.toString(QStringLiteral("HH:mm"));
+}
+
+bool shouldInsertTimeSeparator(const QDateTime& time, const QDateTime& previousTime)
+{
+    if (!previousTime.isValid())
+        return true;
+    if (previousTime.date() != time.date())
+        return true;
+    return previousTime.secsTo(time) >= kMessageTimeSeparatorIntervalSecs;
+}
+
+} // namespace
 
 MessageListModel::MessageListModel(QObject* parent)
     : QAbstractListModel(parent)
@@ -25,8 +63,10 @@ QVariant MessageListModel::data(const QModelIndex& index, int role) const
             return true;
         case SeparatorDateRole:
             return row.separatorDate;
+        case SeparatorTextRole:
+            return row.separatorText;
         case Qt::DisplayRole:
-            return row.separatorDate.toString(QStringLiteral("yyyy-MM-dd"));
+            return row.separatorText;
         default:
             return {};
         }
@@ -79,25 +119,24 @@ void MessageListModel::appendMessage(const MessageRecord& message)
         return;
 
     m_conversationId = message.conversationId;
-    QDate lastMsgDate;
+    QDateTime lastMsgTime;
     for (int i = m_rows.size() - 1; i >= 0; --i) {
         if (m_rows[i].separator)
             continue;
-        lastMsgDate = m_rows[i].message.createdAt.isValid()
-            ? m_rows[i].message.createdAt.date()
-            : QDate::currentDate();
+        lastMsgTime = displayMessageTime(m_rows[i].message);
         break;
     }
-    const QDate msgDate = message.createdAt.isValid() ? message.createdAt.date() : QDate::currentDate();
-    const bool needsSeparator = !lastMsgDate.isValid() || msgDate != lastMsgDate;
+    const QDateTime msgTime = displayMessageTime(message);
+    const QDate msgDate = msgTime.date();
+    const bool needsSeparator = shouldInsertTimeSeparator(msgTime, lastMsgTime);
     const int first = m_rows.size();
     const int last = first + (needsSeparator ? 1 : 0);
     beginInsertRows(QModelIndex(), first, last);
     m_messages.push_back(message);
     if (needsSeparator) {
-        m_rows.push_back(Row{true, msgDate, {}});
+        m_rows.push_back(Row{true, msgDate, messageTimeSeparatorText(msgTime, lastMsgTime), {}});
     }
-    m_rows.push_back(Row{false, {}, message});
+    m_rows.push_back(Row{false, {}, {}, message});
     endInsertRows();
 }
 
@@ -193,13 +232,14 @@ QString MessageListModel::signature() const
 void MessageListModel::rebuildRows()
 {
     m_rows.clear();
-    QDate lastDate;
+    QDateTime lastMsgTime;
     for (const MessageRecord& msg : m_messages) {
-        const QDate msgDate = msg.createdAt.isValid() ? msg.createdAt.date() : QDate::currentDate();
-        if (!lastDate.isValid() || msgDate != lastDate) {
-            m_rows.push_back(Row{true, msgDate, {}});
-            lastDate = msgDate;
+        const QDateTime msgTime = displayMessageTime(msg);
+        const QDate msgDate = msgTime.date();
+        if (shouldInsertTimeSeparator(msgTime, lastMsgTime)) {
+            m_rows.push_back(Row{true, msgDate, messageTimeSeparatorText(msgTime, lastMsgTime), {}});
         }
-        m_rows.push_back(Row{false, {}, msg});
+        m_rows.push_back(Row{false, {}, {}, msg});
+        lastMsgTime = msgTime;
     }
 }

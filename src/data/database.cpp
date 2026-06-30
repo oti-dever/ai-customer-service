@@ -450,6 +450,23 @@ bool Database::runMigrations()
         "CREATE INDEX IF NOT EXISTS idx_qianniu_conversations_key "
         "  ON qianniu_conversations(qianniu_account_id, qianniu_conversation_key)",
 
+        "CREATE TABLE IF NOT EXISTS qq_conversations ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  conversation_id INTEGER NOT NULL UNIQUE,"
+        "  qq_account_id TEXT DEFAULT '',"
+        "  qq_conversation_key TEXT DEFAULT '',"
+        "  display_name TEXT DEFAULT '',"
+        "  last_unread_badge INTEGER DEFAULT 0,"
+        "  last_observed_at DATETIME,"
+        "  last_health_status TEXT DEFAULT '',"
+        "  raw_payload_json TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_qq_conversations_key "
+        "  ON qq_conversations(qq_account_id, qq_conversation_key)",
+
         "CREATE TABLE IF NOT EXISTS wechat_messages ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  message_id INTEGER NOT NULL UNIQUE,"
@@ -509,6 +526,36 @@ bool Database::runMigrations()
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
         ")",
         "CREATE INDEX IF NOT EXISTS idx_qianniu_messages_conv_id ON qianniu_messages(conversation_id)",
+
+        "CREATE TABLE IF NOT EXISTS qq_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  message_id INTEGER NOT NULL UNIQUE,"
+        "  conversation_id INTEGER NOT NULL,"
+        "  qq_account_id TEXT DEFAULT '',"
+        "  qq_conversation_key TEXT DEFAULT '',"
+        "  qq_display_name TEXT DEFAULT '',"
+        "  platform_message_id TEXT DEFAULT '',"
+        "  direction TEXT DEFAULT '',"
+        "  sender_role TEXT DEFAULT '',"
+        "  raw_sender TEXT DEFAULT '',"
+        "  raw_timestamp_text TEXT DEFAULT '',"
+        "  parser_source TEXT DEFAULT '',"
+        "  source_type TEXT DEFAULT '',"
+        "  confidence INTEGER DEFAULT 0,"
+        "  verification_status TEXT DEFAULT '',"
+        "  original_timestamp TEXT DEFAULT '',"
+        "  content_image_path TEXT DEFAULT '',"
+        "  role_method TEXT DEFAULT '',"
+        "  role_confidence REAL DEFAULT 0,"
+        "  bubble_rect TEXT DEFAULT '',"
+        "  message_list_rect TEXT DEFAULT '',"
+        "  evidence_ref TEXT DEFAULT '',"
+        "  raw_payload_json TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_qq_messages_conv_id ON qq_messages(conversation_id)",
 
         "CREATE TABLE IF NOT EXISTS ai_assistant_sessions ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -604,7 +651,9 @@ bool Database::runMigrations()
         "ALTER TABLE conversations DROP COLUMN display_name",
         "INSERT OR IGNORE INTO wechat_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'wechat'",
         "INSERT OR IGNORE INTO qianniu_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'qianniu'",
+        "INSERT OR IGNORE INTO qq_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'qq'",
         "CREATE INDEX IF NOT EXISTS idx_qianniu_messages_platform_message_id ON qianniu_messages(platform_message_id)",
+        "CREATE INDEX IF NOT EXISTS idx_qq_messages_platform_message_id ON qq_messages(platform_message_id)",
         "ALTER TABLE messages DROP COLUMN platform_msg_id",
         "ALTER TABLE messages DROP COLUMN sync_status",
         "ALTER TABLE messages DROP COLUMN original_timestamp",

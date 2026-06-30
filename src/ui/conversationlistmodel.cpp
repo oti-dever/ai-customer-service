@@ -157,6 +157,8 @@ QString ConversationListModel::platformFilterValue() const
         return QStringLiteral("douyin");
     case 4:
         return QStringLiteral("wechat");
+    case 5:
+        return QStringLiteral("qq");
     case 0:
     default:
         return {};
