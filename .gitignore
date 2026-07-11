@@ -44,11 +44,23 @@ python/rpa/_state/
 python/rpa/_debug/
 python/rpa/config/*.local.json
 python/rpa/_media/
+python/python/rpa/_media/
+python/rpa/.comtypes_cache/
 
 # 本地工具定位/缓存
 .locator/
 .cursor/
+.codex/
+.codex_tmp/
+.pydeps/
 python/@AutomationLog.txt
+
+# Local knowledge/runtime artifacts
+database/models/
+database/tmp_verify/
+database/knowledge_files/
+docs/知识库/
+logs/
 
 # 操作系统与杂项
 .DS_Store
