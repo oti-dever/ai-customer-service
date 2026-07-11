@@ -32,6 +32,7 @@
 #include <QMediaPlayer>
 #include <QSettings>
 #include <QSet>
+#include <QStringConverter>
 #include <QStringList>
 #include <algorithm>
 #include <utility>
@@ -51,6 +52,7 @@
 #include <QHash>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QImage>
 #include <QImageReader>
 #include <QInputDialog>
@@ -78,10 +80,13 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStandardPaths>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QStringList>
 #include <QStyle>
 #include <QSvgRenderer>
 #include <QTextDocument>
+#include <QTextStream>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -96,6 +101,8 @@
 #include <QGraphicsDropShadowEffect>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QVariantAnimation>
 #include <QEasingCurve>
 #include <functional>
@@ -127,9 +134,1910 @@ QString listenPlatformDisplayName(const QString& platform)
         return QStringLiteral("千牛");
     if (value == QLatin1String("pdd_web") || value == QLatin1String("pdd"))
         return QStringLiteral("拼多多");
+    if (value == QLatin1String("douyin") || value == QLatin1String("doudian"))
+        return QStringLiteral("抖店");
     if (value == QLatin1String("qq"))
         return QStringLiteral("QQ");
     return platform;
+}
+
+QString aggregatePlatformIdForButtonId(int id)
+{
+    switch (static_cast<AggregatePlatformFilter>(id)) {
+    case AggregatePlatformFilter::Qianniu:
+        return QStringLiteral("qianniu");
+    case AggregatePlatformFilter::Pdd:
+        return QStringLiteral("pdd_web");
+    case AggregatePlatformFilter::Doudian:
+        return QStringLiteral("douyin");
+    case AggregatePlatformFilter::Wechat:
+        return QStringLiteral("wechat");
+    case AggregatePlatformFilter::QQ:
+        return QStringLiteral("qq");
+    case AggregatePlatformFilter::All:
+    default:
+        return QString();
+    }
+}
+
+QStringList aggregateJsonStringArray(const QJsonArray& values)
+{
+    QStringList out;
+    out.reserve(values.size());
+    for (const QJsonValue& value : values) {
+        const QString text = value.toString().trimmed();
+        if (!text.isEmpty())
+            out.append(text);
+    }
+    out.removeDuplicates();
+    return out;
+}
+
+QString aggregateFirstLinkedImageName(const QList<KnowledgeSnippetContext>& snippets)
+{
+    static const QRegularExpression imageNameRegex(
+        QStringLiteral(R"((?:图片名|图片名称)\s*[=：:]\s*([^\s\r\n，,；;]+))"));
+    for (const KnowledgeSnippetContext& snippet : snippets) {
+        const QRegularExpressionMatch match = imageNameRegex.match(snippet.snippet);
+        if (match.hasMatch())
+            return match.captured(1).trimmed();
+    }
+    return {};
+}
+
+static constexpr char kAggregateRobotsSettingsKey[] = "ai/robots/list";
+static constexpr char kAggregatePlatformRobotBindingsGroup[] = "ai/platformRobotBindings";
+
+QJsonArray loadAggregateRobotConfigs()
+{
+    QSettings settings = AppSettings::create();
+    const QString raw = settings.value(QString::fromLatin1(kAggregateRobotsSettingsKey)).toString();
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
+    if (!doc.isArray())
+        return {};
+    return doc.array();
+}
+
+QString platformRobotBindingSettingsKey(const QString& platform)
+{
+    return QStringLiteral("%1/%2").arg(QString::fromLatin1(kAggregatePlatformRobotBindingsGroup),
+                                       platform.trimmed().toLower());
+}
+
+QString boundRobotIdForAggregatePlatform(const QString& platform)
+{
+    const QString normalized = platform.trimmed().toLower();
+    if (normalized.isEmpty())
+        return {};
+    QSettings settings = AppSettings::create();
+    return settings.value(platformRobotBindingSettingsKey(normalized)).toString().trimmed();
+}
+
+void saveAggregatePlatformRobotBinding(const QString& platform, const QString& robotId)
+{
+    const QString normalized = platform.trimmed().toLower();
+    if (normalized.isEmpty())
+        return;
+    QSettings settings = AppSettings::create();
+    const QString key = platformRobotBindingSettingsKey(normalized);
+    const QString trimmedRobotId = robotId.trimmed();
+    if (trimmedRobotId.isEmpty())
+        settings.remove(key);
+    else
+        settings.setValue(key, trimmedRobotId);
+}
+
+bool aggregateRobotEnabled(const QJsonObject& robot)
+{
+    const QJsonValue enabled = robot.value(QStringLiteral("enabled"));
+    if (enabled.isBool())
+        return enabled.toBool();
+    return enabled.toInt(1) != 0;
+}
+
+QJsonObject aggregateRobotById(const QString& robotId)
+{
+    const QString wanted = robotId.trimmed();
+    if (wanted.isEmpty())
+        return {};
+    const QJsonArray robots = loadAggregateRobotConfigs();
+    for (const QJsonValue& value : robots) {
+        const QJsonObject robot = value.toObject();
+        if (robot.value(QStringLiteral("robot_id")).toString() == wanted)
+            return robot;
+    }
+    return {};
+}
+
+QString aggregateRobotDisplayName(const QJsonObject& robot)
+{
+    const QString name = robot.value(QStringLiteral("robot_name")).toString().trimmed();
+    const QString id = robot.value(QStringLiteral("robot_id")).toString().trimmed();
+    if (!name.isEmpty() && !id.isEmpty())
+        return QStringLiteral("%1 / %2").arg(name, id);
+    if (!name.isEmpty())
+        return name;
+    return id.isEmpty() ? QStringLiteral("未命名机器人") : id;
+}
+
+QString aggregateRobotKnowledgeLabel(const QJsonObject& robot)
+{
+    QStringList names = aggregateJsonStringArray(robot.value(QStringLiteral("knowledge_base_names")).toArray());
+    if (names.isEmpty())
+        names = aggregateJsonStringArray(robot.value(QStringLiteral("knowledge_base_ids")).toArray());
+    if (names.isEmpty())
+        return QStringLiteral("未绑定知识库");
+    if (names.size() <= 2)
+        return names.join(QStringLiteral("、"));
+    return QStringLiteral("%1 等 %2 个知识库").arg(names.first()).arg(names.size());
+}
+
+QString aggregateRobotModelLabel(const QJsonObject& robot)
+{
+    const QString modelKey = robot.value(QStringLiteral("model_config_id")).toString().trimmed();
+    if (modelKey.isEmpty())
+        return QStringLiteral("未配置模型");
+    const QString label = aiPresetLabel(modelKey);
+    return label.trimmed().isEmpty() ? modelKey : label;
+}
+
+QString aggregatePlatformRobotTooltip(const QString& baseTip, const QString& platform)
+{
+    const QString robotId = boundRobotIdForAggregatePlatform(platform);
+    if (robotId.isEmpty())
+        return QStringLiteral("%1\n右键：绑定机器人\n当前机器人：未绑定").arg(baseTip);
+    const QJsonObject robot = aggregateRobotById(robotId);
+    if (robot.isEmpty())
+        return QStringLiteral("%1\n右键：绑定机器人\n当前机器人：已失效（%2）").arg(baseTip, robotId);
+    return QStringLiteral("%1\n右键：绑定机器人\n当前机器人：%2%3")
+        .arg(baseTip,
+             robot.value(QStringLiteral("robot_name")).toString(robotId),
+             aggregateRobotEnabled(robot) ? QString() : QStringLiteral("（停用）"));
+}
+
+bool isProductCardWithoutExplicitQuestion(const QString& text)
+{
+    QString normalized = text.trimmed();
+    if (normalized.isEmpty())
+        return false;
+    normalized.remove(QRegularExpression(QStringLiteral("\\s+")));
+
+    const bool looksLikeProductCard =
+        normalized.contains(QStringLiteral("商品ID"), Qt::CaseInsensitive)
+        || normalized.contains(QStringLiteral("商品链接"))
+        || normalized.contains(QStringLiteral("商品卡片"))
+        || normalized.contains(QStringLiteral("查看商品规格"));
+    if (!looksLikeProductCard)
+        return false;
+
+    QString questionText = normalized;
+    questionText.replace(QStringLiteral("查看商品规格"), QString());
+    questionText.replace(QStringLiteral("复制"), QString());
+
+    const QStringList questionSignals = {
+        QStringLiteral("吗"),
+        QStringLiteral("呢"),
+        QStringLiteral("?"),
+        QStringLiteral("？"),
+        QStringLiteral("怎么"),
+        QStringLiteral("多少"),
+        QStringLiteral("几"),
+        QStringLiteral("有没有"),
+        QStringLiteral("能不能"),
+        QStringLiteral("可以"),
+        QStringLiteral("是不是"),
+        QStringLiteral("发货"),
+        QStringLiteral("退"),
+        QStringLiteral("换"),
+        QStringLiteral("保修"),
+        QStringLiteral("售后"),
+        QStringLiteral("价格"),
+        QStringLiteral("优惠"),
+        QStringLiteral("活动"),
+        QStringLiteral("规格"),
+        QStringLiteral("尺寸"),
+        QStringLiteral("材质"),
+        QStringLiteral("库存"),
+    };
+    for (const QString& signal : questionSignals) {
+        if (questionText.contains(signal, Qt::CaseInsensitive))
+            return false;
+    }
+    return normalized.size() <= 80;
+}
+
+bool shouldSupplementKnowledgeQueryWithContext(const QString& latestText)
+{
+    QString normalized = latestText.trimmed();
+    if (normalized.isEmpty() || normalized.size() > 80)
+        return false;
+    normalized.remove(QRegularExpression(QStringLiteral("\\s+")));
+
+    const QStringList pronounSignals = {
+        QStringLiteral("这个"),
+        QStringLiteral("这款"),
+        QStringLiteral("这个商品"),
+        QStringLiteral("这款商品"),
+        QStringLiteral("它"),
+        QStringLiteral("那个"),
+        QStringLiteral("上面"),
+        QStringLiteral("刚才"),
+    };
+    for (const QString& signal : pronounSignals) {
+        if (normalized.contains(signal))
+            return true;
+    }
+
+    const QStringList shortQuestionSignals = {
+        QStringLiteral("可以吗"),
+        QStringLiteral("能吗"),
+        QStringLiteral("能不能"),
+        QStringLiteral("行吗"),
+        QStringLiteral("怎么处理"),
+        QStringLiteral("怎么弄"),
+        QStringLiteral("多少钱"),
+        QStringLiteral("有货吗"),
+        QStringLiteral("能退吗"),
+        QStringLiteral("能换吗"),
+        QStringLiteral("保修吗"),
+        QStringLiteral("发货吗"),
+    };
+    for (const QString& signal : shortQuestionSignals) {
+        if (normalized.contains(signal))
+            return true;
+    }
+    return false;
+}
+
+bool isImageOnlyKnowledgeQuery(const QString& latestText, const QString& imagePath)
+{
+    if (imagePath.trimmed().isEmpty())
+        return false;
+
+    const QString normalized = latestText.trimmed().toLower();
+    return normalized.isEmpty()
+        || normalized == QLatin1String("[image]")
+        || normalized == QLatin1String("image")
+        || normalized == QStringLiteral("[图片]")
+        || normalized == QStringLiteral("图片");
+}
+
+QString knowledgeContextRoleLabel(const MessageRecord& message)
+{
+    if (message.direction == QLatin1String("out"))
+        return QStringLiteral("我方");
+    if (message.direction == QLatin1String("system"))
+        return QStringLiteral("系统");
+    return QStringLiteral("客户");
+}
+
+struct AggregateKnowledgeTrace {
+    QString latestInbound;
+    QString platform;
+    QString shopId;
+    QString scene;
+    QStringList boundBaseIds;
+    QString bindingStatus;
+    QString bindingError;
+    QString searchQuery;
+    QString statusText;
+    QString errorText;
+    QString failureStage;
+    QString responseStatus;
+    int healthMs = 0;
+    int bindingHttpMs = 0;
+    int searchHttpMs = 0;
+    int totalMs = 0;
+    int serverLatencyMs = -1;
+    bool searched = false;
+    bool skipped = false;
+    QList<KnowledgeSnippetContext> snippets;
+};
+
+struct AggregateImageCandidate {
+    QString assetId;
+    QString sourceTitle;
+    QString originalFilename;
+    QString filePath;
+    QString assetType;
+    QString summary;
+    QString tags;
+    QString scenarios;
+    QString riskTags;
+    QString suggestedReply;
+    QString recommendationReason;
+    QString riskNotice;
+    QString matchType;
+    double score = 0.0;
+    bool shouldAttach = false;
+    bool requiresHumanConfirm = true;
+};
+
+struct AggregateImageTrace {
+    QString latestInbound;
+    QString platform;
+    QStringList boundBaseIds;
+    QString bindingStatus;
+    QString bindingError;
+    QString searchQuery;
+    QString resolvedProductFocus;
+    QString resolutionSource;
+    QString statusText;
+    QString errorText;
+    QString failureStage;
+    QString responseStatus;
+    int bindingHttpMs = 0;
+    int searchHttpMs = 0;
+    int totalMs = 0;
+    int serverLatencyMs = -1;
+    int rawCandidateCount = 0;
+    int filteredCandidateCount = 0;
+    bool searched = false;
+    bool skipped = false;
+    QList<AggregateImageCandidate> candidates;
+};
+
+struct AggregateReplyRuntimeConfig {
+    QString platform;
+    QString source;
+    QString statusText;
+    QString sessionModelKey;
+    QString boundRobotId;
+    QString robotName;
+    QString replyTone;
+    QString commonAddressTerms;
+    QStringList knowledgeBaseIds;
+    QStringList knowledgeBaseNames;
+    bool robotFound = false;
+    bool robotEnabled = false;
+    bool usingRobot = false;
+    bool allowAutoSendImages = false;
+    bool allowAutoSendMultiMessages = false;
+    int maxAutoSendMessages = 1;
+};
+
+AggregateReplyStrategy aggregateReplyStrategyFromRuntimeConfig(const AggregateReplyRuntimeConfig& config)
+{
+    AggregateReplyStrategy strategy;
+    strategy.replyTone = config.replyTone;
+    strategy.commonAddressTerms = config.commonAddressTerms;
+    strategy.allowAutoSendImages = config.allowAutoSendImages;
+    strategy.allowAutoSendMultiMessages = config.allowAutoSendMultiMessages;
+    strategy.maxAutoSendMessages = config.maxAutoSendMessages;
+    return strategy;
+}
+
+AggregateReplyRuntimeConfig resolveAggregateReplyRuntimeConfig(int conversationId,
+                                                               const QString& fallbackSessionModelKey)
+{
+    AggregateReplyRuntimeConfig config;
+    config.source = QStringLiteral("manual_model");
+    config.sessionModelKey = fallbackSessionModelKey.trimmed();
+    config.statusText = QStringLiteral("platform_not_bound_to_robot");
+
+    if (const auto conv = ConversationDao().findById(conversationId))
+        config.platform = conv->platform.trimmed().toLower();
+
+    const QString robotId = boundRobotIdForAggregatePlatform(config.platform);
+    config.boundRobotId = robotId;
+    if (robotId.isEmpty())
+        return config;
+
+    const QJsonObject robot = aggregateRobotById(robotId);
+    if (robot.isEmpty()) {
+        config.source = QStringLiteral("manual_model");
+        config.statusText = QStringLiteral("robot_deleted");
+        return config;
+    }
+
+    config.robotFound = true;
+    config.robotEnabled = aggregateRobotEnabled(robot);
+    config.robotName = robot.value(QStringLiteral("robot_name")).toString(robotId);
+    if (!config.robotEnabled) {
+        config.source = QStringLiteral("manual_model");
+        config.statusText = QStringLiteral("robot_disabled");
+        return config;
+    }
+
+    const QString modelKey = robot.value(QStringLiteral("model_config_id")).toString().trimmed();
+    if (modelKey.isEmpty()) {
+        config.source = QStringLiteral("manual_model");
+        config.statusText = QStringLiteral("model_config_missing");
+        return config;
+    }
+
+    config.source = QStringLiteral("robot");
+    config.statusText = QStringLiteral("robot_bound");
+    config.usingRobot = true;
+    config.sessionModelKey = modelKey;
+    config.knowledgeBaseIds = aggregateJsonStringArray(robot.value(QStringLiteral("knowledge_base_ids")).toArray());
+    config.knowledgeBaseNames = aggregateJsonStringArray(robot.value(QStringLiteral("knowledge_base_names")).toArray());
+    config.replyTone = robot.value(QStringLiteral("reply_tone"))
+                           .toString(QStringLiteral("亲切温和、不失热情"))
+                           .trimmed();
+    config.commonAddressTerms = robot.value(QStringLiteral("common_address_terms"))
+                                    .toString(QStringLiteral("亲、宝子"))
+                                    .trimmed();
+    config.allowAutoSendImages = robot.value(QStringLiteral("allow_auto_send_images")).toBool(false);
+    config.allowAutoSendMultiMessages =
+        robot.value(QStringLiteral("allow_auto_send_multi_messages")).toBool(false);
+    config.maxAutoSendMessages = config.allowAutoSendMultiMessages
+        ? qBound(1, robot.value(QStringLiteral("max_auto_send_messages")).toInt(2), 3)
+        : 1;
+    return config;
+}
+
+QStringList resolveKnowledgeBaseIdsForPlatform(const QString& platform,
+                                               QString* statusTextOut = nullptr,
+                                               QString* errorTextOut = nullptr,
+                                               int* elapsedMsOut = nullptr)
+{
+    if (statusTextOut)
+        statusTextOut->clear();
+    if (errorTextOut)
+        errorTextOut->clear();
+    if (elapsedMsOut)
+        *elapsedMsOut = 0;
+
+    const QString normalizedPlatform = platform.trimmed().toLower();
+    if (normalizedPlatform.isEmpty()) {
+        if (statusTextOut)
+            *statusTextOut = QStringLiteral("no_platform");
+        return {};
+    }
+
+    QString error;
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    QElapsedTimer timer;
+    timer.start();
+    const QJsonObject response = Ipc::IpcService::instance().fetchKnowledgePlatformBindings(
+        normalizedPlatform,
+        1500,
+        &status,
+        &error);
+    if (elapsedMsOut)
+        *elapsedMsOut = int(timer.elapsed());
+
+    const QString responseStatus = response.value(QStringLiteral("status")).toString(QStringLiteral("success"));
+    if (status != Ipc::ResponseStatus::Success || responseStatus == QLatin1String("error")) {
+        const QString detail = response.value(QStringLiteral("detail")).toString(
+            response.value(QStringLiteral("error")).toString(error));
+        if (statusTextOut)
+            *statusTextOut = status == Ipc::ResponseStatus::Timeout
+                ? QStringLiteral("binding_http_timeout")
+                : QStringLiteral("binding_error");
+        if (errorTextOut)
+            *errorTextOut = detail;
+        return {};
+    }
+
+    const QStringList baseIds = aggregateJsonStringArray(response.value(QStringLiteral("base_ids")).toArray());
+    if (statusTextOut)
+        *statusTextOut = baseIds.isEmpty() ? QStringLiteral("unbound_all_enabled") : QStringLiteral("bound");
+    return baseIds;
+}
+
+bool aggregateImageRiskIsEmpty(const QString& riskTags)
+{
+    const QString text = riskTags.trimmed();
+    return text.isEmpty()
+        || text == QLatin1String("(none)")
+        || text.compare(QStringLiteral("none"), Qt::CaseInsensitive) == 0
+        || text.compare(QStringLiteral("no_risk"), Qt::CaseInsensitive) == 0
+        || text.compare(QStringLiteral("无"), Qt::CaseInsensitive) == 0
+        || text.compare(QStringLiteral("无风险"), Qt::CaseInsensitive) == 0;
+}
+
+QString aggregateImageCandidateTitle(const AggregateImageCandidate& candidate)
+{
+    QString title = candidate.sourceTitle.trimmed();
+    if (title.isEmpty())
+        title = QFileInfo(candidate.filePath).fileName();
+    if (title.isEmpty())
+        title = QStringLiteral("建议附图");
+    return title;
+}
+
+SuggestedImageAttachment aggregateSuggestedImageFromCandidate(const AggregateImageCandidate& candidate)
+{
+    SuggestedImageAttachment item;
+    item.assetId = candidate.assetId;
+    item.title = aggregateImageCandidateTitle(candidate);
+    item.filePath = candidate.filePath;
+    item.summary = candidate.summary;
+    item.tags = candidate.tags;
+    item.scenarios = candidate.scenarios;
+    item.riskTags = candidate.riskTags;
+    item.reason = candidate.recommendationReason;
+    item.riskNotice = candidate.riskNotice;
+    item.score = candidate.score;
+    return item;
+}
+
+bool aggregateLooksLikeImageFilename(const QString& query)
+{
+    const QString text = query.trimmed().toLower();
+    return text.endsWith(QStringLiteral(".png"))
+        || text.endsWith(QStringLiteral(".jpg"))
+        || text.endsWith(QStringLiteral(".jpeg"))
+        || text.endsWith(QStringLiteral(".webp"))
+        || text.endsWith(QStringLiteral(".gif"))
+        || text.endsWith(QStringLiteral(".bmp"));
+}
+
+bool aggregateQueryRequestsImageAttachment(const QString& query)
+{
+    const QString text = query.trimmed().toLower();
+    if (text.isEmpty())
+        return false;
+    if (aggregateLooksLikeImageFilename(text))
+        return true;
+    const QStringList keywords = {
+        QStringLiteral("实拍"),
+        QStringLiteral("外观图"),
+        QStringLiteral("外观"),
+        QStringLiteral("细节图"),
+        QStringLiteral("细节"),
+        QStringLiteral("商品图"),
+        QStringLiteral("商品"),
+        QStringLiteral("图片"),
+        QStringLiteral("照片"),
+        QStringLiteral("商品图"),
+        QStringLiteral("外观图"),
+        QStringLiteral("细节图"),
+        QStringLiteral("配色图"),
+        QStringLiteral("效果图"),
+        QStringLiteral("发图"),
+        QStringLiteral("看图"),
+        QStringLiteral("有图"),
+        QStringLiteral("图看看"),
+        QStringLiteral("发我看"),
+        QStringLiteral("看一下外观"),
+        QStringLiteral("长什么样"),
+        QStringLiteral("什么样子"),
+        QStringLiteral("photo"),
+        QStringLiteral("picture"),
+        QStringLiteral("image"),
+    };
+    for (const QString& keyword : keywords) {
+        if (text.contains(keyword))
+            return true;
+    }
+    return false;
+}
+
+QString aggregateNormalizedImageText(QString text)
+{
+    text = text.toLower();
+    QString out;
+    for (const QChar ch : text) {
+        if (ch.isLetterOrNumber())
+            out.append(ch);
+    }
+    return out;
+}
+
+QString aggregateImageObjectFocus(QString query)
+{
+    query = query.toLower().trimmed();
+    const QStringList generic = {
+        QStringLiteral("看下"),
+        QStringLiteral("看看"),
+        QStringLiteral("看一下"),
+        QStringLiteral("发下"),
+        QStringLiteral("发一下"),
+        QStringLiteral("发个"),
+        QStringLiteral("有"),
+        QStringLiteral("没有"),
+        QStringLiteral("实拍图"),
+        QStringLiteral("实拍"),
+        QStringLiteral("图片"),
+        QStringLiteral("照片"),
+        QStringLiteral("图"),
+        QStringLiteral("的"),
+        QStringLiteral("吗"),
+        QStringLiteral("嘛"),
+        QStringLiteral("么"),
+        QStringLiteral("呢"),
+        QStringLiteral("可以"),
+        QStringLiteral("给我"),
+        QStringLiteral("给"),
+        QStringLiteral("亲"),
+    };
+    for (const QString& word : generic)
+        query.replace(word, QString());
+    query = aggregateNormalizedImageText(query);
+    return query.size() >= 2 ? query : QString();
+}
+
+QStringList aggregateProductModelsInText(const QString& text)
+{
+    QSet<QString> models;
+    static const QRegularExpression modelRegex(
+        QStringLiteral("K\\s*(68|87|98)\\s*(?:Pro|Max|Lite)?"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    QRegularExpressionMatchIterator it = modelRegex.globalMatch(text);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        const QString number = match.captured(1).trimmed();
+        if (!number.isEmpty())
+            models.insert(QStringLiteral("K%1").arg(number));
+    }
+    QStringList out = models.values();
+    out.sort();
+    return out;
+}
+
+bool aggregateCandidateMatchesProductFocus(const AggregateImageCandidate& candidate, const QString& productFocus)
+{
+    const QString focus = productFocus.trimmed().toUpper();
+    if (focus.isEmpty())
+        return true;
+    const QString haystack = QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6")
+                                 .arg(candidate.sourceTitle,
+                                      candidate.originalFilename,
+                                      candidate.filePath,
+                                      candidate.summary,
+                                      candidate.tags,
+                                      candidate.scenarios)
+                                 .toUpper();
+    return haystack.contains(focus);
+}
+
+bool aggregateCandidateMatchesImageObjectFocus(const AggregateImageCandidate& candidate, const QString& focusText)
+{
+    const QString focus = aggregateNormalizedImageText(focusText);
+    if (focus.isEmpty())
+        return true;
+    const QString haystack = aggregateNormalizedImageText(
+        QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6\n%7")
+            .arg(candidate.sourceTitle,
+                 candidate.originalFilename,
+                 candidate.filePath,
+                 candidate.summary,
+                 candidate.tags,
+                 candidate.scenarios,
+                 candidate.suggestedReply));
+    return haystack.contains(focus);
+}
+
+struct AggregateImageQueryResolution {
+    QString query;
+    QString productFocus;
+    QString source;
+    bool shouldSearch = true;
+};
+
+AggregateImageQueryResolution resolveAggregateImageSearchQuery(const QString& latestText,
+                                                               const QVector<MessageRecord>& recentMessages)
+{
+    AggregateImageQueryResolution resolution;
+    const QString latest = latestText.trimmed().left(800);
+    resolution.query = latest;
+    resolution.source = QStringLiteral("latest_text");
+
+    const QStringList latestModels = aggregateProductModelsInText(latest);
+    if (latestModels.size() == 1) {
+        resolution.productFocus = latestModels.first();
+        if (aggregateQueryRequestsImageAttachment(latest))
+            resolution.query = QStringLiteral("%1 实拍图 外观图 图片").arg(resolution.productFocus);
+        return resolution;
+    }
+    if (latestModels.size() > 1)
+        return resolution;
+
+    if (!aggregateQueryRequestsImageAttachment(latest))
+        return resolution;
+
+    const QString latestObjectFocus = aggregateImageObjectFocus(latest);
+    if (!latestObjectFocus.isEmpty()) {
+        resolution.productFocus = latestObjectFocus;
+        resolution.query = QStringLiteral("%1 实拍图 外观图 图片").arg(latestObjectFocus);
+        resolution.source = QStringLiteral("latest_object_focus");
+        return resolution;
+    }
+
+    for (int i = recentMessages.size() - 1; i >= 0; --i) {
+        const MessageRecord& message = recentMessages.at(i);
+        const QString content = message.content.trimmed();
+        if (content.isEmpty() || content == latest)
+            continue;
+        const QStringList models = aggregateProductModelsInText(content);
+        if (models.size() == 1) {
+            resolution.productFocus = models.first();
+            resolution.query = QStringLiteral("%1 实拍图 外观图 图片").arg(resolution.productFocus);
+            resolution.source = QStringLiteral("recent_single_model_context");
+            return resolution;
+        }
+    }
+
+    resolution.shouldSearch = false;
+    resolution.source = QStringLiteral("ambiguous_image_request_no_product_focus");
+    return resolution;
+}
+
+OutgoingMessagePart aggregateImageCandidateToOutgoingPart(const AggregateImageCandidate& candidate)
+{
+    OutgoingMessagePart part;
+    part.type = OutgoingPartType::Image;
+    const QFileInfo info(candidate.filePath);
+    part.localPath = info.absoluteFilePath();
+    part.fileName = info.fileName();
+    part.sizeBytes = info.exists() ? info.size() : 0;
+    part.mimeType = info.exists() ? QMimeDatabase().mimeTypeForFile(info).name() : QStringLiteral("image/png");
+    return part;
+}
+
+QVector<OutgoingMessagePart> aggregateAutoReplyImagePartsFromCandidates(const QList<AggregateImageCandidate>& candidates,
+                                                                        const QString& query)
+{
+    QVector<OutgoingMessagePart> parts;
+    if (!aggregateQueryRequestsImageAttachment(query))
+        return parts;
+    QSet<QString> seenPaths;
+    for (const AggregateImageCandidate& candidate : candidates) {
+        if (!candidate.shouldAttach)
+            continue;
+        const QString path = candidate.filePath.trimmed();
+        if (path.isEmpty())
+            continue;
+        const QFileInfo info(path);
+        if (!info.exists() || !info.isFile())
+            continue;
+        if (!aggregateImageRiskIsEmpty(candidate.riskTags))
+            continue;
+        const QString absolutePath = info.absoluteFilePath();
+        if (seenPaths.contains(absolutePath))
+            continue;
+        seenPaths.insert(absolutePath);
+        parts.push_back(aggregateImageCandidateToOutgoingPart(candidate));
+        if (parts.size() >= 1)
+            break;
+    }
+    return parts;
+}
+
+QString normalizedAutoReplyMessage(QString text)
+{
+    text = text.toLower().trimmed();
+    QString normalized;
+    normalized.reserve(text.size());
+    for (const QChar ch : text) {
+        if (ch.isLetterOrNumber())
+            normalized.append(ch);
+    }
+    return normalized;
+}
+
+QSet<QString> autoReplyMessageBigrams(const QString& text)
+{
+    QSet<QString> grams;
+    if (text.size() < 2) {
+        if (!text.isEmpty())
+            grams.insert(text);
+        return grams;
+    }
+    for (int i = 0; i + 1 < text.size(); ++i)
+        grams.insert(text.mid(i, 2));
+    return grams;
+}
+
+bool autoReplyMessagesAreSimilar(const QString& left, const QString& right)
+{
+    const QString a = normalizedAutoReplyMessage(left);
+    const QString b = normalizedAutoReplyMessage(right);
+    if (a.isEmpty() || b.isEmpty())
+        return false;
+    if (a == b)
+        return true;
+    if (qMin(a.size(), b.size()) >= 12 && (a.contains(b) || b.contains(a)))
+        return true;
+
+    const QSet<QString> gramsA = autoReplyMessageBigrams(a);
+    const QSet<QString> gramsB = autoReplyMessageBigrams(b);
+    if (gramsA.isEmpty() || gramsB.isEmpty())
+        return false;
+    int intersection = 0;
+    for (const QString& gram : gramsA) {
+        if (gramsB.contains(gram))
+            ++intersection;
+    }
+    const double dice = (2.0 * intersection) / double(gramsA.size() + gramsB.size());
+    return dice >= 0.72;
+}
+
+QStringList aggregateAutoReplyTextMessages(const QString& generatedText,
+                                           bool allowMultiple,
+                                           int maxMessages,
+                                           int* rawPartCountOut = nullptr)
+{
+    static const QRegularExpression separator(
+        QStringLiteral(R"((?m)^\s*-{3,}\s*MSG\s*-{3,}\s*$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    QStringList rawParts;
+    if (allowMultiple && maxMessages > 1) {
+        rawParts = generatedText.split(separator, Qt::SkipEmptyParts);
+    } else {
+        QString single = generatedText;
+        single.replace(separator, QStringLiteral("\n"));
+        rawParts.append(single);
+    }
+    if (rawPartCountOut)
+        *rawPartCountOut = rawParts.size();
+
+    QStringList messages;
+    const int limit = allowMultiple ? qBound(1, maxMessages, 3) : 1;
+    for (QString part : rawParts) {
+        part = part.trimmed();
+        if (part.isEmpty())
+            continue;
+        bool duplicate = false;
+        for (const QString& existing : std::as_const(messages)) {
+            if (autoReplyMessagesAreSimilar(existing, part)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+        messages.append(part);
+        if (messages.size() >= limit)
+            break;
+    }
+    if (messages.isEmpty() && !generatedText.trimmed().isEmpty())
+        messages.append(generatedText.trimmed());
+    return messages;
+}
+
+QString aggregateJsonStringArrayLabel(const QJsonArray& values)
+{
+    QStringList out;
+    out.reserve(values.size());
+    for (const QJsonValue& value : values) {
+        const QString text = value.toString().trimmed();
+        if (!text.isEmpty())
+            out.append(text);
+    }
+    return out.isEmpty() ? QStringLiteral("(none)") : out.join(QStringLiteral(", "));
+}
+
+bool isShortCustomerAcknowledgement(const QString& text)
+{
+    QString normalized = text.trimmed().toLower();
+    normalized.remove(QRegularExpression(QStringLiteral("[\\s，。！？,.!?~～]+")));
+    static const QSet<QString> acknowledgements = {
+        QStringLiteral("好"),
+        QStringLiteral("好的"),
+        QStringLiteral("可以"),
+        QStringLiteral("行"),
+        QStringLiteral("嗯"),
+        QStringLiteral("恩"),
+        QStringLiteral("知道了"),
+        QStringLiteral("明白了"),
+        QStringLiteral("谢谢"),
+        QStringLiteral("感谢"),
+        QStringLiteral("ok"),
+        QStringLiteral("okay"),
+    };
+    return acknowledgements.contains(normalized);
+}
+
+bool previousReplyExpectsContinuation(const QString& text)
+{
+    const QString normalized = text.trimmed();
+    if (normalized.isEmpty())
+        return false;
+    const QStringList continuationSignals = {
+        QStringLiteral("需要我"),
+        QStringLiteral("要不要"),
+        QStringLiteral("是否需要"),
+        QStringLiteral("可以帮您"),
+        QStringLiteral("可以给您"),
+        QStringLiteral("帮您推荐"),
+        QStringLiteral("给您推荐"),
+        QStringLiteral("详细介绍"),
+        QStringLiteral("补充说明"),
+        QStringLiteral("发图"),
+        QStringLiteral("实拍图"),
+        QStringLiteral("继续处理"),
+        QStringLiteral("帮您确认"),
+    };
+    for (const QString& signal : continuationSignals) {
+        if (normalized.contains(signal))
+            return true;
+    }
+    return false;
+}
+
+QString buildKnowledgeSearchQuery(const QString& latestText, const QVector<MessageRecord>& recentMessages)
+{
+    const QString latest = latestText.trimmed().left(800);
+    if (isShortCustomerAcknowledgement(latest)) {
+        for (int i = recentMessages.size() - 1; i >= 0; --i) {
+            const MessageRecord& message = recentMessages.at(i);
+            if (message.direction != QLatin1String("out"))
+                continue;
+            const QString previousReply = message.content.trimmed().left(500);
+            if (previousReplyExpectsContinuation(previousReply)) {
+                return QStringLiteral("客户已确认继续上一项服务。\n上一条客服消息：%1")
+                    .arg(previousReply)
+                    .left(800);
+            }
+            return {};
+        }
+        return {};
+    }
+    if (!shouldSupplementKnowledgeQueryWithContext(latest))
+        return latest;
+
+    QStringList contextLines;
+    for (int i = recentMessages.size() - 1; i >= 0 && contextLines.size() < 2; --i) {
+        const MessageRecord& message = recentMessages.at(i);
+        QString content = message.content.trimmed();
+        if (content.isEmpty() || content == latestText.trimmed())
+            continue;
+        content = content.left(160);
+        contextLines.prepend(QStringLiteral("%1：%2").arg(knowledgeContextRoleLabel(message), content));
+    }
+    if (contextLines.isEmpty())
+        return latest;
+
+    return QStringLiteral("客户最新咨询：%1\n最近上下文（仅用于补全指代）：%2")
+        .arg(latest, contextLines.join(QStringLiteral(" / ")))
+        .left(1000);
+}
+
+QList<KnowledgeSnippetContext> retrieveAggregateKnowledgeSnippets(int conversationId,
+                                                                  QString* statusOut,
+                                                                  AggregateKnowledgeTrace* traceOut = nullptr,
+                                                                  const AggregateReplyRuntimeConfig& runtimeConfig = {})
+{
+    if (statusOut)
+        statusOut->clear();
+    if (conversationId <= 0)
+        return {};
+
+    QElapsedTimer totalTimer;
+    totalTimer.start();
+    MessageDao messageDao;
+    const auto snap = messageDao.latestCachedInboundSnapshot(conversationId);
+    const QString queryText = snap ? snap->content.trimmed() : QString();
+    const QString imagePath = snap ? snap->contentImagePath.trimmed() : QString();
+    if (traceOut) {
+        *traceOut = AggregateKnowledgeTrace();
+        traceOut->latestInbound = queryText;
+        traceOut->shopId = QString();
+        traceOut->scene = QStringLiteral("reply_draft");
+    }
+    if (isImageOnlyKnowledgeQuery(queryText, imagePath)) {
+        if (statusOut)
+            *statusOut = QStringLiteral("知识库未检索：最新入站仅为图片消息，将由多模态模型直接理解图片。");
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("image_only_no_query");
+            traceOut->statusText = statusOut ? *statusOut : QString();
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+    if (queryText.isEmpty()) {
+        if (statusOut)
+            *statusOut = QStringLiteral("知识库未检索：最新入站消息没有可用文本。");
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("no_query");
+            traceOut->statusText = statusOut ? *statusOut : QString();
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+    if (isProductCardWithoutExplicitQuestion(queryText)) {
+        if (statusOut)
+            *statusOut = QStringLiteral("知识库未检索：最新入站仅为商品卡片/商品ID，将按新客户接待场景生成。");
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("product_card_no_query");
+            traceOut->statusText = statusOut ? *statusOut : QString();
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+    const QVector<MessageRecord> recentMessages = messageDao.listRecentCachedMessages(conversationId, 10);
+    const QString searchQuery = buildKnowledgeSearchQuery(queryText, recentMessages);
+    if (traceOut)
+        traceOut->searchQuery = searchQuery;
+    if (searchQuery.trimmed().isEmpty()) {
+        if (statusOut)
+            *statusOut = QStringLiteral("知识库未检索：客户最新消息为短确认，将结合最近聊天语境判断是继续处理还是自然收口。");
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("short_ack_context_only");
+            traceOut->statusText = statusOut ? *statusOut : QString();
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+
+    QString platform;
+    if (const auto conv = ConversationDao().findById(conversationId))
+        platform = conv->platform;
+    if (traceOut)
+        traceOut->platform = platform;
+
+    const QStringList scopedBaseIds = runtimeConfig.knowledgeBaseIds;
+    if (traceOut) {
+        traceOut->boundBaseIds = scopedBaseIds;
+        traceOut->bindingStatus = runtimeConfig.statusText;
+        traceOut->bindingError = runtimeConfig.source;
+        traceOut->bindingHttpMs = 0;
+    }
+    if (scopedBaseIds.isEmpty()) {
+        if (statusOut) {
+            if (runtimeConfig.usingRobot)
+                *statusOut = QStringLiteral("知识库未检索：当前机器人未绑定知识库。");
+            else
+                *statusOut = QStringLiteral("知识库未检索：当前平台未绑定启用机器人，将使用输入框模型生成。");
+        }
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = runtimeConfig.usingRobot
+                ? QStringLiteral("robot_no_knowledge_bases")
+                : runtimeConfig.statusText;
+            traceOut->statusText = statusOut ? *statusOut : QString();
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+
+    QString error;
+    QElapsedTimer healthTimer;
+    healthTimer.start();
+    if (!Ipc::IpcService::instance().ensureServiceAvailable(&error)) {
+        if (statusOut)
+            *statusOut = QStringLiteral("知识库不可用，已按原链路生成：%1").arg(error.left(120));
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("health_failed");
+            traceOut->healthMs = int(healthTimer.elapsed());
+            traceOut->statusText = statusOut ? *statusOut : QString();
+            traceOut->errorText = error;
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+    if (traceOut)
+        traceOut->healthMs = int(healthTimer.elapsed());
+
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    if (traceOut)
+        traceOut->searched = true;
+    QElapsedTimer searchTimer;
+    searchTimer.start();
+    const QJsonObject response = Ipc::IpcService::instance().searchKnowledge(
+        searchQuery,
+        platform,
+        QString(),
+        QStringLiteral("reply_draft"),
+        3,
+        15000,
+        &status,
+        &error,
+        scopedBaseIds);
+    if (traceOut) {
+        traceOut->searchHttpMs = int(searchTimer.elapsed());
+        traceOut->responseStatus = Ipc::toString(status);
+        traceOut->serverLatencyMs = response.value(QStringLiteral("metadata"))
+                                        .toObject()
+                                        .value(QStringLiteral("latency_ms"))
+                                        .toInt(-1);
+    }
+    if (status != Ipc::ResponseStatus::Success
+        || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+        const QString detail = response.value(QStringLiteral("detail")).toString(
+            response.value(QStringLiteral("error")).toString(error));
+        if (statusOut)
+            *statusOut = QStringLiteral("知识库检索失败，已按原链路生成：%1").arg(detail.left(120));
+        if (traceOut) {
+            traceOut->failureStage = status == Ipc::ResponseStatus::Timeout
+                ? QStringLiteral("http_timeout")
+                : QStringLiteral("server_error");
+            traceOut->statusText = statusOut ? *statusOut : QString();
+            traceOut->errorText = detail;
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+
+    QList<KnowledgeSnippetContext> snippets;
+    const QJsonArray results = response.value(QStringLiteral("results")).toArray();
+    snippets.reserve(results.size());
+    for (const QJsonValue& value : results) {
+        const QJsonObject item = value.toObject();
+        KnowledgeSnippetContext snippet;
+        snippet.chunkId = item.value(QStringLiteral("chunk_id")).toString();
+        snippet.sourceTitle = item.value(QStringLiteral("source_title")).toString();
+        snippet.titlePath = item.value(QStringLiteral("title_path")).toString();
+        snippet.snippet = item.value(QStringLiteral("snippet")).toString();
+        snippet.matchType = item.value(QStringLiteral("match_type")).toString();
+        snippet.score = item.value(QStringLiteral("score")).toDouble();
+        const QJsonObject metadata = item.value(QStringLiteral("metadata")).toObject();
+        snippet.keywordScore = item.value(QStringLiteral("keyword_score")).toDouble(
+            metadata.value(QStringLiteral("keyword_score")).toDouble());
+        snippet.vectorScore = item.value(QStringLiteral("vector_score")).toDouble(
+            metadata.value(QStringLiteral("vector_score")).toDouble());
+        if (!snippet.snippet.trimmed().isEmpty())
+            snippets.append(snippet);
+    }
+
+    if (statusOut) {
+        if (snippets.isEmpty())
+            *statusOut = QStringLiteral("知识库未命中，已按聊天上下文生成。");
+        else
+            *statusOut = QStringLiteral("已检索到 %1 条知识库片段，将优先按原文生成。").arg(snippets.size());
+    }
+    if (traceOut) {
+        traceOut->failureStage = snippets.isEmpty() ? QStringLiteral("empty_results") : QStringLiteral("success");
+        traceOut->statusText = statusOut ? *statusOut : QString();
+        traceOut->snippets = snippets;
+        traceOut->totalMs = int(totalTimer.elapsed());
+    }
+    return snippets;
+}
+
+QList<AggregateImageCandidate> retrieveAggregateImageCandidates(int conversationId,
+                                                                AggregateImageTrace* traceOut = nullptr,
+                                                                const AggregateReplyRuntimeConfig& runtimeConfig = {},
+                                                                const QList<KnowledgeSnippetContext>& knowledgeSnippets = {})
+{
+    if (conversationId <= 0)
+        return {};
+
+    QElapsedTimer totalTimer;
+    totalTimer.start();
+    MessageDao messageDao;
+    const auto snap = messageDao.latestCachedInboundSnapshot(conversationId);
+    const QString queryText = snap ? snap->content.trimmed() : QString();
+    const QString imagePath = snap ? snap->contentImagePath.trimmed() : QString();
+    if (traceOut) {
+        *traceOut = AggregateImageTrace();
+        traceOut->latestInbound = queryText;
+    }
+
+    if (isImageOnlyKnowledgeQuery(queryText, imagePath)) {
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("image_only_no_query");
+            traceOut->statusText = QStringLiteral("图片素材未检索：最新入站仅为客户图片，暂无文字 query。");
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+    if (queryText.isEmpty()) {
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("no_query");
+            traceOut->statusText = QStringLiteral("图片素材未检索：最新入站消息没有可用文本。");
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+    if (isProductCardWithoutExplicitQuestion(queryText)) {
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("product_card_no_query");
+            traceOut->statusText = QStringLiteral("图片素材未检索：最新入站仅为商品卡片/商品ID。");
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+
+    const QVector<MessageRecord> recentMessages = messageDao.listRecentCachedMessages(conversationId, 10);
+    const AggregateImageQueryResolution queryResolution = resolveAggregateImageSearchQuery(queryText, recentMessages);
+    const QString linkedImageName = aggregateFirstLinkedImageName(knowledgeSnippets);
+    const bool canSearchLinkedImage = aggregateQueryRequestsImageAttachment(queryText)
+        && !linkedImageName.trimmed().isEmpty();
+    if (!queryResolution.shouldSearch && !canSearchLinkedImage) {
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = queryResolution.source;
+            traceOut->searchQuery = queryResolution.query;
+            traceOut->resolvedProductFocus = queryResolution.productFocus;
+            traceOut->resolutionSource = queryResolution.source;
+            traceOut->statusText = QStringLiteral("图片素材未检索：客户在追问图片，但最近上下文无法确定唯一商品型号。");
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+    QString searchQuery = queryResolution.query;
+    QString productFocus = queryResolution.productFocus;
+    QString resolutionSource = queryResolution.source;
+    if (canSearchLinkedImage) {
+        searchQuery = linkedImageName.trimmed();
+        resolutionSource = QStringLiteral("knowledge_linked_image_name");
+    }
+    if (traceOut) {
+        traceOut->searchQuery = searchQuery;
+        traceOut->resolvedProductFocus = productFocus;
+        traceOut->resolutionSource = resolutionSource;
+    }
+
+    QString platform;
+    if (const auto conv = ConversationDao().findById(conversationId))
+        platform = conv->platform;
+    if (traceOut)
+        traceOut->platform = platform;
+
+    const QStringList scopedBaseIds = runtimeConfig.knowledgeBaseIds;
+    if (traceOut) {
+        traceOut->boundBaseIds = scopedBaseIds;
+        traceOut->bindingStatus = runtimeConfig.statusText;
+        traceOut->bindingError = runtimeConfig.source;
+        traceOut->bindingHttpMs = 0;
+    }
+    if (scopedBaseIds.isEmpty()) {
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = runtimeConfig.usingRobot
+                ? QStringLiteral("robot_no_knowledge_bases")
+                : runtimeConfig.statusText;
+            traceOut->statusText = runtimeConfig.usingRobot
+                ? QStringLiteral("图片素材未检索：当前机器人未绑定知识库。")
+                : QStringLiteral("图片素材未检索：当前平台未绑定启用机器人。");
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+
+    QString error;
+    if (!Ipc::IpcService::instance().ensureServiceAvailable(&error)) {
+        if (traceOut) {
+            traceOut->skipped = true;
+            traceOut->failureStage = QStringLiteral("health_failed");
+            traceOut->statusText = QStringLiteral("图片素材检索跳过：Python 服务不可用。");
+            traceOut->errorText = error;
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    if (traceOut)
+        traceOut->searched = true;
+    QElapsedTimer searchTimer;
+    searchTimer.start();
+    const QJsonObject response = Ipc::IpcService::instance().searchKnowledgeImages(
+        searchQuery,
+        platform,
+        QString(),
+        QStringLiteral("reply_draft"),
+        3,
+        15000,
+        &status,
+        &error,
+        scopedBaseIds);
+    if (traceOut) {
+        traceOut->searchHttpMs = int(searchTimer.elapsed());
+        traceOut->responseStatus = Ipc::toString(status);
+        traceOut->serverLatencyMs = response.value(QStringLiteral("metadata"))
+                                        .toObject()
+                                        .value(QStringLiteral("latency_ms"))
+                                        .toInt(-1);
+    }
+    if (status != Ipc::ResponseStatus::Success
+        || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+        const QString detail = response.value(QStringLiteral("detail")).toString(
+            response.value(QStringLiteral("error")).toString(error));
+        if (traceOut) {
+            traceOut->failureStage = status == Ipc::ResponseStatus::Timeout
+                ? QStringLiteral("http_timeout")
+                : QStringLiteral("server_error");
+            traceOut->statusText = QStringLiteral("图片素材检索失败。");
+            traceOut->errorText = detail;
+            traceOut->totalMs = int(totalTimer.elapsed());
+        }
+        return {};
+    }
+
+    QList<AggregateImageCandidate> candidates;
+    const QJsonArray results = response.value(QStringLiteral("results")).toArray();
+    candidates.reserve(results.size());
+    for (const QJsonValue& value : results) {
+        const QJsonObject item = value.toObject();
+        AggregateImageCandidate candidate;
+        candidate.assetId = item.value(QStringLiteral("asset_id")).toString(
+            item.value(QStringLiteral("source_id")).toString());
+        candidate.sourceTitle = item.value(QStringLiteral("source_title")).toString();
+        candidate.originalFilename = item.value(QStringLiteral("original_filename")).toString();
+        candidate.filePath = item.value(QStringLiteral("file_path")).toString();
+        candidate.assetType = item.value(QStringLiteral("asset_type")).toString();
+        candidate.summary = item.value(QStringLiteral("summary")).toString();
+        candidate.tags = aggregateJsonStringArrayLabel(item.value(QStringLiteral("tags")).toArray());
+        candidate.scenarios = aggregateJsonStringArrayLabel(item.value(QStringLiteral("scenarios")).toArray());
+        candidate.riskTags = aggregateJsonStringArrayLabel(item.value(QStringLiteral("risk_tags")).toArray());
+        candidate.suggestedReply = item.value(QStringLiteral("suggested_reply")).toString();
+        candidate.score = item.value(QStringLiteral("score")).toDouble();
+        candidate.matchType = item.value(QStringLiteral("match_type")).toString();
+        const QJsonObject recommendation = item.value(QStringLiteral("recommendation")).toObject();
+        candidate.shouldAttach = recommendation.value(QStringLiteral("should_attach")).toBool(false);
+        candidate.requiresHumanConfirm = recommendation.value(QStringLiteral("requires_human_confirm")).toBool(true);
+        candidate.recommendationReason = recommendation.value(QStringLiteral("reason")).toString();
+        candidate.riskNotice = recommendation.value(QStringLiteral("risk_notice")).toString();
+        if (!candidate.filePath.trimmed().isEmpty())
+            candidates.append(candidate);
+    }
+    const int rawCandidateCount = candidates.size();
+    if (!productFocus.trimmed().isEmpty()) {
+        QList<AggregateImageCandidate> filtered;
+        filtered.reserve(candidates.size());
+        for (const AggregateImageCandidate& candidate : std::as_const(candidates)) {
+            if (aggregateCandidateMatchesProductFocus(candidate, productFocus))
+                filtered.append(candidate);
+        }
+        candidates = filtered;
+    }
+    if (traceOut) {
+        traceOut->failureStage = candidates.isEmpty() ? QStringLiteral("empty_results") : QStringLiteral("success");
+        traceOut->statusText = candidates.isEmpty()
+            ? QStringLiteral("图片素材未命中。")
+            : QStringLiteral("已检索到 %1 个候选图片素材。").arg(candidates.size());
+        traceOut->rawCandidateCount = rawCandidateCount;
+        traceOut->filteredCandidateCount = candidates.size();
+        traceOut->candidates = candidates;
+        traceOut->totalMs = int(totalTimer.elapsed());
+    }
+    return candidates;
+}
+
+QString aggregateTraceRoleLabel(const QString& roleOrDirection)
+{
+    const QString value = roleOrDirection.trimmed().toLower();
+    if (value == QLatin1String("out") || value == QLatin1String("assistant"))
+        return QStringLiteral("assistant/我方");
+    if (value == QLatin1String("system"))
+        return QStringLiteral("system/系统");
+    return QStringLiteral("user/客户");
+}
+
+QString aggregateTracePartLabel(AiMessagePartKind kind)
+{
+    switch (kind) {
+    case AiMessagePartKind::Text:
+        return QStringLiteral("text");
+    case AiMessagePartKind::ImageFile:
+        return QStringLiteral("image_file");
+    case AiMessagePartKind::LocalFile:
+        return QStringLiteral("local_file");
+    }
+    return QStringLiteral("unknown");
+}
+
+QString aggregateListLabel(const QStringList& values)
+{
+    return values.isEmpty() ? QStringLiteral("(none)") : values.join(QStringLiteral(", "));
+}
+
+QString formatAggregateTraceHistory(int conversationId)
+{
+    const QVector<MessageRecord> messages = MessageDao().listRecentCachedMessages(conversationId, 10);
+    if (messages.isEmpty())
+        return QStringLiteral("(empty)");
+
+    QStringList lines;
+    for (int i = 0; i < messages.size(); ++i) {
+        const MessageRecord& message = messages.at(i);
+        QString content = message.content.trimmed();
+        if (content.isEmpty() && !message.contentImagePath.trimmed().isEmpty())
+            content = QStringLiteral("[image] %1").arg(message.contentImagePath.trimmed());
+        if (content.isEmpty())
+            content = QStringLiteral("(empty)");
+        lines << QStringLiteral("%1. %2: %3")
+                     .arg(i + 1)
+                     .arg(aggregateTraceRoleLabel(message.direction), content);
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+QString formatAggregateTraceKnowledge(const AggregateKnowledgeTrace& trace)
+{
+    QStringList lines;
+    lines << QStringLiteral("searched: %1").arg(trace.searched ? QStringLiteral("yes") : QStringLiteral("no"));
+    lines << QStringLiteral("skipped: %1").arg(trace.skipped ? QStringLiteral("yes") : QStringLiteral("no"));
+    lines << QStringLiteral("failure_stage: %1").arg(trace.failureStage);
+    lines << QStringLiteral("response_status: %1").arg(trace.responseStatus);
+    lines << QStringLiteral("health_ms: %1").arg(trace.healthMs);
+    lines << QStringLiteral("binding_http_ms: %1").arg(trace.bindingHttpMs);
+    lines << QStringLiteral("search_http_ms: %1").arg(trace.searchHttpMs);
+    lines << QStringLiteral("server_latency_ms: %1").arg(trace.serverLatencyMs);
+    lines << QStringLiteral("total_ms: %1").arg(trace.totalMs);
+    lines << QStringLiteral("platform: %1").arg(trace.platform);
+    lines << QStringLiteral("shop_id: %1").arg(trace.shopId);
+    lines << QStringLiteral("scene: %1").arg(trace.scene);
+    lines << QStringLiteral("binding_status: %1").arg(trace.bindingStatus);
+    lines << QStringLiteral("bound_base_ids: %1").arg(aggregateListLabel(trace.boundBaseIds));
+    if (!trace.bindingError.trimmed().isEmpty())
+        lines << QStringLiteral("binding_error: %1").arg(trace.bindingError.trimmed());
+    lines << QStringLiteral("status: %1").arg(trace.statusText);
+    if (!trace.errorText.trimmed().isEmpty())
+        lines << QStringLiteral("error: %1").arg(trace.errorText.trimmed());
+    lines << QStringLiteral("query:\n%1").arg(trace.searchQuery.trimmed().isEmpty()
+                                                 ? QStringLiteral("(empty)")
+                                                 : trace.searchQuery.trimmed());
+    lines << QString();
+    lines << QStringLiteral("results: %1").arg(trace.snippets.size());
+    for (int i = 0; i < trace.snippets.size(); ++i) {
+        const KnowledgeSnippetContext& item = trace.snippets.at(i);
+        lines << QStringLiteral("--- result %1 ---").arg(i + 1);
+        lines << QStringLiteral("chunk_id: %1").arg(item.chunkId);
+        lines << QStringLiteral("source_title: %1").arg(item.sourceTitle);
+        lines << QStringLiteral("title_path: %1").arg(item.titlePath);
+        lines << QStringLiteral("score: %1").arg(item.score, 0, 'f', 4);
+        lines << QStringLiteral("match_type: %1").arg(item.matchType);
+        lines << QStringLiteral("keyword_score: %1").arg(item.keywordScore, 0, 'f', 4);
+        lines << QStringLiteral("vector_score: %1").arg(item.vectorScore, 0, 'f', 4);
+        lines << QStringLiteral("snippet:\n%1").arg(item.snippet.trimmed());
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+QString formatAggregateTraceImages(const AggregateImageTrace& trace)
+{
+    QStringList lines;
+    lines << QStringLiteral("searched: %1").arg(trace.searched ? QStringLiteral("yes") : QStringLiteral("no"));
+    lines << QStringLiteral("skipped: %1").arg(trace.skipped ? QStringLiteral("yes") : QStringLiteral("no"));
+    lines << QStringLiteral("failure_stage: %1").arg(trace.failureStage);
+    lines << QStringLiteral("response_status: %1").arg(trace.responseStatus);
+    lines << QStringLiteral("binding_http_ms: %1").arg(trace.bindingHttpMs);
+    lines << QStringLiteral("search_http_ms: %1").arg(trace.searchHttpMs);
+    lines << QStringLiteral("server_latency_ms: %1").arg(trace.serverLatencyMs);
+    lines << QStringLiteral("total_ms: %1").arg(trace.totalMs);
+    lines << QStringLiteral("platform: %1").arg(trace.platform);
+    lines << QStringLiteral("binding_status: %1").arg(trace.bindingStatus);
+    lines << QStringLiteral("bound_base_ids: %1").arg(aggregateListLabel(trace.boundBaseIds));
+    if (!trace.bindingError.trimmed().isEmpty())
+        lines << QStringLiteral("binding_error: %1").arg(trace.bindingError.trimmed());
+    lines << QStringLiteral("status: %1").arg(trace.statusText);
+    if (!trace.errorText.trimmed().isEmpty())
+        lines << QStringLiteral("error: %1").arg(trace.errorText.trimmed());
+    lines << QStringLiteral("latest_inbound: %1").arg(trace.latestInbound.trimmed().isEmpty()
+                                                       ? QStringLiteral("(empty)")
+                                                       : trace.latestInbound.trimmed());
+    lines << QStringLiteral("resolved_product_focus: %1").arg(trace.resolvedProductFocus.trimmed().isEmpty()
+                                                               ? QStringLiteral("(none)")
+                                                               : trace.resolvedProductFocus.trimmed());
+    lines << QStringLiteral("resolution_source: %1").arg(trace.resolutionSource.trimmed().isEmpty()
+                                                          ? QStringLiteral("(none)")
+                                                          : trace.resolutionSource.trimmed());
+    lines << QStringLiteral("query:\n%1").arg(trace.searchQuery.trimmed().isEmpty()
+                                                 ? QStringLiteral("(empty)")
+                                                 : trace.searchQuery.trimmed());
+    lines << QString();
+    lines << QStringLiteral("raw_candidates: %1").arg(trace.rawCandidateCount);
+    lines << QStringLiteral("filtered_candidates: %1").arg(trace.filteredCandidateCount);
+    lines << QStringLiteral("candidates: %1").arg(trace.candidates.size());
+    for (int i = 0; i < trace.candidates.size(); ++i) {
+        const AggregateImageCandidate& item = trace.candidates.at(i);
+        lines << QStringLiteral("--- candidate %1 ---").arg(i + 1);
+        lines << QStringLiteral("asset_id: %1").arg(item.assetId);
+        lines << QStringLiteral("source_title: %1").arg(item.sourceTitle);
+        lines << QStringLiteral("original_filename: %1").arg(item.originalFilename);
+        lines << QStringLiteral("file_path: %1").arg(item.filePath);
+        lines << QStringLiteral("asset_type: %1").arg(item.assetType);
+        lines << QStringLiteral("score: %1").arg(item.score, 0, 'f', 4);
+        lines << QStringLiteral("match_type: %1").arg(item.matchType);
+        lines << QStringLiteral("tags: %1").arg(item.tags);
+        lines << QStringLiteral("scenarios: %1").arg(item.scenarios);
+        lines << QStringLiteral("risk_tags: %1").arg(item.riskTags);
+        lines << QStringLiteral("should_attach: %1").arg(item.shouldAttach ? QStringLiteral("yes") : QStringLiteral("no"));
+        lines << QStringLiteral("requires_human_confirm: %1").arg(item.requiresHumanConfirm ? QStringLiteral("yes") : QStringLiteral("no"));
+        lines << QStringLiteral("recommendation_reason: %1").arg(item.recommendationReason);
+        lines << QStringLiteral("risk_notice: %1").arg(item.riskNotice);
+        lines << QStringLiteral("suggested_reply: %1").arg(item.suggestedReply);
+        lines << QStringLiteral("summary:\n%1").arg(item.summary.trimmed());
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+QString formatAggregateTraceAiRequest(const AiRequest& request)
+{
+    QStringList lines;
+    lines << QStringLiteral("system:\n%1").arg(request.systemPrompt.trimmed());
+    lines << QString();
+    lines << QStringLiteral("turn_count: %1").arg(request.turns.size());
+    for (int i = 0; i < request.turns.size(); ++i) {
+        const AiConversationTurn& turn = request.turns.at(i);
+        lines << QStringLiteral("--- turn %1 role=%2 ---").arg(i + 1).arg(turn.role);
+        for (int j = 0; j < turn.parts.size(); ++j) {
+            const AiMessagePart& part = turn.parts.at(j);
+            lines << QStringLiteral("[part %1 kind=%2]").arg(j + 1).arg(aggregateTracePartLabel(part.kind));
+            if (part.kind == AiMessagePartKind::Text) {
+                lines << part.text;
+            } else {
+                lines << QStringLiteral("file_path: %1").arg(part.filePath);
+                if (!part.displayName.trimmed().isEmpty())
+                    lines << QStringLiteral("display_name: %1").arg(part.displayName.trimmed());
+            }
+        }
+    }
+    lines << QString();
+    const QJsonDocument extraDoc(request.extraRootFields);
+    lines << QStringLiteral("extra_root_fields:\n%1")
+                 .arg(QString::fromUtf8(extraDoc.toJson(QJsonDocument::Indented)).trimmed());
+    lines << QStringLiteral("stream: %1").arg(request.stream ? QStringLiteral("true") : QStringLiteral("false"));
+    return lines.join(QLatin1Char('\n'));
+}
+
+QString aggregateAiTraceLogPath()
+{
+    const QString logDir = QDir(QStringLiteral(PROJECT_ROOT_DIR))
+                               .filePath(QStringLiteral("python/rpa/logs/pdd_web"));
+    QDir().mkpath(logDir);
+    return QDir(logDir).filePath(
+        QStringLiteral("aggregate_ai_trace_%1.log")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd"))));
+}
+
+QString aggregateBoolLabel(bool value)
+{
+    return value ? QStringLiteral("true") : QStringLiteral("false");
+}
+
+QString aggregateLogPreview(QString text, int maxLen = 160)
+{
+    text = text.simplified();
+    if (text.size() <= maxLen)
+        return text;
+    return text.left(maxLen) + QStringLiteral("...");
+}
+
+QStringList sortedAggregatePlatformSet(const QSet<QString>& values)
+{
+    QStringList list;
+    list.reserve(values.size());
+    for (const QString& value : values) {
+        const QString normalized = value.trimmed().toLower();
+        if (!normalized.isEmpty())
+            list.append(normalized);
+    }
+    list.removeDuplicates();
+    list.sort(Qt::CaseInsensitive);
+    return list;
+}
+
+QStringList aggregateManagerListeningPlatforms()
+{
+    const QStringList knownPlatforms = {
+        QStringLiteral("pdd_web"),
+        QStringLiteral("qianniu"),
+        QStringLiteral("wechat"),
+        QStringLiteral("qq"),
+    };
+    QStringList listening;
+    for (const QString& platform : knownPlatforms) {
+        if (ConversationManager::instance().isPlatformListening(platform))
+            listening.append(platform);
+    }
+    listening.sort(Qt::CaseInsensitive);
+    return listening;
+}
+
+QString aggregateAutoReplyLogPath()
+{
+    const QString logDir = QDir(QStringLiteral(PROJECT_ROOT_DIR))
+                               .filePath(QStringLiteral("python/rpa/logs/pdd_web"));
+    QDir().mkpath(logDir);
+    return QDir(logDir).filePath(
+        QStringLiteral("aggregate_auto_reply_%1.log")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd"))));
+}
+
+QString aggregateLogField(const QString& key, const QString& value)
+{
+    return QStringLiteral("%1: %2").arg(key, value.trimmed().isEmpty() ? QStringLiteral("(empty)") : value);
+}
+
+void appendAggregateAutoReplyLog(const QString& event, const QStringList& fields = {})
+{
+    static QMutex mutex;
+    QMutexLocker locker(&mutex);
+
+    QFile file(aggregateAutoReplyLogPath());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        qWarning() << "[AggregateAutoReplyTrace] failed to open log" << file.fileName() << file.errorString();
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    stream << "\n-------------------- Aggregate Auto Reply --------------------\n";
+    stream << aggregateLogField(QStringLiteral("time"),
+                                QDateTime::currentDateTime().toString(Qt::ISODateWithMs)) << '\n';
+    stream << aggregateLogField(QStringLiteral("event"), event) << '\n';
+    for (const QString& field : fields) {
+        if (!field.trimmed().isEmpty())
+            stream << field << '\n';
+    }
+    stream << "--------------------------------------------------------------\n";
+    stream.flush();
+}
+
+void appendAggregateAiTraceLog(const QString& text)
+{
+    static QMutex mutex;
+    QMutexLocker locker(&mutex);
+
+    QFile file(aggregateAiTraceLogPath());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        qWarning() << "[AggregateAITrace] failed to open log" << file.fileName() << file.errorString();
+        return;
+    }
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    stream << text;
+    if (!text.endsWith(QLatin1Char('\n')))
+        stream << '\n';
+    stream.flush();
+}
+
+void appendAggregateAiTraceStart(const QString& traceId,
+                                 const QString& entry,
+                                 int conversationId,
+                                 const QString& sessionModelKey,
+                                 const AiProviderConfig& config,
+                                 const AiRequest& request,
+                                 const AggregateKnowledgeTrace& knowledgeTrace,
+                                 const AggregateImageTrace& imageTrace,
+                                 const AggregateReplyRuntimeConfig& runtimeConfig)
+{
+    QString platform;
+    QString platformConversationId;
+    QString customerName;
+    if (const auto conv = ConversationDao().findById(conversationId)) {
+        platform = conv->platform;
+        platformConversationId = conv->platformConversationId;
+        customerName = conv->customerName;
+    }
+
+    QStringList lines;
+    lines << QStringLiteral("\n==================== Aggregate AI Reply Trace ====================");
+    lines << QStringLiteral("trace_id: %1").arg(traceId);
+    lines << QStringLiteral("phase: start");
+    lines << QStringLiteral("time: %1").arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+    lines << QStringLiteral("entry: %1").arg(entry);
+    lines << QStringLiteral("conversation_id: %1").arg(conversationId);
+    lines << QStringLiteral("platform: %1").arg(platform);
+    lines << QStringLiteral("platform_conversation_id: %1").arg(platformConversationId);
+    lines << QStringLiteral("customer_name: %1").arg(customerName);
+    lines << QStringLiteral("session_model_key: %1").arg(sessionModelKey);
+    lines << QStringLiteral("model: %1").arg(config.model);
+    lines << QStringLiteral("base_url: %1").arg(config.baseUrl);
+    lines << QStringLiteral("api_key: [redacted]");
+    lines << QString();
+    lines << QStringLiteral("[robot runtime config]");
+    lines << QStringLiteral("config_source: %1").arg(runtimeConfig.source);
+    lines << QStringLiteral("config_status: %1").arg(runtimeConfig.statusText);
+    lines << QStringLiteral("runtime_platform: %1").arg(runtimeConfig.platform);
+    lines << QStringLiteral("bound_robot_id: %1").arg(runtimeConfig.boundRobotId.trimmed().isEmpty()
+                                                         ? QStringLiteral("(empty)")
+                                                         : runtimeConfig.boundRobotId);
+    lines << QStringLiteral("robot_name: %1").arg(runtimeConfig.robotName.trimmed().isEmpty()
+                                                     ? QStringLiteral("(empty)")
+                                                     : runtimeConfig.robotName);
+    lines << QStringLiteral("robot_found: %1").arg(aggregateBoolLabel(runtimeConfig.robotFound));
+    lines << QStringLiteral("robot_enabled: %1").arg(aggregateBoolLabel(runtimeConfig.robotEnabled));
+    lines << QStringLiteral("using_robot: %1").arg(aggregateBoolLabel(runtimeConfig.usingRobot));
+    lines << QStringLiteral("knowledge_base_ids: %1").arg(runtimeConfig.knowledgeBaseIds.isEmpty()
+                                                             ? QStringLiteral("(empty)")
+                                                             : runtimeConfig.knowledgeBaseIds.join(QStringLiteral(",")));
+    lines << QStringLiteral("knowledge_base_names: %1").arg(runtimeConfig.knowledgeBaseNames.isEmpty()
+                                                               ? QStringLiteral("(empty)")
+                                                               : runtimeConfig.knowledgeBaseNames.join(QStringLiteral("、")));
+    lines << QStringLiteral("reply_tone: %1").arg(runtimeConfig.replyTone.trimmed().isEmpty()
+                                                      ? QStringLiteral("(empty)")
+                                                      : runtimeConfig.replyTone);
+    lines << QStringLiteral("common_address_terms: %1").arg(runtimeConfig.commonAddressTerms.trimmed().isEmpty()
+                                                               ? QStringLiteral("(empty)")
+                                                               : runtimeConfig.commonAddressTerms);
+    lines << QStringLiteral("allow_auto_send_images: %1").arg(aggregateBoolLabel(runtimeConfig.allowAutoSendImages));
+    lines << QStringLiteral("allow_auto_send_multi_messages: %1")
+                 .arg(aggregateBoolLabel(runtimeConfig.allowAutoSendMultiMessages));
+    lines << QStringLiteral("max_auto_send_messages: %1").arg(runtimeConfig.maxAutoSendMessages);
+    lines << QString();
+    lines << QStringLiteral("[latest inbound]");
+    lines << (knowledgeTrace.latestInbound.trimmed().isEmpty()
+                  ? QStringLiteral("(empty)")
+                  : knowledgeTrace.latestInbound.trimmed());
+    lines << QString();
+    lines << QStringLiteral("[recent chat history - last 10]");
+    lines << formatAggregateTraceHistory(conversationId);
+    lines << QString();
+    lines << QStringLiteral("[knowledge retrieval]");
+    lines << formatAggregateTraceKnowledge(knowledgeTrace);
+    lines << QString();
+    lines << QStringLiteral("[image asset retrieval]");
+    lines << formatAggregateTraceImages(imageTrace);
+    lines << QString();
+    lines << QStringLiteral("[full request sent to model]");
+    lines << formatAggregateTraceAiRequest(request);
+    lines << QStringLiteral("==================== Awaiting Model Response ====================");
+    appendAggregateAiTraceLog(lines.join(QLatin1Char('\n')) + QLatin1Char('\n'));
+}
+
+struct AggregateReplyBuildContext {
+    QString traceId;
+    AggregateReplyRuntimeConfig runtimeConfig;
+    QString knowledgeStatus;
+    AggregateKnowledgeTrace knowledgeTrace;
+    AggregateImageTrace imageTrace;
+    QList<KnowledgeSnippetContext> knowledgeSnippets;
+    QList<AggregateImageCandidate> imageCandidates;
+    QVector<OutgoingMessagePart> imageAttachments;
+    AggregateAiBuiltRequest built;
+};
+
+ReplyRuntimeConfig toSharedReplyRuntimeConfig(const AggregateReplyRuntimeConfig& config)
+{
+    ReplyRuntimeConfig runtime;
+    runtime.platform = config.platform;
+    runtime.source = config.source;
+    runtime.statusText = config.statusText;
+    runtime.sessionModelKey = config.sessionModelKey;
+    runtime.boundRobotId = config.boundRobotId;
+    runtime.robotName = config.robotName;
+    runtime.knowledgeBaseIds = config.knowledgeBaseIds;
+    runtime.knowledgeBaseNames = config.knowledgeBaseNames;
+    runtime.usingRobot = config.usingRobot;
+    runtime.robotFound = config.robotFound;
+    runtime.robotEnabled = config.robotEnabled;
+    runtime.strategy = aggregateReplyStrategyFromRuntimeConfig(config);
+    return runtime;
+}
+
+AggregateKnowledgeTrace toAggregateKnowledgeTrace(const ReplyKnowledgeTrace& trace)
+{
+    AggregateKnowledgeTrace out;
+    out.latestInbound = trace.latestInbound;
+    out.platform = trace.platform;
+    out.shopId = trace.shopId;
+    out.scene = trace.scene;
+    out.boundBaseIds = trace.boundBaseIds;
+    out.bindingStatus = trace.bindingStatus;
+    out.bindingError = trace.bindingError;
+    out.searchQuery = trace.searchQuery;
+    out.statusText = trace.statusText;
+    out.errorText = trace.errorText;
+    out.failureStage = trace.failureStage;
+    out.responseStatus = trace.responseStatus;
+    out.healthMs = trace.healthMs;
+    out.bindingHttpMs = trace.bindingHttpMs;
+    out.searchHttpMs = trace.searchHttpMs;
+    out.totalMs = trace.totalMs;
+    out.serverLatencyMs = trace.serverLatencyMs;
+    out.searched = trace.searched;
+    out.skipped = trace.skipped;
+    out.snippets = trace.snippets;
+    return out;
+}
+
+AggregateImageCandidate toAggregateImageCandidate(const ReplyImageCandidate& candidate)
+{
+    AggregateImageCandidate out;
+    out.assetId = candidate.assetId;
+    out.sourceTitle = candidate.sourceTitle;
+    out.originalFilename = candidate.originalFilename;
+    out.filePath = candidate.filePath;
+    out.assetType = candidate.assetType;
+    out.summary = candidate.summary;
+    out.tags = candidate.tags;
+    out.scenarios = candidate.scenarios;
+    out.riskTags = candidate.riskTags;
+    out.suggestedReply = candidate.suggestedReply;
+    out.recommendationReason = candidate.recommendationReason;
+    out.riskNotice = candidate.riskNotice;
+    out.matchType = candidate.matchType;
+    out.score = candidate.score;
+    out.shouldAttach = candidate.shouldAttach;
+    out.requiresHumanConfirm = candidate.requiresHumanConfirm;
+    return out;
+}
+
+QList<AggregateImageCandidate> toAggregateImageCandidates(const QList<ReplyImageCandidate>& candidates)
+{
+    QList<AggregateImageCandidate> out;
+    out.reserve(candidates.size());
+    for (const ReplyImageCandidate& candidate : candidates)
+        out.append(toAggregateImageCandidate(candidate));
+    return out;
+}
+
+AggregateImageTrace toAggregateImageTrace(const ReplyImageTrace& trace)
+{
+    AggregateImageTrace out;
+    out.latestInbound = trace.latestInbound;
+    out.platform = trace.platform;
+    out.boundBaseIds = trace.boundBaseIds;
+    out.bindingStatus = trace.bindingStatus;
+    out.bindingError = trace.bindingError;
+    out.searchQuery = trace.searchQuery;
+    out.resolvedProductFocus = trace.resolvedProductFocus;
+    out.resolutionSource = trace.resolutionSource;
+    out.statusText = trace.statusText;
+    out.errorText = trace.errorText;
+    out.failureStage = trace.failureStage;
+    out.responseStatus = trace.responseStatus;
+    out.bindingHttpMs = trace.bindingHttpMs;
+    out.searchHttpMs = trace.searchHttpMs;
+    out.totalMs = trace.totalMs;
+    out.serverLatencyMs = trace.serverLatencyMs;
+    out.rawCandidateCount = trace.rawCandidateCount;
+    out.filteredCandidateCount = trace.filteredCandidateCount;
+    out.searched = trace.searched;
+    out.skipped = trace.skipped;
+    out.candidates = toAggregateImageCandidates(trace.candidates);
+    return out;
+}
+
+AggregateReplyBuildContext buildAggregateReplyContext(AiChatAppService* service,
+                                                      int conversationId,
+                                                      const QString& sessionModelKey,
+                                                      const QString& traceEntry)
+{
+    AggregateReplyBuildContext context;
+    context.traceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!service)
+        return context;
+
+    context.runtimeConfig = resolveAggregateReplyRuntimeConfig(conversationId, sessionModelKey);
+    ReplyContextInput input;
+    input.source = ReplyContextInput::Source::AggregateConversation;
+    input.conversationId = conversationId;
+    input.runtimeConfig = toSharedReplyRuntimeConfig(context.runtimeConfig);
+    const ReplyContextResult shared = service->buildReplyContext(input);
+    context.knowledgeStatus = shared.knowledgeStatus;
+    context.knowledgeTrace = toAggregateKnowledgeTrace(shared.knowledgeTrace);
+    context.imageTrace = toAggregateImageTrace(shared.imageTrace);
+    context.knowledgeSnippets = shared.knowledgeSnippets;
+    context.imageCandidates = toAggregateImageCandidates(shared.imageCandidates);
+    context.imageAttachments = shared.imageAttachments;
+    context.built = shared.built;
+    if (context.built.ok())
+        context.built.request.extraRootFields.insert(QStringLiteral("max_tokens"), 512);
+    appendAggregateAiTraceStart(context.traceId,
+                                traceEntry,
+                                conversationId,
+                                context.runtimeConfig.sessionModelKey,
+                                context.built.config,
+                                context.built.request,
+                                context.knowledgeTrace,
+                                context.imageTrace,
+                                context.runtimeConfig);
+    return context;
+}
+
+void appendAggregateAiTraceFinish(const QString& traceId,
+                                  int conversationId,
+                                  const QString& phase,
+                                  const QString& modelOutput,
+                                  int durationMs,
+                                  int firstTokenMs,
+                                  const QString& errorText = QString())
+{
+    QStringList lines;
+    lines << QStringLiteral("\n-------------------- Aggregate AI Reply Result --------------------");
+    lines << QStringLiteral("trace_id: %1").arg(traceId);
+    lines << QStringLiteral("phase: %1").arg(phase);
+    lines << QStringLiteral("time: %1").arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+    lines << QStringLiteral("conversation_id: %1").arg(conversationId);
+    lines << QStringLiteral("duration_ms: %1").arg(durationMs);
+    lines << QStringLiteral("first_token_ms: %1").arg(firstTokenMs);
+    if (!errorText.trimmed().isEmpty()) {
+        lines << QStringLiteral("[error]");
+        lines << errorText.trimmed();
+    }
+    lines << QStringLiteral("[model raw output]");
+    lines << (modelOutput.trimmed().isEmpty() ? QStringLiteral("(empty)") : modelOutput.trimmed());
+    lines << QStringLiteral("==================================================================");
+    appendAggregateAiTraceLog(lines.join(QLatin1Char('\n')) + QLatin1Char('\n'));
 }
 
 class ComposeTextEdit final : public QPlainTextEdit
@@ -1454,16 +3362,6 @@ static QPixmap roundedAggregateAvatarPixmap(const QPixmap& source, int logicalSi
     return out;
 }
 
-QString aggregateAiMvpSystemPrompt()
-{
-    return QStringLiteral(
-        "你是电商客服场景的辅助起草助手。请根据用户给出的「客户最后一条入站消息」（可能附带聊天区截图）和下列店铺知识，起草一条可直接发送给客户的回复正文。\n"
-        "要求：语气专业、友好；不要编造未在知识中出现的承诺；不要加「客服：」等前缀或引号；若有截图，请结合画面理解客户意图。\n"
-        "篇幅：默认简短。订单、物流、商品规格等常见询问用几句话说明要点即可（约 80～200 字量级），不要长篇铺垫、不要展开无关背景；仅在客户问题本身很复杂或明确要求详细说明时再适当增加。\n\n"
-        "【店铺知识·MVP 占位，可随版本替换】\n"
-        "礼貌问候；明确订单、物流、售后的查询途径；避免无法兑现的承诺。具体规则以公司内部文档为准。");
-}
-
 static QString aggregateModelMenuLabel(const QString& sessionModelKey)
 {
     return aiPresetLabel(sessionModelKey);
@@ -2757,8 +4655,18 @@ QWidget* AggregateChatForm::buildLeftToolBar()
         btn->setIconSize(QSize(28, 28));
         btn->setFixedSize(40, 40);
         btn->setAutoRaise(true);
-        btn->setToolTip(QString::fromUtf8(kItems[i].tip));
+        const QString baseTip = QString::fromUtf8(kItems[i].tip);
+        btn->setProperty("baseTip", baseTip);
+        btn->setToolTip(baseTip);
         btn->setCursor(Qt::PointingHandCursor);
+        const QString platformId = aggregatePlatformIdForButtonId(i);
+        if (!platformId.isEmpty()) {
+            btn->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(btn, &QToolButton::customContextMenuRequested, this,
+                    [this, btn, platformId](const QPoint& pos) {
+                showRobotBindingMenu(platformId, btn, pos);
+            });
+        }
         m_platformButtonGroup->addButton(btn, i);
         lay->addWidget(btn, 0, Qt::AlignHCenter);
     }
@@ -2820,6 +4728,10 @@ void AggregateChatForm::updatePlatformToolBarButtonIcons()
         if (!b)
             continue;
         b->setIcon(QIcon(QString::fromUtf8(kIcons[i])));
+        const QString platformId = aggregatePlatformIdForButtonId(i);
+        const QString baseTip = b->property("baseTip").toString();
+        if (!platformId.isEmpty() && !baseTip.isEmpty())
+            b->setToolTip(aggregatePlatformRobotTooltip(baseTip, platformId));
     }
 }
 
@@ -2829,6 +4741,156 @@ void AggregateChatForm::onPlatformFilterButtonIdClicked(int id)
     updatePlatformToolBarButtonIcons();
     updatePlatformSectionTitle();
     refreshConversationList();
+}
+
+void AggregateChatForm::showRobotBindingMenu(const QString& platform, QWidget* button, const QPoint& pos)
+{
+    if (platform.trimmed().isEmpty() || !button)
+        return;
+
+    QMenu menu(this);
+    const QString displayName = listenPlatformDisplayName(platform);
+    QAction* bindAction = menu.addAction(QStringLiteral("绑定机器人..."));
+    QAction* viewAction = menu.addAction(QStringLiteral("查看当前机器人"));
+    QAction* clearAction = menu.addAction(QStringLiteral("解绑机器人"));
+    QAction* chosen = menu.exec(button->mapToGlobal(pos));
+    if (!chosen)
+        return;
+
+    if (chosen == bindAction) {
+        openRobotBindingDialog(platform);
+        return;
+    }
+    if (chosen == clearAction) {
+        clearRobotBindingForPlatform(platform);
+        return;
+    }
+    if (chosen == viewAction) {
+        const QString robotId = boundRobotIdForAggregatePlatform(platform);
+        if (robotId.isEmpty()) {
+            showStatusMessage(QStringLiteral("%1未绑定机器人。").arg(displayName), 3500);
+            return;
+        }
+        const QJsonObject robot = aggregateRobotById(robotId);
+        if (robot.isEmpty()) {
+            showStatusMessage(QStringLiteral("%1绑定的机器人已失效：%2").arg(displayName, robotId), 5000);
+            return;
+        }
+        showStatusMessage(QStringLiteral("%1当前机器人：%2；模型：%3；知识库：%4。")
+                              .arg(displayName,
+                                   aggregateRobotDisplayName(robot),
+                                   aggregateRobotModelLabel(robot),
+                                   aggregateRobotKnowledgeLabel(robot)),
+                          7000);
+    }
+}
+
+void AggregateChatForm::openRobotBindingDialog(const QString& platform)
+{
+    const QString normalizedPlatform = platform.trimmed().toLower();
+    if (normalizedPlatform.isEmpty())
+        return;
+
+    const QJsonArray robots = loadAggregateRobotConfigs();
+    const QString currentRobotId = boundRobotIdForAggregatePlatform(normalizedPlatform);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("%1 - 绑定机器人").arg(listenPlatformDisplayName(normalizedPlatform)));
+    dialog.resize(760, 520);
+    dialog.setModal(true);
+    auto* outer = new QVBoxLayout(&dialog);
+    outer->setContentsMargins(16, 16, 16, 16);
+    outer->setSpacing(10);
+
+    auto* hint = new QLabel(QStringLiteral("一个平台同一时间只能绑定一个机器人。机器人包含模型、知识库和启用状态；阶段二只保存绑定关系，生成回复链路将在下一阶段接入。"), &dialog);
+    hint->setWordWrap(true);
+    outer->addWidget(hint);
+
+    auto* list = new QListWidget(&dialog);
+    list->setSelectionMode(QAbstractItemView::SingleSelection);
+    list->setAlternatingRowColors(true);
+    list->setWordWrap(true);
+    outer->addWidget(list, 1);
+
+    for (const QJsonValue& value : robots) {
+        const QJsonObject robot = value.toObject();
+        const QString robotId = robot.value(QStringLiteral("robot_id")).toString().trimmed();
+        if (robotId.isEmpty())
+            continue;
+        const QString status = aggregateRobotEnabled(robot) ? QStringLiteral("启用") : QStringLiteral("停用");
+        const QString text = QStringLiteral("%1\n模型：%2    知识库：%3    状态：%4")
+                                 .arg(aggregateRobotDisplayName(robot),
+                                      aggregateRobotModelLabel(robot),
+                                      aggregateRobotKnowledgeLabel(robot),
+                                      status);
+        auto* item = new QListWidgetItem(text, list);
+        item->setData(Qt::UserRole, robotId);
+        item->setToolTip(text);
+        if (robotId == currentRobotId) {
+            item->setSelected(true);
+            list->setCurrentItem(item);
+        }
+    }
+    if (list->count() == 0)
+        hint->setText(QStringLiteral("暂无机器人。请先到 AI 客服后台的“店铺机器人配置”中新建机器人。"));
+
+    auto* buttonRow = new QHBoxLayout;
+    buttonRow->addStretch(1);
+    auto* clearBtn = new QPushButton(QStringLiteral("解绑机器人"), &dialog);
+    auto* saveBtn = new QPushButton(QStringLiteral("保存"), &dialog);
+    auto* cancelBtn = new QPushButton(QStringLiteral("取消"), &dialog);
+    buttonRow->addWidget(clearBtn);
+    buttonRow->addWidget(saveBtn);
+    buttonRow->addWidget(cancelBtn);
+    outer->addLayout(buttonRow);
+
+    auto saveBinding = [&](const QString& robotId) -> bool {
+        saveAggregatePlatformRobotBinding(normalizedPlatform, robotId);
+        updatePlatformToolBarButtonIcons();
+        if (robotId.trimmed().isEmpty()) {
+            showStatusMessage(QStringLiteral("%1已解绑机器人。").arg(listenPlatformDisplayName(normalizedPlatform)),
+                              3500);
+        } else {
+            const QJsonObject robot = aggregateRobotById(robotId);
+            showStatusMessage(QStringLiteral("%1已绑定机器人：%2。")
+                                  .arg(listenPlatformDisplayName(normalizedPlatform),
+                                       robot.isEmpty() ? robotId : aggregateRobotDisplayName(robot)),
+                              4500);
+        }
+        return true;
+    };
+
+    connect(saveBtn, &QPushButton::clicked, &dialog, [&]() {
+        QListWidgetItem* item = list->currentItem();
+        if (!item) {
+            QMessageBox::information(&dialog, QStringLiteral("绑定机器人"),
+                                     QStringLiteral("请选择一个机器人，或点击“解绑机器人”。"));
+            return;
+        }
+        if (saveBinding(item->data(Qt::UserRole).toString()))
+            dialog.accept();
+    });
+    connect(list, &QListWidget::itemDoubleClicked, &dialog, [&](QListWidgetItem* item) {
+        if (item && saveBinding(item->data(Qt::UserRole).toString()))
+            dialog.accept();
+    });
+    connect(clearBtn, &QPushButton::clicked, &dialog, [&]() {
+        if (saveBinding({}))
+            dialog.accept();
+    });
+    connect(cancelBtn, &QPushButton::clicked, &dialog, &QDialog::reject);
+
+    dialog.exec();
+}
+
+void AggregateChatForm::clearRobotBindingForPlatform(const QString& platform)
+{
+    const QString normalizedPlatform = platform.trimmed().toLower();
+    if (normalizedPlatform.isEmpty())
+        return;
+    saveAggregatePlatformRobotBinding(normalizedPlatform, {});
+    updatePlatformToolBarButtonIcons();
+    showStatusMessage(QStringLiteral("%1已解绑机器人。").arg(listenPlatformDisplayName(normalizedPlatform)), 3500);
 }
 
 void AggregateChatForm::onSimulateMessageClicked()
@@ -3542,6 +5604,35 @@ QWidget* AggregateChatForm::buildCenterPanel()
         vp->setAutoFillBackground(true);
     }
     inputLayout->addWidget(m_composeAttachmentsScroll);
+
+    m_suggestedImagePanel = new QWidget(inputInner);
+    m_suggestedImagePanel->setObjectName(QStringLiteral("aggregateSuggestedImagePanel"));
+    m_suggestedImagePanel->setVisible(false);
+    m_suggestedImagePanel->setStyleSheet(QStringLiteral(
+        "QWidget#aggregateSuggestedImagePanel{"
+        "background:#F8FAFC;border:1px solid #D9E2EC;border-radius:6px;"
+        "}"));
+    auto* suggestedPanelLayout = new QVBoxLayout(m_suggestedImagePanel);
+    suggestedPanelLayout->setContentsMargins(10, 8, 10, 8);
+    suggestedPanelLayout->setSpacing(6);
+    auto* suggestedHeader = new QHBoxLayout();
+    suggestedHeader->setContentsMargins(0, 0, 0, 0);
+    suggestedHeader->setSpacing(8);
+    auto* suggestedTitle = new QLabel(QStringLiteral("建议附图"), m_suggestedImagePanel);
+    suggestedTitle->setStyleSheet(QStringLiteral("color:#0F172A;font-size:12px;font-weight:600;"));
+    auto* suggestedHint = new QLabel(QStringLiteral("需人工预览确认，当前不会自动发送图片"), m_suggestedImagePanel);
+    suggestedHint->setText(QStringLiteral("人工预览确认后，可添加为本条回复附件一起发送"));
+    suggestedHint->setStyleSheet(QStringLiteral("color:#64748B;font-size:11px;"));
+    suggestedHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    suggestedHeader->addWidget(suggestedTitle, 0, Qt::AlignVCenter);
+    suggestedHeader->addWidget(suggestedHint, 1, Qt::AlignVCenter);
+    suggestedPanelLayout->addLayout(suggestedHeader);
+    m_suggestedImageLayout = new QHBoxLayout();
+    m_suggestedImageLayout->setContentsMargins(0, 0, 0, 0);
+    m_suggestedImageLayout->setSpacing(8);
+    m_suggestedImageLayout->addStretch(1);
+    suggestedPanelLayout->addLayout(m_suggestedImageLayout);
+    inputLayout->addWidget(m_suggestedImagePanel);
 
     auto* composeBox = new QWidget(inputInner);
     composeBox->setObjectName(QStringLiteral("aggregateComposeBox"));
@@ -4708,6 +6799,186 @@ void AggregateChatForm::clearComposeAttachments()
     refreshComposeAttachments();
 }
 
+void AggregateChatForm::setSuggestedImageAttachments(const QVector<SuggestedImageAttachment>& suggestions)
+{
+    m_suggestedImageAttachments = suggestions;
+    m_selectedSuggestedImagePath.clear();
+    refreshSuggestedImagePanel();
+}
+
+void AggregateChatForm::clearSuggestedImageAttachments()
+{
+    if (m_suggestedImageAttachments.isEmpty() && m_selectedSuggestedImagePath.isEmpty()) {
+        if (m_suggestedImagePanel && m_suggestedImagePanel->isVisible()) {
+            m_suggestedImagePanel->setVisible(false);
+            scheduleChatInputRelayout();
+        }
+        return;
+    }
+    m_suggestedImageAttachments.clear();
+    m_selectedSuggestedImagePath.clear();
+    refreshSuggestedImagePanel();
+}
+
+void AggregateChatForm::refreshSuggestedImagePanel()
+{
+    if (!m_suggestedImagePanel || !m_suggestedImageLayout)
+        return;
+
+    while (QLayoutItem* item = m_suggestedImageLayout->takeAt(0)) {
+        if (QWidget* widget = item->widget())
+            widget->deleteLater();
+        delete item;
+    }
+
+    const int visibleCount = qMin(2, int(m_suggestedImageAttachments.size()));
+    for (int i = 0; i < visibleCount; ++i) {
+        const SuggestedImageAttachment item = m_suggestedImageAttachments.at(i);
+        auto* card = new QFrame(m_suggestedImagePanel);
+        card->setObjectName(QStringLiteral("aggregateSuggestedImageCard"));
+        card->setMinimumWidth(0);
+        card->setFixedHeight(86);
+        card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        card->setStyleSheet(QStringLiteral(
+            "QFrame#aggregateSuggestedImageCard{"
+            "background:#FFFFFF;border:1px solid #D9E2EC;border-radius:6px;"
+            "}"));
+
+        auto* row = new QHBoxLayout(card);
+        row->setContentsMargins(8, 6, 8, 6);
+        row->setSpacing(8);
+
+        auto* thumb = new QLabel(card);
+        thumb->setFixedSize(52, 52);
+        thumb->setAlignment(Qt::AlignCenter);
+        thumb->setStyleSheet(QStringLiteral("background:#E5E7EB;border-radius:4px;color:#334155;font-size:11px;"));
+        QPixmap pixmap(item.filePath);
+        if (!pixmap.isNull())
+            thumb->setPixmap(pixmap.scaled(52, 52, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        else
+            thumb->setText(QStringLiteral("图片"));
+        row->addWidget(thumb, 0, Qt::AlignVCenter);
+
+        auto* textBox = new QWidget(card);
+        textBox->setMinimumWidth(0);
+        textBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        auto* textLayout = new QVBoxLayout(textBox);
+        textLayout->setContentsMargins(0, 0, 0, 0);
+        textLayout->setSpacing(2);
+
+        auto* title = new QLabel(item.title, textBox);
+        title->setMinimumWidth(0);
+        title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        title->setTextFormat(Qt::PlainText);
+        title->setWordWrap(false);
+        title->setToolTip(item.filePath);
+        title->setStyleSheet(QStringLiteral("color:#0F172A;font-size:12px;font-weight:600;"));
+        textLayout->addWidget(title);
+
+        QString reason = item.reason.trimmed();
+        if (reason.isEmpty())
+            reason = item.summary.trimmed();
+        if (reason.isEmpty())
+            reason = item.scenarios.trimmed();
+        if (reason.isEmpty())
+            reason = QStringLiteral("与当前咨询相关");
+        auto* reasonLabel = new QLabel(reason.left(80), textBox);
+        reasonLabel->setMinimumWidth(0);
+        reasonLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        reasonLabel->setTextFormat(Qt::PlainText);
+        reasonLabel->setWordWrap(false);
+        reasonLabel->setToolTip(reason);
+        reasonLabel->setStyleSheet(QStringLiteral("color:#475569;font-size:11px;"));
+        textLayout->addWidget(reasonLabel);
+
+        const QString riskText = aggregateImageRiskIsEmpty(item.riskTags) ? QString() : item.riskTags;
+        auto* riskLabel = new QLabel(riskText.isEmpty() ? QStringLiteral("需人工确认") : QStringLiteral("风险：%1").arg(riskText.left(40)), textBox);
+        riskLabel->setMinimumWidth(0);
+        riskLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        riskLabel->setTextFormat(Qt::PlainText);
+        riskLabel->setWordWrap(false);
+        riskLabel->setToolTip(riskText.isEmpty() ? item.riskNotice : item.riskNotice + QLatin1Char('\n') + riskText);
+        riskLabel->setStyleSheet(riskText.isEmpty()
+                                     ? QStringLiteral("color:#64748B;font-size:11px;")
+                                     : QStringLiteral("color:#B45309;font-size:11px;"));
+        textLayout->addWidget(riskLabel);
+        row->addWidget(textBox, 1);
+
+        auto* actions = new QWidget(card);
+        actions->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+        auto* actionLayout = new QVBoxLayout(actions);
+        actionLayout->setContentsMargins(0, 0, 0, 0);
+        actionLayout->setSpacing(4);
+
+        auto* previewBtn = new QToolButton(actions);
+        previewBtn->setText(QStringLiteral("预览"));
+        previewBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        previewBtn->setCursor(Qt::PointingHandCursor);
+        previewBtn->setAutoRaise(false);
+        previewBtn->setFixedSize(56, 24);
+        previewBtn->setStyleSheet(QStringLiteral(
+            "QToolButton{background:#EEF2FF;border:1px solid #C7D2FE;border-radius:4px;color:#3730A3;font-size:11px;}"
+            "QToolButton:hover{background:#E0E7FF;}"));
+        connect(previewBtn, &QToolButton::clicked, this, [this, path = item.filePath]() {
+            previewSuggestedImageAttachment(path);
+        });
+        actionLayout->addWidget(previewBtn);
+
+        auto* markBtn = new QToolButton(actions);
+        const bool selected = !m_selectedSuggestedImagePath.isEmpty()
+            && QFileInfo(m_selectedSuggestedImagePath).absoluteFilePath() == QFileInfo(item.filePath).absoluteFilePath();
+        markBtn->setText(selected ? QStringLiteral("已标记") : QStringLiteral("标记"));
+        markBtn->setText(selected ? QStringLiteral("已添加") : QStringLiteral("添加"));
+        markBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        markBtn->setCursor(Qt::PointingHandCursor);
+        markBtn->setAutoRaise(false);
+        markBtn->setEnabled(!selected);
+        markBtn->setFixedSize(56, 24);
+        markBtn->setStyleSheet(QStringLiteral(
+            "QToolButton{background:#F0FDF4;border:1px solid #BBF7D0;border-radius:4px;color:#166534;font-size:11px;}"
+            "QToolButton:hover{background:#DCFCE7;}"
+            "QToolButton:disabled{background:#E2E8F0;border-color:#CBD5E1;color:#64748B;}"));
+        connect(markBtn, &QToolButton::clicked, this, [this, path = item.filePath]() {
+            markSuggestedImageForUse(path);
+        });
+        actionLayout->addWidget(markBtn);
+        row->addWidget(actions, 0, Qt::AlignVCenter);
+
+        m_suggestedImageLayout->addWidget(card, 1);
+    }
+
+    m_suggestedImageLayout->addStretch(1);
+    m_suggestedImagePanel->setVisible(visibleCount > 0);
+    scheduleChatInputRelayout();
+}
+
+void AggregateChatForm::previewSuggestedImageAttachment(const QString& path)
+{
+    if (path.trimmed().isEmpty() || !QFileInfo::exists(path)) {
+        showStatusMessage(QStringLiteral("建议附图不存在或已被移动"), 5000);
+        return;
+    }
+    ImagePreviewDialog dlg(path, this);
+    dlg.exec();
+}
+
+void AggregateChatForm::markSuggestedImageForUse(const QString& path)
+{
+    if (path.trimmed().isEmpty() || !QFileInfo::exists(path)) {
+        showStatusMessage(QStringLiteral("建议附图不存在或已被移动"), 5000);
+        return;
+    }
+    if (!addComposeFileAttachment(path)) {
+        showStatusMessage(QStringLiteral("建议附图添加失败，请确认图片文件可访问"), 5000);
+        return;
+    }
+    m_selectedSuggestedImagePath = path;
+    refreshSuggestedImagePanel();
+    showStatusMessage(QStringLiteral("已添加建议附图，发送本条回复时会一起发送"), 5000);
+    return;
+    showStatusMessage(QStringLiteral("已标记建议附图，请预览确认后再手动处理发送"), 5000);
+}
+
 void AggregateChatForm::persistCurrentDraft()
 {
     if (m_currentConvId <= 0 || !m_inputEdit)
@@ -4810,8 +7081,16 @@ void AggregateChatForm::reloadFromLocalCache()
         && m_conversationListModel->containsConversation(m_currentConvId)) {
         const bool hadRenderedMessages = m_messageListModel && !m_messageListModel->messages().isEmpty();
         const int previousMessageCount = m_messageListModel ? m_messageListModel->messages().size() : 0;
+        QString previousLatestMessageKey;
+        if (hadRenderedMessages)
+            previousLatestMessageKey = buildMessageIdentityKey(m_messageListModel->messages().constLast());
         const bool wasNearBottom = isMessageViewNearBottom();
         const auto messages = ConversationManager::instance().messages(m_currentConvId);
+        QString latestMessageKey;
+        if (!messages.isEmpty())
+            latestMessageKey = buildMessageIdentityKey(messages.constLast());
+        const bool latestMessageChanged = !latestMessageKey.isEmpty()
+            && latestMessageKey != previousLatestMessageKey;
         if (!m_messageListModel)
             m_messageListModel = new MessageListModel(this);
         m_messageListModel->setConversationMessages(m_currentConvId, messages);
@@ -4828,8 +7107,45 @@ void AggregateChatForm::reloadFromLocalCache()
         const int addedMessages = qMax(0, messages.size() - previousMessageCount);
         if (!hadRenderedMessages || wasNearBottom) {
             scheduleScrollChatToBottom(true);
-        } else if (addedMessages > 0) {
-            showPendingNewMessageHint(addedMessages);
+        } else if (addedMessages > 0 || latestMessageChanged) {
+            showPendingNewMessageHint(addedMessages > 0 ? addedMessages : 1);
+        }
+        if (hadRenderedMessages && latestMessageChanged && !messages.isEmpty()) {
+            const MessageRecord& latest = messages.constLast();
+            if (latest.direction == QLatin1String("in")) {
+                const QString inboundMessageKey = buildMessageIdentityKey(latest);
+                const bool duplicateAutoReplyTrigger =
+                    m_lastAutoReplyInboundMessageKeyByConversation.value(m_currentConvId) == inboundMessageKey;
+                appendAggregateAutoReplyLog(
+                    QStringLiteral("cache_reload_new_inbound_message"),
+                    {
+                        aggregateLogField(QStringLiteral("conversation_id"), QString::number(m_currentConvId)),
+                        aggregateLogField(QStringLiteral("message_id"), QString::number(latest.id)),
+                        aggregateLogField(QStringLiteral("platform_message_id"), latest.platformMsgId),
+                        aggregateLogField(QStringLiteral("added_messages"), QString::number(addedMessages)),
+                        aggregateLogField(QStringLiteral("latest_message_changed"),
+                                          aggregateBoolLabel(latestMessageChanged)),
+                        aggregateLogField(QStringLiteral("duplicate_auto_reply_trigger"),
+                                          aggregateBoolLabel(duplicateAutoReplyTrigger)),
+                        aggregateLogField(QStringLiteral("auto_reply_enabled"),
+                                          aggregateBoolLabel(isAggregateAutoReplyEnabled())),
+                        aggregateLogField(QStringLiteral("content_preview"), aggregateLogPreview(latest.content)),
+                    });
+                if (duplicateAutoReplyTrigger) {
+                    appendAggregateAutoReplyLog(
+                        QStringLiteral("skip_duplicate_auto_reply_trigger"),
+                        {
+                            aggregateLogField(QStringLiteral("trigger"), QStringLiteral("cache-reload")),
+                            aggregateLogField(QStringLiteral("conversation_id"), QString::number(m_currentConvId)),
+                            aggregateLogField(QStringLiteral("message_id"), QString::number(latest.id)),
+                            aggregateLogField(QStringLiteral("platform_message_id"), latest.platformMsgId),
+                            aggregateLogField(QStringLiteral("content_preview"), aggregateLogPreview(latest.content)),
+                        });
+                } else {
+                    m_lastAutoReplyInboundMessageKeyByConversation.insert(m_currentConvId, inboundMessageKey);
+                    tryAggregateAutoReply(m_currentConvId, QStringLiteral("cache-reload"));
+                }
+            }
         }
         qInfo() << "[AggregateChatForm] reloaded current conversation from local cache:"
                 << m_currentConvId << "messages=" << messages.size();
@@ -5030,6 +7346,9 @@ QVector<MessageRecord> AggregateChatForm::messagesForDisplay(int conversationId)
             case AggregatePlatformFilter::Wechat:
                 wantPlat = QStringLiteral("wechat");
                 break;
+            case AggregatePlatformFilter::QQ:
+                wantPlat = QStringLiteral("qq");
+                break;
             default:
                 break;
             }
@@ -5123,6 +7442,7 @@ void AggregateChatForm::renderConversationListFromModel()
 void AggregateChatForm::showConversation(int conversationId)
 {
     abortAggregateAiRequest();
+    clearSuggestedImageAttachments();
 
     const int prevId = m_currentConvId;
     if (prevId > 0 && prevId != conversationId)
@@ -5160,8 +7480,6 @@ void AggregateChatForm::showConversation(int conversationId)
 
     scheduleScrollChatToBottom();
     updateAggregateAiControlsVisibility();
-
-    tryAggregateAutoReply(conversationId, QStringLiteral("T1"));
 }
 
 void AggregateChatForm::renderConversationMessages(const QVector<MessageRecord>& messages)
@@ -5186,6 +7504,19 @@ void AggregateChatForm::appendMessageBubble(const MessageRecord& msg)
     renderConversationMessagesFromModel();
     if (m_messageListModel)
         m_currentMessageSignature = m_messageListModel->signature();
+}
+
+QString AggregateChatForm::buildMessageIdentityKey(const MessageRecord& msg) const
+{
+    return QStringList{
+        QString::number(msg.id),
+        msg.direction,
+        msg.platformMsgId,
+        msg.clientMessageId,
+        msg.createdAt.toString(Qt::ISODateWithMs),
+        msg.contentType,
+        msg.content,
+    }.join(QChar(0x1f));
 }
 
 QString AggregateChatForm::buildMessageSignature(const QVector<MessageRecord>& messages) const
@@ -5376,6 +7707,7 @@ void AggregateChatForm::onClearSendTimeline()
 void AggregateChatForm::showCenterEmptyState()
 {
     abortAggregateAiRequest();
+    clearSuggestedImageAttachments();
     clearPendingNewMessageHint();
     m_centerStack->setCurrentWidget(m_centerEmptyState);
     updateAggregateAiControlsVisibility();
@@ -5550,18 +7882,20 @@ void AggregateChatForm::onSendClicked()
     }
 
     OutgoingMessagePayload payload;
-    payload.parts = m_composeAttachments;
     if (!text.isEmpty()) {
         OutgoingMessagePart textPart;
         textPart.type = OutgoingPartType::Text;
         textPart.text = text;
         payload.parts.push_back(textPart);
     }
+    for (const OutgoingMessagePart& part : std::as_const(m_composeAttachments))
+        payload.parts.push_back(part);
 
     // 发送后先留在「待处理」，直到客服切换会话或主动切换 tab。
     m_pendingStickyConvId = m_currentConvId;
     m_inputEdit->clear();
     clearComposeAttachments();
+    clearSuggestedImageAttachments();
     m_draftAttachments.remove(m_currentConvId);
     ConversationDao convDao;
     const auto conv = convDao.findById(m_currentConvId);
@@ -5581,9 +7915,23 @@ void AggregateChatForm::onSendClicked()
 void AggregateChatForm::onAutoReplyToggleClicked()
 {
     const bool enable = m_btnAutoReplyToggle && m_btnAutoReplyToggle->isChecked();
+    appendAggregateAutoReplyLog(
+        QStringLiteral("toggle_clicked"),
+        {
+            aggregateLogField(QStringLiteral("desired_enabled"), aggregateBoolLabel(enable)),
+            aggregateLogField(QStringLiteral("previous_enabled"), aggregateBoolLabel(isAggregateAutoReplyEnabled())),
+            aggregateLogField(QStringLiteral("current_conversation_id"), QString::number(m_currentConvId)),
+            aggregateLogField(QStringLiteral("selected_platforms"), aggregateListLabel(selectedPlatformListenTargets())),
+            aggregateLogField(QStringLiteral("registered_platforms"),
+                              aggregateListLabel(sortedAggregatePlatformSet(m_registeredListenPlatforms))),
+            aggregateLogField(QStringLiteral("service_listening_platforms"),
+                              aggregateListLabel(sortedAggregatePlatformSet(m_serviceListeningPlatforms))),
+            aggregateLogField(QStringLiteral("manager_listening_platforms"),
+                              aggregateListLabel(aggregateManagerListeningPlatforms())),
+        });
     if (enable) {
         QMessageBox box(QMessageBox::Warning, QStringLiteral("AI 自动回复"),
-                        QStringLiteral("开启后，AI 将接管来自千牛平台会话中的客户消息，并在满足条件时自动生成并发送回复。\n\n"
+                        QStringLiteral("开启后，AI 将接管当前正在监听的平台会话中的客户新消息，并在满足条件时自动生成并发送回复。\n\n"
                                        "请确认已在左栏「管理后台」→「AI 客服后台」→「API 配置/模型」中配置好模型与 API，"
                                        "并了解误发、合规与费用风险。\n\n"
                                        "确定要开启自动回复吗？"),
@@ -5591,18 +7939,46 @@ void AggregateChatForm::onAutoReplyToggleClicked()
         box.setDefaultButton(QMessageBox::No);
         box.setStyleSheet(aggregateMessageBoxContrastStyle());
         if (box.exec() != QMessageBox::Yes) {
+            appendAggregateAutoReplyLog(
+                QStringLiteral("enable_cancelled"),
+                {
+                    aggregateLogField(QStringLiteral("current_conversation_id"), QString::number(m_currentConvId)),
+                    aggregateLogField(QStringLiteral("registered_platforms"),
+                                      aggregateListLabel(sortedAggregatePlatformSet(m_registeredListenPlatforms))),
+                    aggregateLogField(QStringLiteral("service_listening_platforms"),
+                                      aggregateListLabel(sortedAggregatePlatformSet(m_serviceListeningPlatforms))),
+                    aggregateLogField(QStringLiteral("manager_listening_platforms"),
+                                      aggregateListLabel(aggregateManagerListeningPlatforms())),
+                });
             refreshAutoReplyToggleButtonUi();
             return;
         }
 
         setAggregateAutoReplyEnabled(true);
+        appendAggregateAutoReplyLog(
+            QStringLiteral("enabled"),
+            {
+                aggregateLogField(QStringLiteral("current_conversation_id"), QString::number(m_currentConvId)),
+                aggregateLogField(QStringLiteral("registered_platforms"),
+                                  aggregateListLabel(sortedAggregatePlatformSet(m_registeredListenPlatforms))),
+                aggregateLogField(QStringLiteral("service_listening_platforms"),
+                                  aggregateListLabel(sortedAggregatePlatformSet(m_serviceListeningPlatforms))),
+                aggregateLogField(QStringLiteral("manager_listening_platforms"),
+                                  aggregateListLabel(aggregateManagerListeningPlatforms())),
+            });
         showStatusMessage(QStringLiteral("已开启自动回复"), 4000);
-        if (m_currentConvId > 0)
-            tryAggregateAutoReply(m_currentConvId, QStringLiteral("manual-enable"));
         return;
     }
 
     setAggregateAutoReplyEnabled(false);
+    appendAggregateAutoReplyLog(
+        QStringLiteral("disabled"),
+        {
+            aggregateLogField(QStringLiteral("current_conversation_id"), QString::number(m_currentConvId)),
+            aggregateLogField(QStringLiteral("auto_reply_busy"), aggregateBoolLabel(m_autoReplyBusy)),
+            aggregateLogField(QStringLiteral("target_conversation_id"), QString::number(m_autoReplyTargetConvId)),
+            aggregateLogField(QStringLiteral("trace_id"), m_autoReplyTraceId),
+        });
     abortAutoReplyRequest();
     showStatusMessage(QStringLiteral("已停止自动回复"), 5000);
 }
@@ -5657,6 +8033,7 @@ void AggregateChatForm::onConversationMessagesCleared(int conversationId)
 {
     if (m_pendingStickyConvId == conversationId)
         m_pendingStickyConvId = -1;
+    m_lastAutoReplyInboundMessageKeyByConversation.remove(conversationId);
     if (conversationId == m_currentConvId) {
         clearPendingNewMessageHint();
         m_lastBubbleDate = QDate();
@@ -5672,6 +8049,7 @@ void AggregateChatForm::onConversationDeleted(int conversationId)
 {
     if (m_pendingStickyConvId == conversationId)
         m_pendingStickyConvId = -1;
+    m_lastAutoReplyInboundMessageKeyByConversation.remove(conversationId);
     if (conversationId == m_currentConvId) {
         clearPendingNewMessageHint();
         m_currentConvId = -1;
@@ -5707,8 +8085,41 @@ void AggregateChatForm::onNewMessage(int conversationId, const MessageRecord& ms
     refreshConversationList();
     showStatusMessage(QStringLiteral("新消息: %1").arg(msg.content.left(30)), 3000);
 
-    if (conversationId == m_currentConvId && msg.direction == QLatin1String("in"))
-        tryAggregateAutoReply(conversationId, QStringLiteral("T2"));
+    if (msg.direction == QLatin1String("in")) {
+        const QString inboundMessageKey = buildMessageIdentityKey(msg);
+        const bool duplicateAutoReplyTrigger =
+            m_lastAutoReplyInboundMessageKeyByConversation.value(conversationId) == inboundMessageKey;
+        appendAggregateAutoReplyLog(
+            QStringLiteral("inbound_message_received"),
+            {
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("current_conversation_id"), QString::number(m_currentConvId)),
+                aggregateLogField(QStringLiteral("message_id"), QString::number(msg.id)),
+                aggregateLogField(QStringLiteral("platform_message_id"), msg.platformMsgId),
+                aggregateLogField(QStringLiteral("duplicate_auto_reply_trigger"),
+                                  aggregateBoolLabel(duplicateAutoReplyTrigger)),
+                aggregateLogField(QStringLiteral("auto_reply_enabled"), aggregateBoolLabel(isAggregateAutoReplyEnabled())),
+                aggregateLogField(QStringLiteral("service_listening_platforms"),
+                                  aggregateListLabel(sortedAggregatePlatformSet(m_serviceListeningPlatforms))),
+                aggregateLogField(QStringLiteral("manager_listening_platforms"),
+                                  aggregateListLabel(aggregateManagerListeningPlatforms())),
+                aggregateLogField(QStringLiteral("content_preview"), aggregateLogPreview(msg.content)),
+            });
+        if (duplicateAutoReplyTrigger) {
+            appendAggregateAutoReplyLog(
+                QStringLiteral("skip_duplicate_auto_reply_trigger"),
+                {
+                    aggregateLogField(QStringLiteral("trigger"), QStringLiteral("T2")),
+                    aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                    aggregateLogField(QStringLiteral("message_id"), QString::number(msg.id)),
+                    aggregateLogField(QStringLiteral("platform_message_id"), msg.platformMsgId),
+                    aggregateLogField(QStringLiteral("content_preview"), aggregateLogPreview(msg.content)),
+                });
+        } else {
+            m_lastAutoReplyInboundMessageKeyByConversation.insert(conversationId, inboundMessageKey);
+            tryAggregateAutoReply(conversationId, QStringLiteral("T2"));
+        }
+    }
     qInfo() << "[AggregateChatForm] inbound message UI timing"
             << "conversationId=" << conversationId
             << "messageId=" << msg.id
@@ -5988,6 +8399,7 @@ void AggregateChatForm::abortAggregateAiRequest()
         m_autoReplyBusy = false;
         m_autoReplyTargetConvId = -1;
         m_autoReplyAccumulated.clear();
+        m_autoReplyTraceId.clear();
     }
     if (m_customerProfileBusy) {
         m_customerProfileBusy = false;
@@ -5999,6 +8411,20 @@ void AggregateChatForm::abortAggregateAiRequest()
 
 void AggregateChatForm::abortAutoReplyRequest()
 {
+    if (m_autoReplyBusy || m_autoReplyRequestEventId > 0 || !m_autoReplyTraceId.isEmpty()) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("abort_requested"),
+            {
+                aggregateLogField(QStringLiteral("target_conversation_id"), QString::number(m_autoReplyTargetConvId)),
+                aggregateLogField(QStringLiteral("auto_reply_busy"), aggregateBoolLabel(m_autoReplyBusy)),
+                aggregateLogField(QStringLiteral("trace_id"), m_autoReplyTraceId),
+                aggregateLogField(QStringLiteral("request_event_id"), QString::number(m_autoReplyRequestEventId)),
+                aggregateLogField(QStringLiteral("elapsed_ms"),
+                                  QString::number(m_autoReplyRequestTimer.isValid()
+                                                      ? int(m_autoReplyRequestTimer.elapsed())
+                                                      : 0)),
+            });
+    }
     if (m_autoReplyBusy && m_autoReplyRequestEventId > 0) {
         AiRequestEventDao().appendStage(m_autoReplyRequestEventId, m_autoReplyTargetConvId,
                                          QStringLiteral("canceled"));
@@ -6012,6 +8438,7 @@ void AggregateChatForm::abortAutoReplyRequest()
         m_autoReplyBusy = false;
         m_autoReplyTargetConvId = -1;
         m_autoReplyAccumulated.clear();
+        m_autoReplyTraceId.clear();
     }
     updateAggregateAiControlsVisibility();
     refreshRightBarMetrics();
@@ -6080,6 +8507,7 @@ void AggregateChatForm::shutdownTransientWork()
     m_autoReplyBusy = false;
     m_customerProfileBusy = false;
     m_autoReplyTargetConvId = -1;
+    m_autoReplyTraceId.clear();
     m_aggregateAiRequestEventId = 0;
     m_autoReplyRequestEventId = 0;
     m_customerProfileRequestEventId = 0;
@@ -6174,6 +8602,7 @@ void AggregateChatForm::onGenerateAiDraftClicked()
 {
     if (m_currentConvId <= 0 || m_aggregateAiGenerating)
         return;
+    clearSuggestedImageAttachments();
     if (m_autoReplyBusy) {
         showStatusMessage(QStringLiteral("自动回复处理中，请先停止自动回复或稍后再生成草稿"), 5000);
         return;
@@ -6183,18 +8612,47 @@ void AggregateChatForm::onGenerateAiDraftClicked()
         return;
     }
 
-    AggregateAiBuiltRequest built =
-        m_aiChatService->buildAggregateReplyRequest(m_currentConvId, m_aggregateAiSessionModelKey);
-    if (!handleAggregateBuildFailure(this, built, false, nullptr))
+    AggregateReplyBuildContext replyContext =
+        buildAggregateReplyContext(m_aiChatService,
+                                   m_currentConvId,
+                                   m_aggregateAiSessionModelKey,
+                                   QStringLiteral("aggregate_manual_generate"));
+    m_aggregateAiTraceId = replyContext.traceId;
+    if (!handleAggregateBuildFailure(this, replyContext.built, false, nullptr)) {
+        appendAggregateAiTraceFinish(replyContext.traceId,
+                                     m_currentConvId,
+                                     QStringLiteral("build_failed"),
+                                     QString(),
+                                     0,
+                                     0,
+                                     replyContext.built.failureDetail);
+        m_aggregateAiTraceId.clear();
         return;
+    }
+
+    QVector<SuggestedImageAttachment> suggestedImages;
+    suggestedImages.reserve(qMin(3, int(replyContext.imageCandidates.size())));
+    for (const AggregateImageCandidate& candidate : std::as_const(replyContext.imageCandidates)) {
+        if (!candidate.shouldAttach)
+            continue;
+        const QString path = candidate.filePath.trimmed();
+        if (path.isEmpty() || !QFileInfo::exists(path))
+            continue;
+        if (candidate.riskTags.contains(QStringLiteral("analysis_failed"), Qt::CaseInsensitive))
+            continue;
+        suggestedImages.push_back(aggregateSuggestedImageFromCandidate(candidate));
+        if (suggestedImages.size() >= 3)
+            break;
+    }
+    setSuggestedImageAttachments(suggestedImages);
 
     m_aggregateAiBaseline = m_inputEdit ? m_inputEdit->toPlainText() : QString();
     m_aggregateAiAccumulated.clear();
     m_aggregateAiIpcRequestId.clear();
 
-    built.request.extraRootFields.insert(QStringLiteral("max_tokens"), 512);
     clearStreamingSession(m_aggregateAiSession);
-    m_aggregateAiSession = m_aiChatService->createSession(built.config, built.request, this);
+    m_aggregateAiSession = m_aiChatService->createSession(
+        replyContext.built.config, replyContext.built.request, this);
     connect(m_aggregateAiSession, &IAiStreamingSession::delta, this, &AggregateChatForm::onAggregateAiStreamDelta);
     connect(m_aggregateAiSession, &IAiStreamingSession::completed, this, &AggregateChatForm::onAggregateAiCompleted);
     connect(m_aggregateAiSession, &IAiStreamingSession::failed, this, &AggregateChatForm::onAggregateAiFailed);
@@ -6203,20 +8661,28 @@ void AggregateChatForm::onGenerateAiDraftClicked()
     m_aggregateAiRequestEventId = AiRequestEventDao().beginEvent(
         QStringLiteral("aggregate_manual"),
         m_currentConvId,
-        m_aggregateAiSessionModelKey,
-        built.config.model,
+        replyContext.runtimeConfig.sessionModelKey,
+        replyContext.built.config.model,
         QStringLiteral("manual"));
     if (m_aggregateAiRequestEventId > 0) {
         AiRequestEventDao eventDao;
         eventDao.appendStage(m_aggregateAiRequestEventId, m_currentConvId,
                              QStringLiteral("manual_started"));
+        if (!replyContext.knowledgeSnippets.isEmpty()) {
+            eventDao.appendStage(m_aggregateAiRequestEventId, m_currentConvId,
+                                 QStringLiteral("knowledge_retrieved"),
+                                 QString::number(replyContext.knowledgeSnippets.size()));
+        }
         eventDao.appendStage(m_aggregateAiRequestEventId, m_currentConvId,
                              QStringLiteral("context_ready"));
         eventDao.appendStage(m_aggregateAiRequestEventId, m_currentConvId,
                              QStringLiteral("request_sent"),
-                             aggregateModelMenuLabel(m_aggregateAiSessionModelKey));
+                             aggregateModelMenuLabel(replyContext.runtimeConfig.sessionModelKey));
     }
     setAggregateAiBusy(true);
+    if (!replyContext.knowledgeStatus.isEmpty())
+        showStatusMessage(replyContext.knowledgeStatus,
+                          replyContext.knowledgeSnippets.isEmpty() ? 4000 : 5000);
     m_aggregateAiSession->start();
 }
 
@@ -6261,35 +8727,213 @@ void AggregateChatForm::onIpcRequestFailed(const QString& requestId, const QStri
 
 void AggregateChatForm::tryAggregateAutoReply(int conversationId, const QString& triggerTag)
 {
-    if (conversationId <= 0 || !m_aiChatService)
+    m_autoReplyAttachments.clear();
+    if (conversationId <= 0 || !m_aiChatService) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("skip_invalid_context"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("has_ai_service"), aggregateBoolLabel(m_aiChatService != nullptr)),
+            });
         return;
-    if (!isAggregateAutoReplyEnabled())
+    }
+    if (!isAggregateAutoReplyEnabled()) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("skip_auto_disabled"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+            });
         return;
+    }
 
     const auto conv = m_conversationService
                           ? m_conversationService->conversationById(conversationId)
                           : std::optional<ConversationInfo>();
+    const QString platform = conv ? conv->platform.trimmed().toLower() : QString();
+    appendAggregateAutoReplyLog(
+        QStringLiteral("try_start"),
+        {
+            aggregateLogField(QStringLiteral("trigger"), triggerTag),
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+            aggregateLogField(QStringLiteral("current_conversation_id"), QString::number(m_currentConvId)),
+            aggregateLogField(QStringLiteral("platform"), platform),
+            aggregateLogField(QStringLiteral("platform_conversation_id"),
+                              conv ? conv->platformConversationId : QString()),
+            aggregateLogField(QStringLiteral("customer_name"), conv ? conv->customerName : QString()),
+            aggregateLogField(QStringLiteral("service_listening_platforms"),
+                              aggregateListLabel(sortedAggregatePlatformSet(m_serviceListeningPlatforms))),
+            aggregateLogField(QStringLiteral("manager_listening_platforms"),
+                              aggregateListLabel(aggregateManagerListeningPlatforms())),
+            aggregateLogField(QStringLiteral("manual_ai_busy"), aggregateBoolLabel(m_aggregateAiGenerating)),
+            aggregateLogField(QStringLiteral("auto_reply_busy"), aggregateBoolLabel(m_autoReplyBusy)),
+        });
+    if (platform.isEmpty()
+        || (!m_serviceListeningPlatforms.contains(platform)
+            && !ConversationManager::instance().isPlatformListening(platform))) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("skip_platform_not_listening"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("platform"), platform),
+                aggregateLogField(QStringLiteral("service_listening_platforms"),
+                                  aggregateListLabel(sortedAggregatePlatformSet(m_serviceListeningPlatforms))),
+                aggregateLogField(QStringLiteral("manager_listening_platforms"),
+                                  aggregateListLabel(aggregateManagerListeningPlatforms())),
+            });
+        qDebug() << "[AggregateAutoReply] skip platform not listening trigger=" << triggerTag
+                 << "conv=" << conversationId
+                 << "platform=" << platform;
+        return;
+    }
+
     if (!m_conversationService || !m_conversationService->isAggregateAutoReplyCandidate(conversationId)) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("skip_not_candidate"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("platform"), conv ? conv->platform : QString()),
+                aggregateLogField(QStringLiteral("has_conversation_service"),
+                                  aggregateBoolLabel(m_conversationService != nullptr)),
+            });
         qDebug() << "[AggregateAutoReply] skip eligibility trigger=" << triggerTag << "conv=" << conversationId
                  << "platform=" << (conv ? conv->platform : QString());
         return;
     }
 
     if (m_aggregateAiGenerating || m_autoReplyBusy) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("skip_busy"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("manual_ai_busy"), aggregateBoolLabel(m_aggregateAiGenerating)),
+                aggregateLogField(QStringLiteral("auto_reply_busy"), aggregateBoolLabel(m_autoReplyBusy)),
+                aggregateLogField(QStringLiteral("target_conversation_id"), QString::number(m_autoReplyTargetConvId)),
+                aggregateLogField(QStringLiteral("trace_id"), m_autoReplyTraceId),
+            });
         qInfo() << "[AggregateAutoReply] skip busy trigger=" << triggerTag << "conv=" << conversationId;
         return;
     }
 
+    const AggregateReplyRuntimeConfig autoRuntime =
+        resolveAggregateReplyRuntimeConfig(conversationId, m_aggregateAiSessionModelKey);
+    if (!autoRuntime.usingRobot) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("skip_robot_not_ready"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("platform"), autoRuntime.platform),
+                aggregateLogField(QStringLiteral("config_source"), autoRuntime.source),
+                aggregateLogField(QStringLiteral("config_status"), autoRuntime.statusText),
+                aggregateLogField(QStringLiteral("bound_robot_id"), autoRuntime.boundRobotId),
+                aggregateLogField(QStringLiteral("robot_found"), aggregateBoolLabel(autoRuntime.robotFound)),
+                aggregateLogField(QStringLiteral("robot_enabled"), aggregateBoolLabel(autoRuntime.robotEnabled)),
+                aggregateLogField(QStringLiteral("selected_session_model_key"), m_aggregateAiSessionModelKey),
+            });
+        qInfo() << "[AggregateAutoReply] skip robot not ready trigger=" << triggerTag
+                << "conv=" << conversationId
+                << "platform=" << autoRuntime.platform
+                << "status=" << autoRuntime.statusText;
+        return;
+    }
+
     QString skipReason;
-    AggregateAiBuiltRequest built =
-        m_aiChatService->buildAggregateReplyRequest(conversationId, m_aggregateAiSessionModelKey);
-    if (!handleAggregateBuildFailure(this, built, true, &skipReason)) {
+    appendAggregateAutoReplyLog(
+        QStringLiteral("build_started"),
+        {
+            aggregateLogField(QStringLiteral("trigger"), triggerTag),
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+            aggregateLogField(QStringLiteral("selected_session_model_key"), m_aggregateAiSessionModelKey),
+            aggregateLogField(QStringLiteral("robot_session_model_key"), autoRuntime.sessionModelKey),
+            aggregateLogField(QStringLiteral("bound_robot_id"), autoRuntime.boundRobotId),
+            aggregateLogField(QStringLiteral("robot_name"), autoRuntime.robotName),
+            aggregateLogField(QStringLiteral("knowledge_base_ids"), autoRuntime.knowledgeBaseIds.join(QStringLiteral(","))),
+            aggregateLogField(QStringLiteral("reply_tone"), autoRuntime.replyTone),
+            aggregateLogField(QStringLiteral("common_address_terms"), autoRuntime.commonAddressTerms),
+            aggregateLogField(QStringLiteral("allow_auto_send_images"),
+                              aggregateBoolLabel(autoRuntime.allowAutoSendImages)),
+            aggregateLogField(QStringLiteral("allow_auto_send_multi_messages"),
+                              aggregateBoolLabel(autoRuntime.allowAutoSendMultiMessages)),
+            aggregateLogField(QStringLiteral("max_auto_send_messages"),
+                              QString::number(autoRuntime.maxAutoSendMessages)),
+        });
+    AggregateReplyBuildContext replyContext =
+        buildAggregateReplyContext(m_aiChatService,
+                                   conversationId,
+                                   m_aggregateAiSessionModelKey,
+                                   QStringLiteral("aggregate_auto_reply"));
+    if (!handleAggregateBuildFailure(this, replyContext.built, true, &skipReason)) {
+        appendAggregateAiTraceFinish(replyContext.traceId,
+                                     conversationId,
+                                     QStringLiteral("build_failed"),
+                                     QString(),
+                                     0,
+                                     0,
+                                     replyContext.built.failureDetail);
+        appendAggregateAutoReplyLog(
+            QStringLiteral("build_failed"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("trace_id"), replyContext.traceId),
+                aggregateLogField(QStringLiteral("skip_reason"), skipReason),
+                aggregateLogField(QStringLiteral("session_model_key"), replyContext.runtimeConfig.sessionModelKey),
+                aggregateLogField(QStringLiteral("config_source"), replyContext.runtimeConfig.source),
+                aggregateLogField(QStringLiteral("config_status"), replyContext.runtimeConfig.statusText),
+                aggregateLogField(QStringLiteral("bound_robot_id"), replyContext.runtimeConfig.boundRobotId),
+                aggregateLogField(QStringLiteral("failure_detail"), replyContext.built.failureDetail),
+                aggregateLogField(QStringLiteral("knowledge_status"), replyContext.knowledgeStatus),
+                aggregateLogField(QStringLiteral("knowledge_failure_stage"),
+                                  replyContext.knowledgeTrace.failureStage),
+            });
         qInfo() << "[AggregateAutoReply] skip build:" << skipReason << "trigger=" << triggerTag
                 << "conv=" << conversationId;
         return;
     }
+    m_autoReplyAttachments = replyContext.imageAttachments;
+    appendAggregateAutoReplyLog(
+        QStringLiteral("build_succeeded"),
+        {
+            aggregateLogField(QStringLiteral("trigger"), triggerTag),
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+            aggregateLogField(QStringLiteral("trace_id"), replyContext.traceId),
+            aggregateLogField(QStringLiteral("session_model_key"), replyContext.runtimeConfig.sessionModelKey),
+            aggregateLogField(QStringLiteral("config_source"), replyContext.runtimeConfig.source),
+            aggregateLogField(QStringLiteral("bound_robot_id"), replyContext.runtimeConfig.boundRobotId),
+            aggregateLogField(QStringLiteral("robot_name"), replyContext.runtimeConfig.robotName),
+            aggregateLogField(QStringLiteral("reply_tone"), replyContext.runtimeConfig.replyTone),
+            aggregateLogField(QStringLiteral("common_address_terms"),
+                              replyContext.runtimeConfig.commonAddressTerms),
+            aggregateLogField(QStringLiteral("allow_auto_send_images"),
+                              aggregateBoolLabel(replyContext.runtimeConfig.allowAutoSendImages)),
+            aggregateLogField(QStringLiteral("allow_auto_send_multi_messages"),
+                              aggregateBoolLabel(replyContext.runtimeConfig.allowAutoSendMultiMessages)),
+            aggregateLogField(QStringLiteral("max_auto_send_messages"),
+                              QString::number(replyContext.runtimeConfig.maxAutoSendMessages)),
+            aggregateLogField(QStringLiteral("model"), replyContext.built.config.model),
+            aggregateLogField(QStringLiteral("knowledge_status"), replyContext.knowledgeStatus),
+            aggregateLogField(QStringLiteral("knowledge_failure_stage"), replyContext.knowledgeTrace.failureStage),
+            aggregateLogField(QStringLiteral("knowledge_results"),
+                              QString::number(replyContext.knowledgeSnippets.size())),
+            aggregateLogField(QStringLiteral("image_candidates"),
+                              QString::number(replyContext.imageCandidates.size())),
+            aggregateLogField(QStringLiteral("auto_image_attachments"),
+                              QString::number(m_autoReplyAttachments.size())),
+            aggregateLogField(QStringLiteral("auto_image_policy"),
+                              replyContext.runtimeConfig.allowAutoSendImages
+                                  ? QStringLiteral("allowed")
+                                  : QStringLiteral("disabled_by_robot")),
+        });
 
     m_autoReplyTargetConvId = conversationId;
+    m_autoReplyTraceId = replyContext.traceId;
+    m_autoReplyAllowMultiMessages = replyContext.runtimeConfig.allowAutoSendMultiMessages;
+    m_autoReplyMaxMessages = replyContext.runtimeConfig.maxAutoSendMessages;
     m_autoReplyAccumulated.clear();
     m_autoReplyBusy = true;
     m_autoReplyRequestTimer.restart();
@@ -6297,27 +8941,40 @@ void AggregateChatForm::tryAggregateAutoReply(int conversationId, const QString&
     m_autoReplyRequestEventId = AiRequestEventDao().beginEvent(
         QStringLiteral("aggregate_auto"),
         conversationId,
-        m_aggregateAiSessionModelKey,
-        built.config.model,
+        replyContext.runtimeConfig.sessionModelKey,
+        replyContext.built.config.model,
         triggerTag);
     if (m_autoReplyRequestEventId > 0) {
         AiRequestEventDao eventDao;
         eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
                              QStringLiteral("auto_started"));
+        if (!replyContext.knowledgeSnippets.isEmpty()) {
+            eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
+                                 QStringLiteral("knowledge_retrieved"),
+                                 QString::number(replyContext.knowledgeSnippets.size()));
+        }
         eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
                              QStringLiteral("context_ready"));
         eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
                              QStringLiteral("request_sent"),
-                             aggregateModelMenuLabel(m_aggregateAiSessionModelKey));
+                             aggregateModelMenuLabel(replyContext.runtimeConfig.sessionModelKey));
     }
     updateAggregateAiControlsVisibility();
-    built.request.extraRootFields.insert(QStringLiteral("max_tokens"), 512);
     clearStreamingSession(m_autoReplySession);
-    m_autoReplySession = m_aiChatService->createSession(built.config, built.request, this);
+    m_autoReplySession = m_aiChatService->createSession(
+        replyContext.built.config, replyContext.built.request, this);
     connect(m_autoReplySession, &IAiStreamingSession::delta, this, &AggregateChatForm::onAutoReplyStreamDelta);
     connect(m_autoReplySession, &IAiStreamingSession::completed, this, &AggregateChatForm::onAutoReplyCompleted);
     connect(m_autoReplySession, &IAiStreamingSession::failed, this, &AggregateChatForm::onAutoReplyFailed);
     m_autoReplySession->start();
+    appendAggregateAutoReplyLog(
+        QStringLiteral("generation_started"),
+        {
+            aggregateLogField(QStringLiteral("trigger"), triggerTag),
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+            aggregateLogField(QStringLiteral("trace_id"), m_autoReplyTraceId),
+            aggregateLogField(QStringLiteral("request_event_id"), QString::number(m_autoReplyRequestEventId)),
+        });
     showStatusMessage(QStringLiteral("AI 自动回复处理中..."), 0);
     qInfo() << "[AggregateAutoReply] started trigger=" << triggerTag << "conv=" << conversationId;
 }
@@ -6328,6 +8985,14 @@ void AggregateChatForm::onAutoReplyStreamDelta(const QString& delta)
         return;
     if (m_autoReplyFirstTokenMs <= 0) {
         m_autoReplyFirstTokenMs = int(m_autoReplyRequestTimer.elapsed());
+        appendAggregateAutoReplyLog(
+            QStringLiteral("first_token"),
+            {
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(m_autoReplyTargetConvId)),
+                aggregateLogField(QStringLiteral("trace_id"), m_autoReplyTraceId),
+                aggregateLogField(QStringLiteral("first_token_ms"), QString::number(m_autoReplyFirstTokenMs)),
+                aggregateLogField(QStringLiteral("delta_length"), QString::number(delta.size())),
+            });
         AiRequestEventDao().appendStage(
             m_autoReplyRequestEventId,
             m_autoReplyTargetConvId,
@@ -6342,13 +9007,37 @@ void AggregateChatForm::onAutoReplyCompleted()
     if (!m_autoReplyBusy)
         return;
     const int cid = m_autoReplyTargetConvId;
+    const QString traceId = m_autoReplyTraceId;
     m_autoReplyBusy = false;
     clearStreamingSession(m_autoReplySession);
     m_autoReplyTargetConvId = -1;
     const QString text = m_autoReplyAccumulated.trimmed();
     m_autoReplyAccumulated.clear();
+    const QVector<OutgoingMessagePart> imageAttachments = m_autoReplyAttachments;
+    m_autoReplyAttachments.clear();
+    const bool allowMultipleMessages = m_autoReplyAllowMultiMessages;
+    const int maxMessages = m_autoReplyMaxMessages;
+    m_autoReplyAllowMultiMessages = false;
+    m_autoReplyMaxMessages = 1;
 
     if (text.isEmpty()) {
+        const int durationMs = int(m_autoReplyRequestTimer.elapsed());
+        appendAggregateAiTraceFinish(traceId,
+                                     cid,
+                                     QStringLiteral("empty_completion"),
+                                     m_autoReplyAccumulated,
+                                     durationMs,
+                                     m_autoReplyFirstTokenMs,
+                                     QStringLiteral("empty_completion"));
+        appendAggregateAutoReplyLog(
+            QStringLiteral("empty_completion"),
+            {
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(cid)),
+                aggregateLogField(QStringLiteral("trace_id"), traceId),
+                aggregateLogField(QStringLiteral("duration_ms"), QString::number(durationMs)),
+                aggregateLogField(QStringLiteral("first_token_ms"), QString::number(m_autoReplyFirstTokenMs)),
+            });
+        m_autoReplyTraceId.clear();
         if (m_autoReplyRequestEventId > 0) {
             AiRequestEventDao().appendStage(m_autoReplyRequestEventId, cid,
                                              QStringLiteral("failed"),
@@ -6366,8 +9055,25 @@ void AggregateChatForm::onAutoReplyCompleted()
         return;
     }
 
+    const int durationMs = int(m_autoReplyRequestTimer.elapsed());
+    appendAggregateAiTraceFinish(traceId,
+                                 cid,
+                                 QStringLiteral("completed"),
+                                 text,
+                                 durationMs,
+                                 m_autoReplyFirstTokenMs);
+    appendAggregateAutoReplyLog(
+        QStringLiteral("generation_completed"),
+        {
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(cid)),
+            aggregateLogField(QStringLiteral("trace_id"), traceId),
+            aggregateLogField(QStringLiteral("duration_ms"), QString::number(durationMs)),
+            aggregateLogField(QStringLiteral("first_token_ms"), QString::number(m_autoReplyFirstTokenMs)),
+            aggregateLogField(QStringLiteral("reply_length"), QString::number(text.size())),
+            aggregateLogField(QStringLiteral("reply_preview"), aggregateLogPreview(text)),
+        });
+    m_autoReplyTraceId.clear();
     if (m_autoReplyRequestEventId > 0) {
-        const int durationMs = int(m_autoReplyRequestTimer.elapsed());
         AiRequestEventDao eventDao;
         eventDao.appendStage(
             m_autoReplyRequestEventId,
@@ -6388,9 +9094,42 @@ void AggregateChatForm::onAutoReplyCompleted()
     updateAggregateAiControlsVisibility();
     refreshRightBarMetrics();
 
-    ConversationManager::instance().sendMessage(cid, text);
+    int rawMessageCount = 0;
+    const QStringList textMessages = aggregateAutoReplyTextMessages(
+        text,
+        allowMultipleMessages,
+        maxMessages,
+        &rawMessageCount);
+    OutgoingMessagePayload payload;
+    for (const QString& message : textMessages) {
+        OutgoingMessagePart textPart;
+        textPart.type = OutgoingPartType::Text;
+        textPart.text = message;
+        payload.parts.push_back(textPart);
+    }
+    for (const OutgoingMessagePart& part : imageAttachments)
+        payload.parts.push_back(part);
+    ConversationManager::instance().sendPayload(cid, payload);
+    appendAggregateAutoReplyLog(
+        QStringLiteral("send_submitted"),
+        {
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(cid)),
+            aggregateLogField(QStringLiteral("trace_id"), traceId),
+            aggregateLogField(QStringLiteral("reply_length"), QString::number(text.size())),
+            aggregateLogField(QStringLiteral("multi_message_allowed"),
+                              aggregateBoolLabel(allowMultipleMessages)),
+            aggregateLogField(QStringLiteral("max_auto_send_messages"), QString::number(maxMessages)),
+            aggregateLogField(QStringLiteral("raw_text_message_count"), QString::number(rawMessageCount)),
+            aggregateLogField(QStringLiteral("sent_text_message_count"), QString::number(textMessages.size())),
+            aggregateLogField(QStringLiteral("deduplicated_message_count"),
+                              QString::number(qMax(0, rawMessageCount - textMessages.size()))),
+            aggregateLogField(QStringLiteral("image_attachment_count"), QString::number(imageAttachments.size())),
+            aggregateLogField(QStringLiteral("reply_preview"), aggregateLogPreview(text)),
+        });
     schedulePythonServiceBackfill(300);
-    qInfo() << "[AggregateAutoReply] sent conv=" << cid << "len=" << text.size();
+    qInfo() << "[AggregateAutoReply] sent conv=" << cid << "len=" << text.size()
+            << "textMessages=" << textMessages.size()
+            << "imageAttachments=" << imageAttachments.size();
     showStatusMessage(QStringLiteral("已自动发送 AI 回复"), 4000);
 }
 
@@ -6399,10 +9138,34 @@ void AggregateChatForm::onAutoReplyFailed(const QString& reason)
     if (!m_autoReplyBusy)
         return;
     const int cid = m_autoReplyTargetConvId;
+    const QString traceId = m_autoReplyTraceId;
     m_autoReplyBusy = false;
     clearStreamingSession(m_autoReplySession);
     m_autoReplyTargetConvId = -1;
+    const QString partial = m_autoReplyAccumulated;
     m_autoReplyAccumulated.clear();
+    m_autoReplyAttachments.clear();
+    m_autoReplyAllowMultiMessages = false;
+    m_autoReplyMaxMessages = 1;
+    const int durationMs = int(m_autoReplyRequestTimer.elapsed());
+    appendAggregateAiTraceFinish(traceId,
+                                 cid,
+                                 QStringLiteral("failed"),
+                                 partial,
+                                 durationMs,
+                                 m_autoReplyFirstTokenMs,
+                                 reason);
+    appendAggregateAutoReplyLog(
+        QStringLiteral("generation_failed"),
+        {
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(cid)),
+            aggregateLogField(QStringLiteral("trace_id"), traceId),
+            aggregateLogField(QStringLiteral("duration_ms"), QString::number(durationMs)),
+            aggregateLogField(QStringLiteral("first_token_ms"), QString::number(m_autoReplyFirstTokenMs)),
+            aggregateLogField(QStringLiteral("partial_length"), QString::number(partial.size())),
+            aggregateLogField(QStringLiteral("reason"), reason.left(300)),
+        });
+    m_autoReplyTraceId.clear();
     if (m_autoReplyRequestEventId > 0) {
         AiRequestEventDao().appendStage(m_autoReplyRequestEventId, cid,
                                          QStringLiteral("failed"),
@@ -6443,6 +9206,14 @@ void AggregateChatForm::onAggregateAiCompleted()
     clearStreamingSession(m_aggregateAiSession);
     setAggregateAiBusy(false);
     if (m_aggregateAiAccumulated.trimmed().isEmpty()) {
+        appendAggregateAiTraceFinish(m_aggregateAiTraceId,
+                                     m_currentConvId,
+                                     QStringLiteral("empty_completion"),
+                                     m_aggregateAiAccumulated,
+                                     int(m_aggregateAiRequestTimer.elapsed()),
+                                     m_aggregateAiFirstTokenMs,
+                                     QStringLiteral("empty_completion"));
+        m_aggregateAiTraceId.clear();
         if (m_aggregateAiRequestEventId > 0) {
             AiRequestEventDao().appendStage(m_aggregateAiRequestEventId, m_currentConvId,
                                              QStringLiteral("failed"),
@@ -6457,6 +9228,13 @@ void AggregateChatForm::onAggregateAiCompleted()
         showStatusMessage(QStringLiteral("AI 未返回可用草稿"), 5000);
         return;
     }
+    appendAggregateAiTraceFinish(m_aggregateAiTraceId,
+                                 m_currentConvId,
+                                 QStringLiteral("completed"),
+                                 m_aggregateAiAccumulated,
+                                 int(m_aggregateAiRequestTimer.elapsed()),
+                                 m_aggregateAiFirstTokenMs);
+    m_aggregateAiTraceId.clear();
     if (m_aggregateAiRequestEventId > 0) {
         const int durationMs = int(m_aggregateAiRequestTimer.elapsed());
         AiRequestEventDao().appendStage(
@@ -6483,6 +9261,14 @@ void AggregateChatForm::onAggregateAiFailed(const QString& reason)
     if (!m_aggregateAiGenerating)
         return;
     clearStreamingSession(m_aggregateAiSession);
+    appendAggregateAiTraceFinish(m_aggregateAiTraceId,
+                                 m_currentConvId,
+                                 QStringLiteral("failed"),
+                                 m_aggregateAiAccumulated,
+                                 int(m_aggregateAiRequestTimer.elapsed()),
+                                 m_aggregateAiFirstTokenMs,
+                                 reason);
+    m_aggregateAiTraceId.clear();
     const QString tail =
         m_aggregateAiAccumulated.isEmpty()
             ? QStringLiteral("\n\n（AI 未能完成：%1）").arg(reason)

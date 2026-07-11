@@ -1,5 +1,6 @@
 #include "pythonservicecontroller.h"
 
+#include "../ai/aiprovidercatalog.h"
 #include "../../ipc/ipcservice.h"
 #include "../../ipc/ipctypes.h"
 #include "../../utils/appsettings.h"
@@ -121,6 +122,20 @@ void PythonServiceController::startService()
     env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
     env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
     env.insert(QStringLiteral("YY_PARENT_PID"), QString::number(QCoreApplication::applicationPid()));
+    const QString bgeVlDir = QDir(QStringLiteral(PROJECT_ROOT_DIR)).filePath(
+        QStringLiteral("database/models/bge-vl-base"));
+    if (QFileInfo::exists(bgeVlDir)) {
+        env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_EMBEDDING_MODEL"), bgeVlDir);
+    }
+    const AiProviderConfig doubaoConfig = loadAiProviderConfig(QStringLiteral("doubao:ark"));
+    if (doubaoConfig.isValidForChat()) {
+        env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_ANALYZER"), QStringLiteral("ark"));
+        env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_ANALYSIS_BASE_URL"), doubaoConfig.baseUrl.trimmed());
+        env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_ANALYSIS_MODEL"), doubaoConfig.model.trimmed());
+        env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_ANALYSIS_API_KEY"), doubaoConfig.apiKey);
+        env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_RERANK_ENABLED"), QStringLiteral("1"));
+        env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_RERANK_PROVIDER"), QStringLiteral("ark"));
+    }
     m_process->setProcessEnvironment(env);
 
     connect(m_process, &QProcess::started,
@@ -142,7 +157,7 @@ void PythonServiceController::startService()
          << QStringLiteral("--parent-pid") << QString::number(QCoreApplication::applicationPid());
 
     m_stopRequested = false;
-    m_startupPollsRemaining = 16;
+    m_startupPollsRemaining = 50;
     appendHumanLog(QStringLiteral("正在启动 Python 服务（debug 模式），请稍等。"));
     setState(State::Starting);
     m_process->start(pythonExe.isEmpty() ? QStringLiteral("python") : pythonExe, args);
@@ -209,8 +224,13 @@ void PythonServiceController::onProcessFinished(int exitCode, QProcess::ExitStat
             << "stopRequested=" << m_stopRequested;
     m_startupPollTimer->stop();
     if (finishedProcess) {
-        appendProcessOutput(finishedProcess->readAllStandardOutput());
-        appendProcessOutput(finishedProcess->readAllStandardError());
+        const QByteArray stdoutTail = finishedProcess->readAllStandardOutput();
+        const QByteArray stderrTail = finishedProcess->readAllStandardError();
+        qInfo() << "[PythonServiceController] process final output"
+                << "stdoutBytes=" << stdoutTail.size()
+                << "stderrBytes=" << stderrTail.size();
+        appendProcessOutput(stdoutTail);
+        appendProcessOutput(stderrTail);
         finishedProcess->disconnect(this);
         if (finishedProcess == m_process)
             m_process = nullptr;
@@ -222,7 +242,9 @@ void PythonServiceController::onProcessFinished(int exitCode, QProcess::ExitStat
         setState(State::Stopped);
         Ipc::IpcService::instance().markServiceUnavailable();
     } else {
-        appendHumanLog(QStringLiteral("Python 服务意外退出，请查看上方提示或确认依赖是否完整。"));
+        appendHumanLog(QStringLiteral("Python 服务意外退出：exitCode=%1，exitStatus=%2。请查看上方服务输出定位原因。")
+                           .arg(exitCode)
+                           .arg(static_cast<int>(exitStatus)));
         setState(State::Failed);
         QTimer::singleShot(0, this, []() {
             Ipc::IpcService::instance().connectToConfiguredService();
@@ -233,9 +255,14 @@ void PythonServiceController::onProcessFinished(int exitCode, QProcess::ExitStat
 
 void PythonServiceController::onProcessError(QProcess::ProcessError error)
 {
-    qWarning() << "[PythonServiceController] process error"
-               << "error=" << error
-               << "stopRequested=" << m_stopRequested;
+    if (m_stopRequested) {
+        qInfo() << "[PythonServiceController] process error while stopping"
+                << "error=" << error;
+    } else {
+        qWarning() << "[PythonServiceController] process error"
+                   << "error=" << error
+                   << "stopRequested=" << m_stopRequested;
+    }
     if (error == QProcess::FailedToStart) {
         appendHumanLog(QStringLiteral("启动失败：没有找到 Python，或 Python 无法运行。请确认已安装 Python 并加入 PATH。"));
         setState(State::Failed);
@@ -308,6 +335,9 @@ void PythonServiceController::appendHumanLog(const QString& line)
 
 void PythonServiceController::appendProcessOutput(const QByteArray& chunk)
 {
+    if (!chunk.isEmpty())
+        qInfo().noquote() << "[PythonServiceController] process output chunk"
+                          << QString::fromUtf8(chunk).left(4000);
     const QString text = QString::fromUtf8(chunk);
     const QStringList lines = text.split(QRegularExpression(QStringLiteral("\\r?\\n")), Qt::SkipEmptyParts);
     for (const QString& line : lines) {

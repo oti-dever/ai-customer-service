@@ -99,6 +99,7 @@ private:
     void startOneClickAggregate();
     void openQuickLaunchManager();
     void runQuickLaunchApps();
+    void launchCustomerServicePlatform(const QString& platformId, const QString& displayName);
     void openAppHelpDialog();
     void openBugLogDialog();
     void openPythonServiceConnectionDialog();

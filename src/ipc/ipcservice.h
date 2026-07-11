@@ -3,8 +3,10 @@
 
 #include "ipctypes.h"
 #include <QObject>
+#include <QJsonObject>
 #include <QMap>
 #include <QSet>
+#include <QStringList>
 #include <QTimer>
 #include <QUrl>
 
@@ -59,6 +61,82 @@ public:
                                           int timeoutMs = 5000,
                                           ResponseStatus* statusOut = nullptr,
                                           QString* errorOut = nullptr);
+    QJsonObject fetchKnowledgeBases(int timeoutMs = 5000,
+                                    ResponseStatus* statusOut = nullptr,
+                                    QString* errorOut = nullptr);
+    QJsonObject createKnowledgeBase(const QJsonObject& payload,
+                                    int timeoutMs = 5000,
+                                    ResponseStatus* statusOut = nullptr,
+                                    QString* errorOut = nullptr);
+    QJsonObject updateKnowledgeBase(const QJsonObject& payload,
+                                    int timeoutMs = 5000,
+                                    ResponseStatus* statusOut = nullptr,
+                                    QString* errorOut = nullptr);
+    QJsonObject setKnowledgeBaseEnabled(const QString& baseId,
+                                        bool enabled,
+                                        int timeoutMs = 5000,
+                                        ResponseStatus* statusOut = nullptr,
+                                        QString* errorOut = nullptr);
+    QJsonObject deleteKnowledgeBase(const QString& baseId,
+                                    int timeoutMs = 5000,
+                                    ResponseStatus* statusOut = nullptr,
+                                    QString* errorOut = nullptr);
+    QJsonObject fetchKnowledgePlatformBindings(const QString& platform,
+                                               int timeoutMs = 5000,
+                                               ResponseStatus* statusOut = nullptr,
+                                               QString* errorOut = nullptr);
+    QJsonObject saveKnowledgePlatformBindings(const QString& platform,
+                                              const QStringList& baseIds,
+                                              int timeoutMs = 5000,
+                                              ResponseStatus* statusOut = nullptr,
+                                              QString* errorOut = nullptr);
+    QJsonObject importKnowledgeDirectory(const QString& directory,
+                                         const QString& baseName = QStringLiteral("键盘键帽客服知识库PoC"),
+                                         const QString& shopId = QStringLiteral("keyboard-demo-shop"),
+                                         const QString& scene = QStringLiteral("reply_draft"),
+                                         int timeoutMs = 120000,
+                                         bool asyncTask = false,
+                                         ResponseStatus* statusOut = nullptr,
+                                         QString* errorOut = nullptr);
+    QJsonObject importKnowledgeDirectoryForBase(const QString& directory,
+                                                const QString& baseId,
+                                                const QString& baseName = QStringLiteral("键盘键帽客服知识库PoC"),
+                                                const QString& applicableShops = QString(),
+                                                const QString& scene = QStringLiteral("reply_draft"),
+                                                int timeoutMs = 120000,
+                                                bool asyncTask = false,
+                                                ResponseStatus* statusOut = nullptr,
+                                                QString* errorOut = nullptr);
+    QJsonObject fetchKnowledgeImportTask(const QString& taskId,
+                                         int timeoutMs = 120000,
+                                         ResponseStatus* statusOut = nullptr,
+                                         QString* errorOut = nullptr);
+    QJsonObject fetchKnowledgeDocuments(const QString& baseId = QString(),
+                                        int timeoutMs = 5000,
+                                        ResponseStatus* statusOut = nullptr,
+                                        QString* errorOut = nullptr);
+    QJsonObject fetchKnowledgeImages(const QString& baseId = QString(),
+                                     int timeoutMs = 5000,
+                                     ResponseStatus* statusOut = nullptr,
+                                     QString* errorOut = nullptr);
+    QJsonObject searchKnowledgeImages(const QString& query,
+                                      const QString& platform = QString(),
+                                      const QString& shopId = QStringLiteral("keyboard-demo-shop"),
+                                      const QString& scene = QStringLiteral("reply_draft"),
+                                      int topK = 3,
+                                      int timeoutMs = 15000,
+                                      ResponseStatus* statusOut = nullptr,
+                                      QString* errorOut = nullptr,
+                                      const QStringList& baseIds = QStringList());
+    QJsonObject searchKnowledge(const QString& query,
+                                const QString& platform = QString(),
+                                const QString& shopId = QStringLiteral("keyboard-demo-shop"),
+                                const QString& scene = QStringLiteral("reply_draft"),
+                                int topK = 3,
+                                int timeoutMs = 2500,
+                                ResponseStatus* statusOut = nullptr,
+                                QString* errorOut = nullptr,
+                                const QStringList& baseIds = QStringList());
     QJsonObject fetchPlatformReplay(const QString& platform = QString(),
                                     const QString& cursor = QString(),
                                     int limit = 100,

@@ -1128,6 +1128,10 @@ QIcon customerServiceIcon(const QString& platformId)
         return resourceIcon(QStringLiteral(":/pinduoduo_logo.svg"));
     if (platformId == QLatin1String("douyin"))
         return resourceIcon(QStringLiteral(":/doudian_logo.svg"));
+    if (platformId == QLatin1String("wechat"))
+        return resourceIcon(QStringLiteral(":/aggregate_reception_icons/wechat_logo_icon.svg"));
+    if (platformId == QLatin1String("qq"))
+        return resourceIcon(QStringLiteral(":/aggregate_reception_icons/qq_logo_icon.svg"));
     return {};
 }
 
@@ -1336,6 +1340,11 @@ QIcon onlinePlatformFallbackIcon(const WindowInfo& info)
     if (proc.contains(QStringLiteral("wechat")) || title.contains(QStringLiteral("wechat"))
         || info.platformName.contains(QStringLiteral("微信"))) {
         return resourceIcon(QStringLiteral(":/wechat_logo.svg"));
+    }
+    if (proc == QLatin1String("qq.exe") || proc.contains(QStringLiteral("qqnt"))
+        || info.platformName.contains(QStringLiteral("腾讯QQ"))
+        || info.platformName == QStringLiteral("QQ")) {
+        return resourceIcon(QStringLiteral(":/aggregate_reception_icons/qq_logo_icon.svg"));
     }
     if (proc.contains(QStringLiteral("msedge")) || title.contains(QStringLiteral("edge"))) {
         return resourceIcon(QStringLiteral(":/edge_logo.svg"));
@@ -1614,7 +1623,13 @@ QWidget* MainWindow::buildLeftSidebar()
     m_csGroup->setFlags(m_csGroup->flags() & ~Qt::ItemIsDropEnabled);
 
     struct CsItem { const char* name; const char* id; };
-    CsItem csItems[] = {{"千牛", "qianniu"}, {"拼多多", "pinduoduo"}, {"抖店", "douyin"}};
+    CsItem csItems[] = {
+        {"千牛", "qianniu"},
+        {"拼多多", "pinduoduo"},
+        {"抖店", "douyin"},
+        {"微信", "wechat"},
+        {"QQ", "qq"},
+    };
     for (const auto& cs : csItems) {
         const QString platformId = QString::fromUtf8(cs.id);
         const QString csName = QString::fromUtf8(cs.name);
@@ -1908,7 +1923,8 @@ void MainWindow::onPlatformTreeSelectionChanged()
         hideCurrentFloatWindow();
         m_activeWindowId.clear();
         const QString name = platformTreeRowLabel(idx);
-        showPlaceholderPage(QStringLiteral("请通过顶部「添加新窗口」按钮关联 %1 窗口").arg(name));
+        showPlaceholderPage(QStringLiteral("正在启动或打开 %1，请在应用就绪后通过「添加新窗口」关联窗口").arg(name));
+        launchCustomerServicePlatform(id, name);
         return;
     }
 
@@ -2790,6 +2806,197 @@ static bool quickLaunchHasEnumeratedVisibleWindowForExe(const QSet<QString>& vis
 }
 #endif
 
+namespace {
+
+struct CustomerServiceLaunchProfile {
+    QString platformId;
+    QString displayName;
+    QStringList keywords;
+    QStringList commonPaths;
+};
+
+static void addCommonPath(QStringList& out, const QString& base, const QString& rel)
+{
+    if (base.trimmed().isEmpty())
+        return;
+    out.append(QDir(base).filePath(rel));
+}
+
+static CustomerServiceLaunchProfile customerServiceLaunchProfile(const QString& platformId,
+                                                                 const QString& displayName)
+{
+    CustomerServiceLaunchProfile p;
+    p.platformId = platformId;
+    p.displayName = displayName.trimmed().isEmpty() ? platformId : displayName.trimmed();
+
+    const QString programFiles = qEnvironmentVariable("ProgramFiles");
+    const QString programFilesX86 = qEnvironmentVariable("ProgramFiles(x86)");
+    const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
+
+    if (platformId == QLatin1String("qianniu")) {
+        p.keywords = { QStringLiteral("千牛"), QStringLiteral("qianniu"),
+                       QStringLiteral("aliworkbench"), QStringLiteral("aliim") };
+        addCommonPath(p.commonPaths, programFiles, QStringLiteral("AliWorkbench/AliWorkbench.exe"));
+        addCommonPath(p.commonPaths, programFilesX86, QStringLiteral("AliWorkbench/AliWorkbench.exe"));
+        addCommonPath(p.commonPaths, programFiles, QStringLiteral("AliWangWang/AliIM.exe"));
+        addCommonPath(p.commonPaths, programFilesX86, QStringLiteral("AliWangWang/AliIM.exe"));
+    } else if (platformId == QLatin1String("douyin")) {
+        p.keywords = { QStringLiteral("抖店"), QStringLiteral("douyin"),
+                       QStringLiteral("feige"), QStringLiteral("jinritemai") };
+    } else if (platformId == QLatin1String("wechat")) {
+        p.keywords = { QStringLiteral("微信"), QStringLiteral("wechat"), QStringLiteral("weixin") };
+        addCommonPath(p.commonPaths, programFiles, QStringLiteral("Tencent/WeChat/WeChat.exe"));
+        addCommonPath(p.commonPaths, programFilesX86, QStringLiteral("Tencent/WeChat/WeChat.exe"));
+        addCommonPath(p.commonPaths, programFiles, QStringLiteral("Tencent/Weixin/Weixin.exe"));
+        addCommonPath(p.commonPaths, programFilesX86, QStringLiteral("Tencent/Weixin/Weixin.exe"));
+        addCommonPath(p.commonPaths, localAppData, QStringLiteral("Tencent/WeChat/WeChat.exe"));
+        addCommonPath(p.commonPaths, localAppData, QStringLiteral("Tencent/Weixin/Weixin.exe"));
+    } else if (platformId == QLatin1String("qq")) {
+        p.keywords = { QStringLiteral("QQ"), QStringLiteral("腾讯QQ"), QStringLiteral("qqnt") };
+        addCommonPath(p.commonPaths, programFiles, QStringLiteral("Tencent/QQNT/QQ.exe"));
+        addCommonPath(p.commonPaths, programFilesX86, QStringLiteral("Tencent/QQNT/QQ.exe"));
+        addCommonPath(p.commonPaths, programFiles, QStringLiteral("Tencent/QQ/Bin/QQ.exe"));
+        addCommonPath(p.commonPaths, programFilesX86, QStringLiteral("Tencent/QQ/Bin/QQ.exe"));
+        addCommonPath(p.commonPaths, localAppData, QStringLiteral("Tencent/QQNT/QQ.exe"));
+    }
+
+    return p;
+}
+
+static bool textMatchesAnyKeyword(const QString& text, const QStringList& keywords)
+{
+    const QString lower = text.toLower();
+    for (const QString& keyword : keywords) {
+        const QString k = keyword.trimmed().toLower();
+        if (!k.isEmpty() && lower.contains(k))
+            return true;
+    }
+    return false;
+}
+
+static bool quickLaunchAppMatchesCustomerServicePlatform(const QuickLaunchApp& app,
+                                                        const CustomerServiceLaunchProfile& profile)
+{
+    const QString resolvedTarget = quickLaunchResolvedTargetForDedup(app.path);
+    QStringList parts = { app.name, app.path, QFileInfo(app.path).fileName(),
+                          QFileInfo(app.path).completeBaseName(), resolvedTarget,
+                          QFileInfo(resolvedTarget).fileName(),
+                          QFileInfo(resolvedTarget).completeBaseName() };
+
+    if (profile.platformId == QLatin1String("qq")) {
+        const QString appName = app.name.trimmed();
+        const QString fileName = QFileInfo(resolvedTarget.isEmpty() ? app.path : resolvedTarget).fileName();
+        if (appName.compare(QStringLiteral("QQ"), Qt::CaseInsensitive) == 0
+            || appName.contains(QStringLiteral("腾讯QQ"), Qt::CaseInsensitive)
+            || fileName.compare(QStringLiteral("QQ.exe"), Qt::CaseInsensitive) == 0
+            || resolvedTarget.contains(QStringLiteral("QQNT"), Qt::CaseInsensitive)) {
+            return true;
+        }
+        return false;
+    }
+
+    return textMatchesAnyKeyword(parts.join(QLatin1Char(' ')), profile.keywords);
+}
+
+static bool findQuickLaunchAppForCustomerServicePlatform(const QVector<QuickLaunchApp>& apps,
+                                                         const CustomerServiceLaunchProfile& profile,
+                                                         QuickLaunchApp* out)
+{
+    for (const QuickLaunchApp& app : apps) {
+        if (app.path.isEmpty())
+            continue;
+        if (quickLaunchAppMatchesCustomerServicePlatform(app, profile)) {
+            if (out)
+                *out = app;
+            return true;
+        }
+    }
+    return false;
+}
+
+static QString firstExistingPath(const QStringList& paths)
+{
+    for (const QString& path : paths) {
+        const QFileInfo fi(path);
+        if (fi.exists() && fi.isFile())
+            return fi.absoluteFilePath();
+    }
+    return {};
+}
+
+} // namespace
+
+void MainWindow::launchCustomerServicePlatform(const QString& platformId, const QString& displayName)
+{
+    if (platformId == QLatin1String("pinduoduo")) {
+        const QUrl url(QStringLiteral("https://mms.pinduoduo.com/chat-merchant/index.html#/"));
+        if (!QDesktopServices::openUrl(url)) {
+            QMessageBox::warning(this,
+                                 QStringLiteral("打开失败"),
+                                 QStringLiteral("无法打开拼多多商家客服网页：\n%1").arg(url.toString()));
+            return;
+        }
+        statusBar()->showMessage(QStringLiteral("已打开拼多多商家客服网页"), 5000);
+        return;
+    }
+
+    const CustomerServiceLaunchProfile profile = customerServiceLaunchProfile(platformId, displayName);
+    if (profile.keywords.isEmpty() && profile.commonPaths.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("暂未配置 %1 的启动方式").arg(displayName), 5000);
+        return;
+    }
+
+    QVector<QuickLaunchApp> apps;
+    bool onlyIfNotRunning = true;
+    loadQuickLaunchConfig(apps, onlyIfNotRunning);
+
+    QuickLaunchApp matchedApp;
+    QString targetPath;
+    QString sourceText;
+    if (findQuickLaunchAppForCustomerServicePlatform(apps, profile, &matchedApp)) {
+        targetPath = matchedApp.path;
+        sourceText = QStringLiteral("快速启动应用");
+    } else {
+        targetPath = firstExistingPath(profile.commonPaths);
+        sourceText = QStringLiteral("常见安装路径");
+    }
+
+    if (targetPath.isEmpty()) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("未找到应用"),
+            QStringLiteral("未找到“%1”的安装路径。\n\n请先安装该应用，或在“快速启动应用”中添加它的 .exe / .lnk 后再点击。")
+                .arg(profile.displayName));
+        statusBar()->showMessage(QStringLiteral("未找到 %1 的安装路径").arg(profile.displayName), 5000);
+        return;
+    }
+
+    const QString exeName = quickLaunchExeNameForRunningCheck(targetPath);
+    if (!exeName.isEmpty() && quickLaunchIsAnyMatchingProcessRunning(exeName)) {
+        statusBar()->showMessage(
+            QStringLiteral("%1 已在运行，请通过「添加新窗口」关联窗口").arg(profile.displayName),
+            6000);
+        return;
+    }
+
+    QString err;
+    if (!launchQuickLaunchPath(targetPath, &err)) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("启动失败"),
+            QStringLiteral("无法启动“%1”。\n来源：%2\n路径：%3\n原因：%4")
+                .arg(profile.displayName,
+                     sourceText,
+                     targetPath,
+                     err.isEmpty() ? QStringLiteral("启动失败") : err));
+        return;
+    }
+
+    statusBar()->showMessage(
+        QStringLiteral("已启动 %1，应用就绪后可通过「添加新窗口」关联").arg(profile.displayName),
+        6000);
+}
+
 void MainWindow::runQuickLaunchApps()
 {
     loadQuickLaunchConfig(m_quickLaunchApps, m_quickLaunchOnlyIfNotRunning);
@@ -3025,6 +3232,9 @@ QString MainWindow::matchCustomerServicePlatform(const WindowInfo& info) const
     if (info.platformName.contains(QStringLiteral("千牛"))) return QStringLiteral("qianniu");
     if (info.platformName.contains(QStringLiteral("拼多多"))) return QStringLiteral("pinduoduo");
     if (info.platformName.contains(QStringLiteral("抖店"))) return QStringLiteral("douyin");
+    if (info.platformName.contains(QStringLiteral("微信"))) return QStringLiteral("wechat");
+    if (info.platformName.contains(QStringLiteral("腾讯QQ")) || info.platformName == QStringLiteral("QQ"))
+        return QStringLiteral("qq");
 
     QString proc = info.processName.toLower();
     if (proc.contains("aliworkbench") || proc.contains("aliim") || proc.contains("qianniu"))
@@ -3033,6 +3243,10 @@ QString MainWindow::matchCustomerServicePlatform(const WindowInfo& info) const
         return QStringLiteral("pinduoduo");
     if (proc.contains("douyin") || proc.contains("feige") || proc.contains("jinritemai"))
         return QStringLiteral("douyin");
+    if (proc.contains("wechat") || proc.contains("weixin"))
+        return QStringLiteral("wechat");
+    if (proc == QLatin1String("qq.exe") || proc.contains("qqnt"))
+        return QStringLiteral("qq");
 
     return {};
 }

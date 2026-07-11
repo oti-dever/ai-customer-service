@@ -599,6 +599,346 @@ QJsonObject IpcService::fetchConversationMessages(const QString& platform,
     return response;
 }
 
+QJsonObject IpcService::fetchKnowledgeBases(int timeoutMs, ResponseStatus* statusOut, QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/bases"));
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge bases fetched"
+            << "bases=" << response.value(QStringLiteral("bases")).toArray().size()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::createKnowledgeBase(const QJsonObject& payload,
+                                            int timeoutMs,
+                                            ResponseStatus* statusOut,
+                                            QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/bases"));
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge base create"
+            << "name=" << payload.value(QStringLiteral("name")).toString()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::updateKnowledgeBase(const QJsonObject& payload,
+                                            int timeoutMs,
+                                            ResponseStatus* statusOut,
+                                            QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/bases/update"));
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge base update"
+            << "baseId=" << payload.value(QStringLiteral("id")).toString()
+            << "name=" << payload.value(QStringLiteral("name")).toString()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::setKnowledgeBaseEnabled(const QString& baseId,
+                                                bool enabled,
+                                                int timeoutMs,
+                                                ResponseStatus* statusOut,
+                                                QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/bases/set_enabled"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("id"), baseId.trimmed());
+    payload.insert(QStringLiteral("enabled"), enabled);
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge base set enabled"
+            << "baseId=" << baseId
+            << "enabled=" << enabled
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::deleteKnowledgeBase(const QString& baseId,
+                                            int timeoutMs,
+                                            ResponseStatus* statusOut,
+                                            QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/bases/delete"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("id"), baseId.trimmed());
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge base delete"
+            << "baseId=" << baseId
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::fetchKnowledgePlatformBindings(const QString& platform,
+                                                       int timeoutMs,
+                                                       ResponseStatus* statusOut,
+                                                       QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/platform_bindings"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("platform"), platform.trimmed().toLower());
+    url.setQuery(query);
+
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge platform bindings fetched"
+            << "platform=" << platform
+            << "baseIds=" << response.value(QStringLiteral("base_ids")).toArray().size()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::saveKnowledgePlatformBindings(const QString& platform,
+                                                      const QStringList& baseIds,
+                                                      int timeoutMs,
+                                                      ResponseStatus* statusOut,
+                                                      QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/platform_bindings"));
+    QJsonArray baseIdArray;
+    for (const QString& baseId : baseIds) {
+        const QString trimmed = baseId.trimmed();
+        if (!trimmed.isEmpty())
+            baseIdArray.append(trimmed);
+    }
+    QJsonObject payload;
+    payload.insert(QStringLiteral("platform"), platform.trimmed().toLower());
+    payload.insert(QStringLiteral("base_ids"), baseIdArray);
+
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge platform bindings saved"
+            << "platform=" << platform
+            << "baseIds=" << baseIdArray.size()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::importKnowledgeDirectory(const QString& directory,
+                                                 const QString& baseName,
+                                                 const QString& shopId,
+                                                 const QString& scene,
+                                                 int timeoutMs,
+                                                 bool asyncTask,
+                                                 ResponseStatus* statusOut,
+                                                 QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/import_directory"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("directory"), directory.trimmed());
+    payload.insert(QStringLiteral("base_name"), baseName.trimmed().isEmpty()
+                       ? QStringLiteral("键盘键帽客服知识库PoC")
+                       : baseName.trimmed());
+    payload.insert(QStringLiteral("shop_id"), shopId.trimmed());
+    payload.insert(QStringLiteral("scene"), scene.trimmed().isEmpty() ? QStringLiteral("reply_draft") : scene.trimmed());
+    payload.insert(QStringLiteral("async"), asyncTask);
+
+    QElapsedTimer timer;
+    timer.start();
+    qInfo() << "[IpcService] knowledge directory import request"
+            << "url=" << url.toString()
+            << "directory=" << directory
+            << "baseName=" << payload.value(QStringLiteral("base_name")).toString()
+            << "shopId=" << shopId
+            << "scene=" << payload.value(QStringLiteral("scene")).toString()
+            << "async=" << asyncTask
+            << "timeoutMs=" << timeoutMs;
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge directory import"
+            << "elapsedMs=" << timer.elapsed()
+            << "directory=" << directory
+            << "documents=" << response.value(QStringLiteral("documents")).toArray().size()
+            << "images=" << response.value(QStringLiteral("images")).toArray().size()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "detail=" << response.value(QStringLiteral("detail")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::importKnowledgeDirectoryForBase(const QString& directory,
+                                                        const QString& baseId,
+                                                        const QString& baseName,
+                                                        const QString& applicableShops,
+                                                        const QString& scene,
+                                                        int timeoutMs,
+                                                        bool asyncTask,
+                                                        ResponseStatus* statusOut,
+                                                        QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/import_directory"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("directory"), directory.trimmed());
+    payload.insert(QStringLiteral("base_id"), baseId.trimmed());
+    payload.insert(QStringLiteral("base_name"), baseName.trimmed().isEmpty()
+                       ? QStringLiteral("键盘键帽客服知识库PoC")
+                       : baseName.trimmed());
+    payload.insert(QStringLiteral("applicable_shops"), applicableShops.trimmed());
+    payload.insert(QStringLiteral("scene"), scene.trimmed().isEmpty() ? QStringLiteral("reply_draft") : scene.trimmed());
+    payload.insert(QStringLiteral("async"), asyncTask);
+
+    QElapsedTimer timer;
+    timer.start();
+    qInfo() << "[IpcService] knowledge directory import for base request"
+            << "url=" << url.toString()
+            << "directory=" << directory
+            << "baseId=" << baseId
+            << "baseName=" << payload.value(QStringLiteral("base_name")).toString()
+            << "async=" << asyncTask
+            << "timeoutMs=" << timeoutMs;
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge directory import for base"
+            << "elapsedMs=" << timer.elapsed()
+            << "baseId=" << baseId
+            << "documents=" << response.value(QStringLiteral("documents")).toArray().size()
+            << "images=" << response.value(QStringLiteral("images")).toArray().size()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "detail=" << response.value(QStringLiteral("detail")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::fetchKnowledgeImportTask(const QString& taskId,
+                                                 int timeoutMs,
+                                                 ResponseStatus* statusOut,
+                                                 QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/import_task"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("task_id"), taskId.trimmed());
+    url.setQuery(query);
+
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge import task fetched"
+            << "taskId=" << taskId
+            << "taskStatus=" << response.value(QStringLiteral("status")).toString()
+            << "importStatus=" << response.value(QStringLiteral("task_status")).toString()
+            << "documents=" << response.value(QStringLiteral("documents")).toArray().size()
+            << "images=" << response.value(QStringLiteral("images")).toArray().size()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::fetchKnowledgeDocuments(const QString& baseId,
+                                                int timeoutMs,
+                                                ResponseStatus* statusOut,
+                                                QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/documents"));
+    QUrlQuery query;
+    if (!baseId.trimmed().isEmpty())
+        query.addQueryItem(QStringLiteral("base_id"), baseId.trimmed());
+    url.setQuery(query);
+
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge documents fetched"
+            << "documents=" << response.value(QStringLiteral("documents")).toArray().size()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::fetchKnowledgeImages(const QString& baseId,
+                                             int timeoutMs,
+                                             ResponseStatus* statusOut,
+                                             QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/images"));
+    QUrlQuery query;
+    if (!baseId.trimmed().isEmpty())
+        query.addQueryItem(QStringLiteral("base_id"), baseId.trimmed());
+    url.setQuery(query);
+
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge images fetched"
+            << "images=" << response.value(QStringLiteral("images")).toArray().size()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::searchKnowledgeImages(const QString& queryText,
+                                              const QString& platform,
+                                              const QString& shopId,
+                                              const QString& scene,
+                                              int topK,
+                                              int timeoutMs,
+                                              ResponseStatus* statusOut,
+                                              QString* errorOut,
+                                              const QStringList& baseIds)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/images/search"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("query"), queryText.trimmed());
+    payload.insert(QStringLiteral("platform"), platform.trimmed().toLower());
+    payload.insert(QStringLiteral("shop_id"), shopId.trimmed());
+    payload.insert(QStringLiteral("scene"), scene.trimmed().isEmpty() ? QStringLiteral("reply_draft") : scene.trimmed());
+    payload.insert(QStringLiteral("top_k"), qMax(1, topK));
+    QJsonArray baseIdArray;
+    for (const QString& baseId : baseIds) {
+        const QString trimmed = baseId.trimmed();
+        if (!trimmed.isEmpty())
+            baseIdArray.append(trimmed);
+    }
+    payload.insert(QStringLiteral("base_ids"), baseIdArray);
+
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge image search"
+            << "queryChars=" << queryText.size()
+            << "baseIds=" << baseIdArray.size()
+            << "results=" << response.value(QStringLiteral("results")).toArray().size()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::searchKnowledge(const QString& queryText,
+                                        const QString& platform,
+                                        const QString& shopId,
+                                        const QString& scene,
+                                        int topK,
+                                        int timeoutMs,
+                                        ResponseStatus* statusOut,
+                                        QString* errorOut,
+                                        const QStringList& baseIds)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/knowledge/search"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("query"), queryText.trimmed());
+    payload.insert(QStringLiteral("platform"), platform.trimmed().toLower());
+    payload.insert(QStringLiteral("shop_id"), shopId.trimmed());
+    payload.insert(QStringLiteral("scene"), scene.trimmed().isEmpty() ? QStringLiteral("reply_draft") : scene.trimmed());
+    payload.insert(QStringLiteral("top_k"), qMax(1, topK));
+    QJsonArray baseIdArray;
+    for (const QString& baseId : baseIds) {
+        const QString trimmed = baseId.trimmed();
+        if (!trimmed.isEmpty())
+            baseIdArray.append(trimmed);
+    }
+    payload.insert(QStringLiteral("base_ids"), baseIdArray);
+
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] knowledge search"
+            << "queryChars=" << queryText.size()
+            << "baseIds=" << baseIdArray.size()
+            << "results=" << response.value(QStringLiteral("results")).toArray().size()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
 QJsonObject IpcService::fetchPlatformReplay(const QString& platform,
                                             const QString& cursor,
                                             int limit,
@@ -866,8 +1206,16 @@ QJsonObject IpcService::performJsonGet(const QUrl& url, int timeoutMs,
     }
 
     if (reply->error() != QNetworkReply::NoError) {
+        const QByteArray body = reply->readAll();
+        const QJsonDocument doc = QJsonDocument::fromJson(body);
+        if (doc.isObject())
+            obj = doc.object();
         if (statusOut) *statusOut = ResponseStatus::Error;
-        if (errorOut) *errorOut = reply->errorString();
+        if (errorOut) {
+            const QString detail = obj.value(QStringLiteral("detail")).toString(
+                obj.value(QStringLiteral("error")).toString());
+            *errorOut = detail.isEmpty() ? reply->errorString() : detail;
+        }
         reply->deleteLater();
         return obj;
     }
@@ -893,6 +1241,8 @@ QJsonObject IpcService::performJsonPost(const QUrl& url,
                                         ResponseStatus* statusOut,
                                         QString* errorOut)
 {
+    QElapsedTimer timer;
+    timer.start();
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     request.setTransferTimeout(timeoutMs);
@@ -908,21 +1258,46 @@ QJsonObject IpcService::performJsonPost(const QUrl& url,
         reply->abort();
         if (statusOut) *statusOut = ResponseStatus::Timeout;
         if (errorOut) *errorOut = QStringLiteral("request_timeout");
+        qWarning() << "[IpcService] HTTP POST timeout"
+                   << "url=" << url.toString()
+                   << "elapsedMs=" << timer.elapsed()
+                   << "timeoutMs=" << timeoutMs
+                   << "payloadKeys=" << payload.keys();
         reply->deleteLater();
         return obj;
     }
 
     if (reply->error() != QNetworkReply::NoError) {
+        const QByteArray body = reply->readAll();
+        const QJsonDocument doc = QJsonDocument::fromJson(body);
+        if (doc.isObject())
+            obj = doc.object();
         if (statusOut) *statusOut = ResponseStatus::Error;
-        if (errorOut) *errorOut = reply->errorString();
+        if (errorOut) {
+            const QString detail = obj.value(QStringLiteral("detail")).toString(
+                obj.value(QStringLiteral("error")).toString());
+            *errorOut = detail.isEmpty() ? reply->errorString() : detail;
+        }
+        qWarning() << "[IpcService] HTTP POST failed"
+                   << "url=" << url.toString()
+                   << "elapsedMs=" << timer.elapsed()
+                   << "networkError=" << reply->error()
+                   << "httpStatus=" << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
+                   << "error=" << (errorOut ? *errorOut : reply->errorString())
+                   << "bodyBytes=" << body.size();
         reply->deleteLater();
         return obj;
     }
 
-    const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+    const QByteArray body = reply->readAll();
+    const QJsonDocument doc = QJsonDocument::fromJson(body);
     if (!doc.isObject()) {
         if (statusOut) *statusOut = ResponseStatus::Error;
         if (errorOut) *errorOut = QStringLiteral("invalid_json_response");
+        qWarning() << "[IpcService] HTTP POST invalid JSON"
+                   << "url=" << url.toString()
+                   << "elapsedMs=" << timer.elapsed()
+                   << "bodyBytes=" << body.size();
         reply->deleteLater();
         return obj;
     }
@@ -930,6 +1305,11 @@ QJsonObject IpcService::performJsonPost(const QUrl& url,
     if (statusOut) *statusOut = ResponseStatus::Success;
     if (errorOut) errorOut->clear();
     obj = doc.object();
+    qInfo() << "[IpcService] HTTP POST success"
+            << "url=" << url.toString()
+            << "elapsedMs=" << timer.elapsed()
+            << "httpStatus=" << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
+            << "bodyBytes=" << body.size();
     reply->deleteLater();
     return obj;
 }

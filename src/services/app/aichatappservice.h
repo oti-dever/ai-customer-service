@@ -1,6 +1,7 @@
 #ifndef AICHATAPPSERVICE_H
 #define AICHATAPPSERVICE_H
 
+#include "../../core/types.h"
 #include "../ai/aiprovidercatalog.h"
 #include "../ai/aitypes.h"
 #include <QObject>
@@ -28,6 +29,131 @@ struct AggregateAiBuiltRequest {
     bool ok() const { return failure == AggregateAiBuildFailure::None; }
 };
 
+struct KnowledgeSnippetContext {
+    QString chunkId;
+    QString sourceTitle;
+    QString titlePath;
+    QString snippet;
+    QString matchType;
+    double score = 0.0;
+    double keywordScore = 0.0;
+    double vectorScore = 0.0;
+};
+
+struct AggregateReplyStrategy {
+    QString replyTone;
+    QString commonAddressTerms;
+    bool allowAutoSendImages = false;
+    bool allowAutoSendMultiMessages = false;
+    int maxAutoSendMessages = 1;
+};
+
+struct ReplyRuntimeConfig {
+    QString platform;
+    QString source;
+    QString statusText;
+    QString sessionModelKey;
+    QString boundRobotId;
+    QString robotName;
+    QStringList knowledgeBaseIds;
+    QStringList knowledgeBaseNames;
+    AggregateReplyStrategy strategy;
+    bool usingRobot = false;
+    bool robotFound = false;
+    bool robotEnabled = false;
+};
+
+struct ReplyKnowledgeTrace {
+    QString latestInbound;
+    QString platform;
+    QString shopId;
+    QString scene;
+    QStringList boundBaseIds;
+    QString bindingStatus;
+    QString bindingError;
+    QString searchQuery;
+    QString statusText;
+    QString errorText;
+    QString failureStage;
+    QString responseStatus;
+    int healthMs = 0;
+    int bindingHttpMs = 0;
+    int searchHttpMs = 0;
+    int totalMs = 0;
+    int serverLatencyMs = -1;
+    bool searched = false;
+    bool skipped = false;
+    QList<KnowledgeSnippetContext> snippets;
+};
+
+struct ReplyImageCandidate {
+    QString assetId;
+    QString sourceTitle;
+    QString originalFilename;
+    QString filePath;
+    QString assetType;
+    QString summary;
+    QString tags;
+    QString scenarios;
+    QString riskTags;
+    QString suggestedReply;
+    QString recommendationReason;
+    QString riskNotice;
+    QString matchType;
+    double score = 0.0;
+    bool shouldAttach = false;
+    bool requiresHumanConfirm = true;
+};
+
+struct ReplyImageTrace {
+    QString latestInbound;
+    QString platform;
+    QStringList boundBaseIds;
+    QString bindingStatus;
+    QString bindingError;
+    QString searchQuery;
+    QString resolvedProductFocus;
+    QString resolutionSource;
+    QString statusText;
+    QString errorText;
+    QString failureStage;
+    QString responseStatus;
+    int bindingHttpMs = 0;
+    int searchHttpMs = 0;
+    int totalMs = 0;
+    int serverLatencyMs = -1;
+    int rawCandidateCount = 0;
+    int filteredCandidateCount = 0;
+    bool searched = false;
+    bool skipped = false;
+    QList<ReplyImageCandidate> candidates;
+};
+
+struct ReplyContextInput {
+    enum class Source {
+        AggregateConversation,
+        RobotSandbox,
+    };
+
+    Source source = Source::AggregateConversation;
+    int conversationId = 0;
+    QString latestUserText;
+    QList<AiConversationTurn> recentTurns;
+    ReplyRuntimeConfig runtimeConfig;
+};
+
+struct ReplyContextResult {
+    QString knowledgeStatus;
+    QString imageStatus;
+    QString linkedImageName;
+    ReplyKnowledgeTrace knowledgeTrace;
+    ReplyImageTrace imageTrace;
+    QList<KnowledgeSnippetContext> knowledgeSnippets;
+    QList<ReplyImageCandidate> imageCandidates;
+    QVector<OutgoingMessagePart> imageAttachments;
+    AggregateAiBuiltRequest built;
+};
+
 class AiChatAppService : public QObject
 {
     Q_OBJECT
@@ -39,8 +165,18 @@ public:
                                            const QString& modelOverride = QString(),
                                            const QString& apiKeyOverride = QString(),
                                            const AiConfigLoadOptions& options = {}) const;
-    AggregateAiBuiltRequest buildAggregateReplyRequest(int conversationId,
-                                                       const QString& sessionModelKey) const;
+    AggregateAiBuiltRequest buildAggregateReplyRequest(
+        int conversationId,
+        const QString& sessionModelKey,
+        const QList<KnowledgeSnippetContext>& knowledgeSnippets = {},
+        const AggregateReplyStrategy& strategy = {}) const;
+    AggregateAiBuiltRequest buildRobotSandboxReplyRequest(
+        const QString& sessionModelKey,
+        const QList<AiConversationTurn>& recentTurns,
+        const QString& latestUserText,
+        const QList<KnowledgeSnippetContext>& knowledgeSnippets = {},
+        const AggregateReplyStrategy& strategy = {}) const;
+    ReplyContextResult buildReplyContext(const ReplyContextInput& input) const;
     AggregateAiBuiltRequest buildAggregateCustomerProfileRequest(int conversationId,
                                                                  const QString& sessionModelKey) const;
     IAiStreamingSession* createSession(const AiProviderConfig& config,

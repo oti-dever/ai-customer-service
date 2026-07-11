@@ -26,7 +26,7 @@ bool ConversationAppService::isAggregateAutoReplyCandidate(int conversationId) c
 {
     ConversationDao cdao;
     const auto conv = cdao.findById(conversationId);
-    if (!conv || conv->platform != QLatin1String("qianniu"))
+    if (!conv)
         return false;
 
     MessageDao mdao;

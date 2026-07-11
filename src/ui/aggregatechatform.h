@@ -53,6 +53,19 @@ enum class AggregatePlatformFilter { All = 0, Qianniu = 1, Pdd = 2, Doudian = 3,
 enum class AggregateConversationTab { All = 0, Pending = 1, Replied = 2 };
 enum class AggregateAdaptiveLayoutMode { Unknown = -1, Wide = 0, Medium = 1, Compact = 2 };
 
+struct SuggestedImageAttachment {
+    QString assetId;
+    QString title;
+    QString filePath;
+    QString summary;
+    QString tags;
+    QString scenarios;
+    QString riskTags;
+    QString reason;
+    QString riskNotice;
+    double score = 0.0;
+};
+
 class AggregateChatForm : public QWidget
 {
     Q_OBJECT
@@ -92,6 +105,7 @@ private:
     void renderConversationMessages(const QVector<MessageRecord>& messages);
     void renderConversationMessagesFromModel();
     void appendMessageBubble(const MessageRecord& msg);
+    QString buildMessageIdentityKey(const MessageRecord& msg) const;
     QString buildMessageSignature(const QVector<MessageRecord>& messages) const;
     void refreshVisibleConversationMessages();
     void scrollToBottom();
@@ -108,6 +122,11 @@ private:
     bool addComposeFileAttachment(const QString& path);
     void refreshComposeAttachments();
     void clearComposeAttachments();
+    void setSuggestedImageAttachments(const QVector<SuggestedImageAttachment>& suggestions);
+    void clearSuggestedImageAttachments();
+    void refreshSuggestedImagePanel();
+    void previewSuggestedImageAttachment(const QString& path);
+    void markSuggestedImageForUse(const QString& path);
     void restoreLastSelectedConversation();
     void updateCustomerInfo(const ConversationInfo& conv);
     void resetSendTimelineForConversation();
@@ -129,12 +148,15 @@ private:
     void setPlatformListenControlsEnabled(bool enabled);
     void updatePlatformListenStatusLabel();
     void refreshPythonServiceButtonUi();
+    void showRobotBindingMenu(const QString& platform, QWidget* button, const QPoint& pos);
+    void openRobotBindingDialog(const QString& platform);
+    void clearRobotBindingForPlatform(const QString& platform);
     void updateWechatHistorySyncButtonUi();
     bool currentConversationIsWechat() const;
     void abortAggregateAiRequest();
     void abortAutoReplyRequest();
     void clearStreamingSession(IAiStreamingSession*& session);
-    /** 自动回复开启后，在满足条件时尝试生成并发送（T1 切换会话 / T2 当前会话新入站）。 */
+    /** 自动回复开启后，仅在监听平台收到新入站消息时尝试生成并发送。 */
     void tryAggregateAutoReply(int conversationId, const QString& triggerTag);
     void relayoutChatInputOverlay();
     void updateMessageListBottomReserve(int overlayBottomPx);
@@ -257,6 +279,8 @@ private:
     QScrollArea* m_composeAttachmentsScroll = nullptr;
     QWidget* m_composeAttachmentsWidget = nullptr;
     QHBoxLayout* m_composeAttachmentsLayout = nullptr;
+    QWidget* m_suggestedImagePanel = nullptr;
+    QHBoxLayout* m_suggestedImageLayout = nullptr;
     QToolButton* m_btnAiModelPick = nullptr;
     QMenu* m_aggregateAiModelMenu = nullptr;
     QString m_aggregateAiSessionModelKey;
@@ -275,7 +299,11 @@ private:
     bool m_autoReplyBusy = false;
     int m_autoReplyTargetConvId = -1;
     QString m_autoReplyAccumulated;
+    QString m_autoReplyTraceId;
+    bool m_autoReplyAllowMultiMessages = false;
+    int m_autoReplyMaxMessages = 1;
     QString m_aggregateAiIpcRequestId;
+    QString m_aggregateAiTraceId;
     QString m_aggregateAiBaseline;
     QString m_aggregateAiAccumulated;
     qint64 m_aggregateAiRequestEventId = 0;
@@ -284,6 +312,7 @@ private:
     qint64 m_autoReplyRequestEventId = 0;
     QElapsedTimer m_autoReplyRequestTimer;
     int m_autoReplyFirstTokenMs = 0;
+    QVector<OutgoingMessagePart> m_autoReplyAttachments;
     bool m_customerProfileBusy = false;
     bool m_shuttingDown = false;
     qint64 m_customerProfileRequestEventId = 0;
@@ -348,6 +377,8 @@ private:
     bool m_restoringDraft = false;
     QVector<OutgoingMessagePart> m_composeAttachments;
     QMap<int, QVector<OutgoingMessagePart>> m_draftAttachments;
+    QVector<SuggestedImageAttachment> m_suggestedImageAttachments;
+    QString m_selectedSuggestedImagePath;
 
     AggregateConversationTab m_currentTab = AggregateConversationTab::Pending;
     int m_currentConvId = -1;
@@ -355,6 +386,7 @@ private:
     int m_pendingStickyConvId = -1;
     QDate m_lastBubbleDate;
     QString m_currentMessageSignature;
+    QMap<int, QString> m_lastAutoReplyInboundMessageKeyByConversation;
     bool m_messageViewNearBottom = true;
     int m_pendingNewMessageCount = 0;
 

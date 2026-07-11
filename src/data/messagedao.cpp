@@ -152,16 +152,17 @@ QString messageSelectProjection()
 {
     return QStringLiteral(
         "SELECT m.*, "
-        "COALESCE(wm.original_timestamp, qm.original_timestamp, qqm.original_timestamp, '') AS original_timestamp, "
-        "COALESCE(NULLIF(wm.content_image_path, ''), NULLIF(qm.content_image_path, ''), NULLIF(qqm.content_image_path, ''), "
-        "NULLIF(wm.evidence_ref, ''), NULLIF(qm.evidence_ref, ''), NULLIF(qqm.evidence_ref, ''), '') AS content_image_path, "
-        "COALESCE(wm.source_type, qm.source_type, qqm.source_type, '') AS source_type, "
-        "COALESCE(wm.confidence, qm.confidence, qqm.confidence) AS confidence, "
-        "COALESCE(wm.verification_status, qm.verification_status, qqm.verification_status, '') AS verification_status "
+        "COALESCE(wm.original_timestamp, qm.original_timestamp, qqm.original_timestamp, pm.original_timestamp, '') AS original_timestamp, "
+        "COALESCE(NULLIF(wm.content_image_path, ''), NULLIF(qm.content_image_path, ''), NULLIF(qqm.content_image_path, ''), NULLIF(pm.content_image_path, ''), "
+        "NULLIF(wm.evidence_ref, ''), NULLIF(qm.evidence_ref, ''), NULLIF(qqm.evidence_ref, ''), NULLIF(pm.evidence_ref, ''), '') AS content_image_path, "
+        "COALESCE(wm.source_type, qm.source_type, qqm.source_type, pm.source_type, '') AS source_type, "
+        "COALESCE(wm.confidence, qm.confidence, qqm.confidence, pm.confidence) AS confidence, "
+        "COALESCE(wm.verification_status, qm.verification_status, qqm.verification_status, pm.verification_status, '') AS verification_status "
         "FROM messages m "
         "LEFT JOIN wechat_messages wm ON wm.message_id = m.id "
         "LEFT JOIN qianniu_messages qm ON qm.message_id = m.id "
-        "LEFT JOIN qq_messages qqm ON qqm.message_id = m.id ");
+        "LEFT JOIN qq_messages qqm ON qqm.message_id = m.id "
+        "LEFT JOIN pdd_web_messages pm ON pm.message_id = m.id ");
 }
 
 bool tableExists(const QString& tableName)
@@ -527,24 +528,62 @@ std::optional<MessageRecord> MessageDao::latestOutboundByClientMessageId(int con
 
 QVector<MessageRecord> MessageDao::listByConversation(int conversationId, int limit, int offset)
 {
+    if (conversationId <= 0 || limit <= 0)
+        return {};
+
     QSqlQuery q(Database::getInstance().connection());
     q.prepare(messageSelectProjection()
               + QStringLiteral("WHERE m.conversation_id = :cid "
-                               "ORDER BY m.created_at ASC LIMIT :lim OFFSET :off"));
+                               "ORDER BY m.created_at DESC, m.id DESC LIMIT :lim OFFSET :off"));
     q.bindValue(":cid", conversationId);
     q.bindValue(":lim", limit);
     q.bindValue(":off", offset);
-    q.exec();
+    if (!q.exec()) {
+        qWarning() << "MessageDao::listByConversation failed:" << q.lastError().text();
+        return {};
+    }
 
-    QVector<MessageRecord> result;
+    QVector<MessageRecord> newestFirst;
     while (q.next())
-        result.append(messageRecordFromQuery(q));
-    return result;
+        newestFirst.append(messageRecordFromQuery(q));
+
+    QVector<MessageRecord> chronological;
+    chronological.reserve(newestFirst.size());
+    for (int i = newestFirst.size() - 1; i >= 0; --i)
+        chronological.append(newestFirst.at(i));
+    return chronological;
 }
 
 QVector<MessageRecord> MessageDao::listCachedMessages(int conversationId, int limit, int offset)
 {
     return listByConversation(conversationId, limit, offset);
+}
+
+QVector<MessageRecord> MessageDao::listRecentCachedMessages(int conversationId, int limit) const
+{
+    if (conversationId <= 0 || limit <= 0)
+        return {};
+
+    QSqlQuery q(Database::getInstance().connection());
+    q.prepare(messageSelectProjection()
+              + QStringLiteral("WHERE m.conversation_id = :cid "
+                               "ORDER BY m.id DESC LIMIT :lim"));
+    q.bindValue(QStringLiteral(":cid"), conversationId);
+    q.bindValue(QStringLiteral(":lim"), limit);
+    if (!q.exec()) {
+        qWarning() << "MessageDao::listRecentCachedMessages failed:" << q.lastError().text();
+        return {};
+    }
+
+    QVector<MessageRecord> newestFirst;
+    while (q.next())
+        newestFirst.append(messageRecordFromQuery(q));
+
+    QVector<MessageRecord> chronological;
+    chronological.reserve(newestFirst.size());
+    for (int i = newestFirst.size() - 1; i >= 0; --i)
+        chronological.append(newestFirst.at(i));
+    return chronological;
 }
 
 std::optional<MessageRecord> MessageDao::lastMessageForConversation(int conversationId) const
@@ -657,14 +696,17 @@ std::optional<LatestInboundSnapshot> MessageDao::latestInboundSnapshot(int conve
 
     QSqlQuery q(Database::getInstance().connection());
     q.prepare(QStringLiteral(
-        "SELECT m.content, coalesce(wm.evidence_ref, qm.evidence_ref, qqm.evidence_ref, '') "
+        "SELECT m.content, coalesce(wm.evidence_ref, qm.evidence_ref, qqm.evidence_ref, pm.evidence_ref, "
+        "wm.content_image_path, qm.content_image_path, qqm.content_image_path, pm.content_image_path, '') "
         "FROM messages m "
         "LEFT JOIN wechat_messages wm ON wm.message_id = m.id "
         "LEFT JOIN qianniu_messages qm ON qm.message_id = m.id "
         "LEFT JOIN qq_messages qqm ON qqm.message_id = m.id "
+        "LEFT JOIN pdd_web_messages pm ON pm.message_id = m.id "
         "WHERE m.conversation_id = :cid AND m.direction = 'in' AND "
         "(length(trim(coalesce(m.content, ''))) > 0 "
-        " OR length(trim(coalesce(wm.evidence_ref, qm.evidence_ref, qqm.evidence_ref, ''))) > 0) "
+        " OR length(trim(coalesce(wm.evidence_ref, qm.evidence_ref, qqm.evidence_ref, pm.evidence_ref, "
+        "wm.content_image_path, qm.content_image_path, qqm.content_image_path, pm.content_image_path, ''))) > 0) "
         "ORDER BY m.id DESC LIMIT 1"));
     q.bindValue(QStringLiteral(":cid"), conversationId);
     if (!q.exec()) {

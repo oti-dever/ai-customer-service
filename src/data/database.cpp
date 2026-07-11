@@ -263,6 +263,19 @@ bool Database::runClientPrivateMigrations()
 
         "CREATE INDEX IF NOT EXISTS idx_ai_assistant_messages_session_id "
         "  ON ai_assistant_messages(session_id, id)",
+
+        "CREATE TABLE IF NOT EXISTS robot_sandbox_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  robot_id TEXT NOT NULL,"
+        "  role TEXT NOT NULL,"
+        "  content TEXT NOT NULL DEFAULT '',"
+        "  content_type TEXT NOT NULL DEFAULT 'text',"
+        "  image_path TEXT NOT NULL DEFAULT '',"
+        "  metadata TEXT NOT NULL DEFAULT '{}',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_robot_sandbox_messages_robot_time "
+        "  ON robot_sandbox_messages(robot_id, id)",
     };
 
     const char* optionalMigrations[] = {
@@ -557,6 +570,37 @@ bool Database::runMigrations()
         ")",
         "CREATE INDEX IF NOT EXISTS idx_qq_messages_conv_id ON qq_messages(conversation_id)",
 
+        "CREATE TABLE IF NOT EXISTS pdd_web_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  message_id INTEGER NOT NULL UNIQUE,"
+        "  conversation_id INTEGER NOT NULL,"
+        "  pdd_web_account_id TEXT DEFAULT '',"
+        "  pdd_web_conversation_key TEXT DEFAULT '',"
+        "  pdd_web_display_name TEXT DEFAULT '',"
+        "  platform_message_id TEXT DEFAULT '',"
+        "  direction TEXT DEFAULT '',"
+        "  sender_role TEXT DEFAULT '',"
+        "  raw_sender TEXT DEFAULT '',"
+        "  raw_timestamp_text TEXT DEFAULT '',"
+        "  parser_source TEXT DEFAULT '',"
+        "  source_type TEXT DEFAULT '',"
+        "  confidence INTEGER DEFAULT 0,"
+        "  verification_status TEXT DEFAULT '',"
+        "  original_timestamp TEXT DEFAULT '',"
+        "  content_image_path TEXT DEFAULT '',"
+        "  role_method TEXT DEFAULT '',"
+        "  role_confidence REAL DEFAULT 0,"
+        "  bubble_rect TEXT DEFAULT '',"
+        "  message_list_rect TEXT DEFAULT '',"
+        "  evidence_ref TEXT DEFAULT '',"
+        "  raw_payload_json TEXT DEFAULT '',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_pdd_web_messages_conv_id ON pdd_web_messages(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pdd_web_messages_platform_message_id ON pdd_web_messages(platform_message_id)",
+
         "CREATE TABLE IF NOT EXISTS ai_assistant_sessions ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  user_id INTEGER NOT NULL,"
@@ -577,6 +621,19 @@ bool Database::runMigrations()
 
         "CREATE INDEX IF NOT EXISTS idx_ai_assistant_messages_session_id "
         "  ON ai_assistant_messages(session_id, id)",
+
+        "CREATE TABLE IF NOT EXISTS robot_sandbox_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  robot_id TEXT NOT NULL,"
+        "  role TEXT NOT NULL,"
+        "  content TEXT NOT NULL DEFAULT '',"
+        "  content_type TEXT NOT NULL DEFAULT 'text',"
+        "  image_path TEXT NOT NULL DEFAULT '',"
+        "  metadata TEXT NOT NULL DEFAULT '{}',"
+        "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_robot_sandbox_messages_robot_time "
+        "  ON robot_sandbox_messages(robot_id, id)",
     };
 
     // 可选迁移（ALTER TABLE ADD COLUMN，列已存在时会失败，忽略错误）
@@ -654,6 +711,9 @@ bool Database::runMigrations()
         "INSERT OR IGNORE INTO qq_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'qq'",
         "CREATE INDEX IF NOT EXISTS idx_qianniu_messages_platform_message_id ON qianniu_messages(platform_message_id)",
         "CREATE INDEX IF NOT EXISTS idx_qq_messages_platform_message_id ON qq_messages(platform_message_id)",
+        "CREATE TABLE IF NOT EXISTS pdd_web_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL UNIQUE, conversation_id INTEGER NOT NULL, pdd_web_account_id TEXT DEFAULT '', pdd_web_conversation_key TEXT DEFAULT '', pdd_web_display_name TEXT DEFAULT '', platform_message_id TEXT DEFAULT '', direction TEXT DEFAULT '', sender_role TEXT DEFAULT '', raw_sender TEXT DEFAULT '', raw_timestamp_text TEXT DEFAULT '', parser_source TEXT DEFAULT '', source_type TEXT DEFAULT '', confidence INTEGER DEFAULT 0, verification_status TEXT DEFAULT '', original_timestamp TEXT DEFAULT '', content_image_path TEXT DEFAULT '', role_method TEXT DEFAULT '', role_confidence REAL DEFAULT 0, bubble_rect TEXT DEFAULT '', message_list_rect TEXT DEFAULT '', evidence_ref TEXT DEFAULT '', raw_payload_json TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE, FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE)",
+        "CREATE INDEX IF NOT EXISTS idx_pdd_web_messages_conv_id ON pdd_web_messages(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pdd_web_messages_platform_message_id ON pdd_web_messages(platform_message_id)",
         "ALTER TABLE messages DROP COLUMN platform_msg_id",
         "ALTER TABLE messages DROP COLUMN sync_status",
         "ALTER TABLE messages DROP COLUMN original_timestamp",

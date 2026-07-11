@@ -65,6 +65,178 @@ def make_handler(path, payload=None):
 
 
 class ServiceServerPlatformRouteTests(unittest.TestCase):
+    def test_knowledge_base_management_routes_delegate_to_store(self):
+        class FakeKnowledgeStore:
+            def __init__(self):
+                self.calls = []
+
+            def create_base(self, **kwargs):
+                self.calls.append(("create_base", kwargs))
+                return {"id": "kb-1", **kwargs}
+
+            def update_base(self, base_id, **kwargs):
+                self.calls.append(("update_base", base_id, kwargs))
+                return {"id": base_id, **kwargs}
+
+            def set_base_enabled(self, base_id, enabled):
+                self.calls.append(("set_base_enabled", base_id, enabled))
+                return {"id": base_id, "enabled": enabled}
+
+        fake = FakeKnowledgeStore()
+        old_get_store = server.get_knowledge_store
+        server.get_knowledge_store = lambda: fake
+        try:
+            create_handler = make_handler(
+                "/api/knowledge/bases",
+                {
+                    "name": "官方旗舰店产品知识库",
+                    "source_directory": "D:/kb",
+                    "applicable_shops": "官方旗舰店",
+                    "enabled": True,
+                },
+            )
+            create_handler.do_POST()
+
+            update_handler = make_handler(
+                "/api/knowledge/bases/update",
+                {
+                    "id": "kb-1",
+                    "name": "官方旗舰店产品知识库 V2",
+                    "source_directory": "D:/kb2",
+                    "applicable_shops": "官方旗舰店、私域",
+                    "enabled": False,
+                },
+            )
+            update_handler.do_POST()
+
+            enabled_handler = make_handler(
+                "/api/knowledge/bases/set_enabled",
+                {"id": "kb-1", "enabled": True},
+            )
+            enabled_handler.do_POST()
+        finally:
+            server.get_knowledge_store = old_get_store
+
+        self.assertEqual(create_handler.sent[0][1], 200)
+        self.assertEqual(update_handler.sent[0][1], 200)
+        self.assertEqual(enabled_handler.sent[0][1], 200)
+        self.assertEqual(fake.calls[0][0], "create_base")
+        self.assertEqual(fake.calls[0][1]["source_directory"], "D:/kb")
+        self.assertEqual(fake.calls[0][1]["applicable_shops"], "官方旗舰店")
+        self.assertEqual(fake.calls[1][0], "update_base")
+        self.assertEqual(fake.calls[1][1], "kb-1")
+        self.assertFalse(fake.calls[1][2]["enabled"])
+        self.assertEqual(fake.calls[2], ("set_base_enabled", "kb-1", True))
+
+    def test_knowledge_platform_binding_routes_delegate_to_store(self):
+        class FakeKnowledgeStore:
+            def __init__(self):
+                self.calls = []
+
+            def get_platform_bindings(self, platform):
+                self.calls.append(("get_platform_bindings", platform))
+                return ["kb-a"]
+
+            def set_platform_bindings(self, platform, base_ids):
+                self.calls.append(("set_platform_bindings", platform, base_ids))
+                return base_ids
+
+        fake = FakeKnowledgeStore()
+        old_get_store = server.get_knowledge_store
+        server.get_knowledge_store = lambda: fake
+        try:
+            get_handler = make_handler("/api/knowledge/platform_bindings?platform=Qianniu")
+            get_handler.do_GET()
+
+            post_handler = make_handler(
+                "/api/knowledge/platform_bindings",
+                {"platform": "Qianniu", "base_ids": ["kb-a", "kb-b"]},
+            )
+            post_handler.do_POST()
+        finally:
+            server.get_knowledge_store = old_get_store
+
+        self.assertEqual(get_handler.sent[0][1], 200)
+        self.assertEqual(get_handler.sent[0][0]["platform"], "qianniu")
+        self.assertEqual(get_handler.sent[0][0]["base_ids"], ["kb-a"])
+        self.assertEqual(post_handler.sent[0][1], 200)
+        self.assertEqual(post_handler.sent[0][0]["base_ids"], ["kb-a", "kb-b"])
+        self.assertEqual(fake.calls[0], ("get_platform_bindings", "qianniu"))
+        self.assertEqual(fake.calls[1], ("set_platform_bindings", "qianniu", ["kb-a", "kb-b"]))
+
+    def test_knowledge_search_route_delegates_to_store(self):
+        class FakeKnowledgeStore:
+            def search(self, **kwargs):
+                return {
+                    "status": "success",
+                    "results": [{"snippet": "ok", "query": kwargs["query"], "mode": kwargs["mode"]}],
+                    "metadata": {"mode": kwargs["mode"]},
+                }
+
+        old_get_store = server.get_knowledge_store
+        server.get_knowledge_store = lambda: FakeKnowledgeStore()
+        try:
+            handler = make_handler(
+                "/api/knowledge/search",
+                {"query": "键盘可以退吗", "top_k": 3},
+            )
+            handler.do_POST()
+        finally:
+            server.get_knowledge_store = old_get_store
+
+        self.assertEqual(handler.sent[0][1], 200)
+        self.assertEqual(handler.sent[0][0]["status"], "success")
+        self.assertEqual(handler.sent[0][0]["results"][0]["query"], "键盘可以退吗")
+        self.assertEqual(handler.sent[0][0]["results"][0]["mode"], "hybrid")
+
+    def test_knowledge_image_search_route_delegates_to_store(self):
+        class FakeKnowledgeStore:
+            def search_image_assets(self, **kwargs):
+                return {
+                    "status": "success",
+                    "results": [
+                        {
+                            "asset_id": "img-1",
+                            "query": kwargs["query"],
+                            "include_risky": kwargs["include_risky"],
+                        }
+                    ],
+                    "metadata": {"mode": kwargs["mode"]},
+                }
+
+        old_get_store = server.get_knowledge_store
+        server.get_knowledge_store = lambda: FakeKnowledgeStore()
+        try:
+            handler = make_handler(
+                "/api/knowledge/images/search",
+                {"query": "发空格键实拍图", "top_k": 2, "include_risky": True},
+            )
+            handler.do_POST()
+        finally:
+            server.get_knowledge_store = old_get_store
+
+        self.assertEqual(handler.sent[0][1], 200)
+        self.assertEqual(handler.sent[0][0]["status"], "success")
+        self.assertEqual(handler.sent[0][0]["results"][0]["query"], "发空格键实拍图")
+        self.assertTrue(handler.sent[0][0]["results"][0]["include_risky"])
+
+    def test_knowledge_images_get_route_delegates_to_store(self):
+        class FakeKnowledgeStore:
+            def list_image_assets(self, base_id=None):
+                return [{"id": "img-1", "base_id": base_id}]
+
+        old_get_store = server.get_knowledge_store
+        server.get_knowledge_store = lambda: FakeKnowledgeStore()
+        try:
+            handler = make_handler("/api/knowledge/images?base_id=kb-1")
+            handler.do_GET()
+        finally:
+            server.get_knowledge_store = old_get_store
+
+        self.assertEqual(handler.sent[0][1], 200)
+        self.assertEqual(handler.sent[0][0]["status"], "success")
+        self.assertEqual(handler.sent[0][0]["images"][0]["base_id"], "kb-1")
+
     def test_platform_get_routes_delegate_to_bridge(self):
         fake = FakeBridge()
         old_get_bridge = server.rpa_bridge.get_bridge

@@ -36,6 +36,8 @@ public:
     QVector<MessageRecord> listByConversation(int conversationId, int limit = 200, int offset = 0);
     /** 读取客户端本地消息缓存；用于 UI 恢复/展示，不代表服务端真相源。 */
     QVector<MessageRecord> listCachedMessages(int conversationId, int limit = 200, int offset = 0);
+    /** 读取最新的本地消息缓存，并按时间正序返回；用于 AI 上下文、摘要等“最近 N 条”场景。 */
+    QVector<MessageRecord> listRecentCachedMessages(int conversationId, int limit = 10) const;
     /** 按 `messages.id` 最大的一条（当前会话时间线上的最后一条），无消息则 `nullopt`。 */
     std::optional<MessageRecord> lastMessageForConversation(int conversationId) const;
     /** 读取客户端本地缓存中的最后一条消息；用于 UI/应用服务判断，不代表服务端真相源。 */

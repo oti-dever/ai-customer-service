@@ -43,6 +43,7 @@ set(SOURCES
     src/data/qianniuconversationdao.cpp
     src/data/qqmessagedao.cpp
     src/data/aiassistantdao.cpp
+    src/data/robotsandboxmessagedao.cpp
     src/utils/logger.cpp
     src/utils/cryptoutil.cpp
     src/utils/applystyle.cpp
@@ -85,6 +86,7 @@ set(SOURCES
     src/ui/sidebartocdelegate.cpp
     src/ui/robotassistantwidget.cpp
     src/ui/aicustomerservicebackendwindow.cpp
+    src/ui/robotsandboxdialog.cpp
     src/ui/aiproviderconfigpage.cpp
 )
 
@@ -101,6 +103,7 @@ set(HEADERS
     src/data/qianniuconversationdao.h
     src/data/qqmessagedao.h
     src/data/aiassistantdao.h
+    src/data/robotsandboxmessagedao.h
     src/utils/logger.h
     src/utils/cryptoutil.h
     src/utils/appsettings.h
@@ -147,6 +150,7 @@ set(HEADERS
     src/ui/sidebartocdelegate.h
     src/ui/robotassistantwidget.h
     src/ui/aicustomerservicebackendwindow.h
+    src/ui/robotsandboxdialog.h
     src/ui/aiproviderconfigpage.h
 )
 

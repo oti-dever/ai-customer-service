@@ -2,6 +2,7 @@
 #define AICUSTOMERSERVICEBACKENDWINDOW_H
 
 #include <QMainWindow>
+#include <functional>
 
 class QTreeWidget;
 class QStackedWidget;
@@ -26,6 +27,9 @@ private:
     QTreeWidget* m_nav = nullptr;
     QStackedWidget* m_stack = nullptr;
     AiProviderConfigPage* m_apiConfigPage = nullptr;
+    std::function<void()> m_refreshRobotConfigs;
+    std::function<void()> m_refreshProductKnowledgeBases;
+    bool m_productKnowledgeLoaded = false;
 };
 
 #endif

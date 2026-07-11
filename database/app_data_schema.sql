@@ -206,6 +206,20 @@ CREATE TABLE IF NOT EXISTS ui_compose_attachments (
 CREATE INDEX IF NOT EXISTS idx_ui_compose_attachments_conversation
   ON ui_compose_attachments(platform, conversation_key, sort_order, id);
 
+CREATE TABLE IF NOT EXISTS robot_sandbox_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  robot_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT 'text',
+  image_path TEXT NOT NULL DEFAULT '',
+  metadata TEXT NOT NULL DEFAULT '{}',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_robot_sandbox_messages_robot_time
+  ON robot_sandbox_messages(robot_id, id);
+
 CREATE TABLE IF NOT EXISTS ui_window_layout (
   key TEXT PRIMARY KEY,
   value_json TEXT NOT NULL DEFAULT '{}',
