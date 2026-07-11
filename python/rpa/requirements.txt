@@ -3,3 +3,6 @@ pillow
 numpy
 comtypes
 uiautomation>=2.0.18
+
+# Knowledge document parsing
+openpyxl
