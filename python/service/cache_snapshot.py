@@ -194,6 +194,13 @@ def build_cache_snapshot(
                 message_content_image_terms.append("qqm.content_image_path")
             if "evidence_ref" in qq_columns:
                 message_evidence_terms.append("qqm.evidence_ref")
+        if _table_exists(conn, "pdd_web_messages"):
+            pdd_columns = _table_columns(conn, "pdd_web_messages")
+            message_joins.append("LEFT JOIN pdd_web_messages pm ON pm.message_id = m.id")
+            if "content_image_path" in pdd_columns:
+                message_content_image_terms.append("pm.content_image_path")
+            if "evidence_ref" in pdd_columns:
+                message_evidence_terms.append("pm.evidence_ref")
         if "content_image_path" in message_columns:
             message_content_image_terms.append("m.content_image_path")
         if "evidence_ref" in message_columns:
@@ -475,6 +482,13 @@ def build_conversation_messages(
                 message_content_image_terms.append("qqm.content_image_path")
             if "evidence_ref" in qq_columns:
                 message_evidence_terms.append("qqm.evidence_ref")
+        if _table_exists(conn, "pdd_web_messages"):
+            pdd_columns = _table_columns(conn, "pdd_web_messages")
+            message_joins.append("LEFT JOIN pdd_web_messages pm ON pm.message_id = m.id")
+            if "content_image_path" in pdd_columns:
+                message_content_image_terms.append("pm.content_image_path")
+            if "evidence_ref" in pdd_columns:
+                message_evidence_terms.append("pm.evidence_ref")
         if "content_image_path" in message_columns:
             message_content_image_terms.append("m.content_image_path")
         if "evidence_ref" in message_columns:

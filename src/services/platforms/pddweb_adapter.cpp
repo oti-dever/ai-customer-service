@@ -79,6 +79,19 @@ QString outgoingContentType(const OutgoingMessagePart& part)
     }
     return QStringLiteral("text");
 }
+
+QString outgoingContent(const OutgoingMessagePart& part)
+{
+    if (part.type == OutgoingPartType::Text)
+        return part.text;
+    if (part.type == OutgoingPartType::Image)
+        return QStringLiteral("[图片]");
+    if (part.type == OutgoingPartType::Video)
+        return QStringLiteral("[视频]");
+    return part.fileName.trimmed().isEmpty()
+        ? QStringLiteral("[文件]")
+        : QStringLiteral("[文件] %1").arg(part.fileName);
+}
 } // namespace
 
 PddWebAdapter::PddWebAdapter(QObject* parent)
@@ -164,8 +177,8 @@ void PddWebAdapter::sendMessagePart(const QString& conversationId,
                                     const OutgoingMessagePart& part,
                                     const QString& clientMessageId)
 {
-    if (part.type != OutgoingPartType::Text) {
-        emit sendFailed(conversationId, QStringLiteral("pdd_web_draft_only_supports_text"), clientMessageId);
+    if (part.type != OutgoingPartType::Text && part.type != OutgoingPartType::Image) {
+        emit sendFailed(conversationId, QStringLiteral("pdd_web_only_supports_text_or_image"), clientMessageId);
         return;
     }
     if (m_commandInFlight) {
@@ -189,6 +202,10 @@ void PddWebAdapter::sendMessagePart(const QString& conversationId,
     request.parameters.insert(QStringLiteral("display_name"), displayNameFromConversationKey(conversationId));
     request.parameters.insert(QStringLiteral("content_type"), outgoingContentType(part));
     request.parameters.insert(QStringLiteral("text"), part.text);
+    request.parameters.insert(QStringLiteral("file_path"), part.localPath);
+    request.parameters.insert(QStringLiteral("file_name"), part.fileName);
+    request.parameters.insert(QStringLiteral("mime_type"), part.mimeType);
+    request.parameters.insert(QStringLiteral("size_bytes"), double(part.sizeBytes));
     request.parameters.insert(QStringLiteral("require_target_verification"), true);
     request.parameters.insert(QStringLiteral("select_conversation_before_draft"), true);
     request.parameters.insert(QStringLiteral("switch_unread_method"), QStringLiteral("click"));
@@ -196,7 +213,7 @@ void PddWebAdapter::sendMessagePart(const QString& conversationId,
     request.parameters.insert(QStringLiteral("allow_send_enter"), true);
     request.parameters.insert(QStringLiteral("confirm_token"), QStringLiteral("manual_confirmed_by_agent"));
 
-    const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 4000);
+    const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 10000);
     m_commandInFlight = false;
     auto scheduleConfirmTimeout = [this, conversationId, clientMessageId = request.taskId]() {
         QTimer::singleShot(30000, this, [this, conversationId, clientMessageId]() {
@@ -224,7 +241,7 @@ void PddWebAdapter::sendMessagePart(const QString& conversationId,
             return;
         }
         if (sent) {
-            emit messageSent(conversationId, part.text, request.taskId);
+            emit messageSent(conversationId, outgoingContent(part), request.taskId);
             return;
         }
         emit sendFailed(conversationId,

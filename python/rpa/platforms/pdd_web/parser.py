@@ -114,6 +114,16 @@ def event_from_page_message(
     raw = message.get("raw") if isinstance(message.get("raw"), dict) else {}
     if asset_url and "asset_url" not in raw:
         raw = {**raw, "asset_url": asset_url}
+    asset_meta = {
+        "asset_source_kind": clean(message.get("asset_source_kind") or message.get("source_kind")),
+        "asset_capture_method": clean(message.get("asset_capture_method")),
+        "asset_fetch_error": clean(message.get("asset_fetch_error")),
+    }
+    asset_meta = {key: value for key, value in asset_meta.items() if value and key not in raw}
+    if asset_meta:
+        raw = {**raw, **asset_meta}
+    content_image_path = clean(message.get("content_image_path"))
+    evidence_ref = clean(message.get("evidence_ref") or content_image_path)
     return {
         "event_type": "message_observed",
         "platform": PLATFORM_PDD_WEB,
@@ -131,6 +141,8 @@ def event_from_page_message(
             "original_timestamp": time_text,
             "source_type": "dom_observed",
             "confidence": int(message.get("confidence") or 70),
+            "content_image_path": content_image_path,
+            "evidence_ref": evidence_ref,
             "raw": raw,
         },
     }

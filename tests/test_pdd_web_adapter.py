@@ -9,6 +9,7 @@ if str(PYTHON_DIR) not in sys.path:
     sys.path.insert(0, str(PYTHON_DIR))
 
 from rpa.platforms.pdd_web.adapter import PddWebSidecarAdapter
+from rpa.platforms.pdd_web.image_poc import TINY_RED_PNG_DATA_URL
 from rpa.platforms.pdd_web.parser import event_from_page_message
 
 
@@ -119,6 +120,40 @@ class PddWebAdapterTests(unittest.TestCase):
         self.assertTrue(any(event["event_type"] == "conversation_observed" for event in store.events))
         self.assertTrue(any(event["event_type"] == "message_observed" for event in store.events))
         self.assertEqual(adapter.health()["health"]["reason"], "page_agent_online")
+
+    def test_page_agent_image_snapshot_saves_media_path(self):
+        media_dir = REPO_ROOT / "logs" / "pdd_web_adapter_media_tests"
+        store = Store()
+        adapter = PddWebSidecarAdapter(store, start_page_agent_server=False, media_dir=media_dir)
+        adapter.command({"request_id": "pdd-1", "command": "connect"})
+        adapter.handle_page_agent_message({"type": "page_ready"})
+
+        ack = adapter.handle_page_agent_message(
+            {
+                "type": "message_snapshot",
+                "source": "unread_switch",
+                "display_name": "buyer-1",
+                "messages": [
+                    {
+                        "platform_msg_id": "pdd-img-1",
+                        "sender_role": "customer",
+                        "content_type": "image",
+                        "content": "[image]",
+                        "asset_url": "blob:null/demo",
+                        "asset_data_url": TINY_RED_PNG_DATA_URL,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(ack["count"], 1)
+        event = store.events[-1]
+        payload = event["payload"]
+        image_path = Path(payload["content_image_path"])
+        self.assertTrue(image_path.exists())
+        self.assertEqual(payload["evidence_ref"], str(image_path))
+        self.assertNotIn("asset_data_url", payload["raw"])
+        self.assertEqual(payload["raw"]["asset_capture_method"], "fetch_data_url")
 
     def test_page_agent_snapshots_are_ignored_until_adapter_connects(self):
         store = Store()

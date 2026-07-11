@@ -361,7 +361,7 @@
         `after=${afterName || "-"}`,
         `clickTarget=${clickResult.tag || "-"}`
       );
-      scanMessages(true, selectedName, "unread_switch");
+      await scanMessages(true, selectedName, "unread_switch");
     } finally {
       unreadProcessing = false;
     }
@@ -472,7 +472,7 @@
     return "";
   }
 
-  function scanMessages(force, displayNameOverride = "", source = "manual") {
+  async function scanMessages(force, displayNameOverride = "", source = "manual") {
     let nodes = firstNonEmptyNodes(MESSAGE_SELECTORS);
     if (!nodes.length) {
       nodes = firstNonEmptyNodes(FALLBACK_MESSAGE_SELECTORS).filter(isLikelyChatMessageNode);
@@ -490,11 +490,74 @@
     ]));
     if (!force && fingerprint === lastMessageFingerprint) return;
     lastMessageFingerprint = fingerprint;
+    await attachImageDataUrls(messages);
     send({
       type: "message_snapshot",
       display_name: displayName,
       source,
       messages
+    });
+  }
+
+  async function attachImageDataUrls(messages) {
+    for (const message of messages) {
+      if (!message || message.content_type !== "image" || message.sender_role === "system") continue;
+      if (!message.asset_url || message.asset_data_url) continue;
+      try {
+        message.asset_data_url = await fetchAssetAsDataUrl(message.asset_url);
+        message.asset_capture_method = "fetch_data_url";
+      } catch (error) {
+        message.asset_fetch_error = String(error && error.message || error || "asset_fetch_failed").slice(0, 240);
+      }
+    }
+  }
+
+  async function fetchAssetAsDataUrl(url) {
+    if (!url) throw new Error("empty_url");
+    if (url.startsWith("data:")) return url;
+    try {
+      return await fetchAssetViaBackground(url);
+    } catch (backgroundError) {
+      try {
+        return await fetchAssetInPage(url);
+      } catch (pageError) {
+        throw new Error(
+          `background:${String(backgroundError && backgroundError.message || backgroundError)}; ` +
+          `page:${String(pageError && pageError.message || pageError)}`
+        );
+      }
+    }
+  }
+
+  async function fetchAssetViaBackground(url) {
+    if (!globalThis.chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
+      throw new Error("runtime_unavailable");
+    }
+    return await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: "fetch_image_data_url", url }, (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(lastError.message || "runtime_last_error"));
+          return;
+        }
+        if (!response || response.ok !== true || !response.data_url) {
+          reject(new Error(response && response.error || "background_fetch_failed"));
+          return;
+        }
+        resolve(String(response.data_url));
+      });
+    });
+  }
+
+  async function fetchAssetInPage(url) {
+    const response = await fetch(url, { credentials: "include", cache: "force-cache" });
+    if (!response.ok) throw new Error(`fetch_failed:${response.status}`);
+    const blob = await response.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error || new Error("file_reader_failed"));
+      reader.readAsDataURL(blob);
     });
   }
 
@@ -531,6 +594,91 @@
     return false;
   }
 
+  function backgroundUrl(node) {
+    const value = node ? getComputedStyle(node).backgroundImage || "" : "";
+    const match = value.match(/url\((['"]?)(.*?)\1\)/i);
+    return match ? match[2] : "";
+  }
+
+  function sourceKind(url) {
+    if (!url) return "none";
+    if (url.startsWith("data:")) return "data_url";
+    if (url.startsWith("blob:")) return "blob_url";
+    if (/^https?:\/\//i.test(url)) return "remote_url";
+    return "other_url";
+  }
+
+  function urlHost(url) {
+    try {
+      return new URL(url, location.href).hostname.toLowerCase();
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function imageUrlOf(image) {
+    return image.currentSrc || image.src || image.getAttribute("data-src") || image.getAttribute("data-original") || "";
+  }
+
+  function classChainOf(node, stopNode) {
+    const parts = [];
+    let current = node;
+    while (current && current !== stopNode && parts.length < 6) {
+      parts.push(classNameOf(current).toLowerCase());
+      current = current.parentElement;
+    }
+    return parts.join(" ");
+  }
+
+  function isLikelyAvatarAsset(element, url, messageNode) {
+    const host = urlHost(url);
+    if (host === "savatar.pddpic.com") return true;
+    const classes = classChainOf(element, messageNode);
+    if (/(^|[-_\s])(avatar|head|portrait|usericon|user-icon)([-_\s]|$)/i.test(classes)) {
+      return true;
+    }
+    return false;
+  }
+
+  function imageTargets(messageNode) {
+    const targets = [];
+    const seen = new Set();
+
+    function addTarget(element, url) {
+      if (!element) return;
+      const assetUrl = url || "";
+      const key = `${assetUrl}::${classNameOf(element)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      if (isLikelyAvatarAsset(element, assetUrl, messageNode)) return;
+      targets.push({ element, asset_url: assetUrl });
+    }
+
+    const contentImages = Array.from(messageNode.querySelectorAll([
+      ".image-msg img",
+      "[class*='image-msg'] img",
+      "[class*='ImageMessage'] img"
+    ].join(",")));
+    for (const image of contentImages) {
+      addTarget(image, imageUrlOf(image));
+    }
+
+    if (!targets.length) {
+      for (const image of Array.from(messageNode.querySelectorAll("img"))) {
+        addTarget(image, imageUrlOf(image));
+      }
+    }
+
+    const backgroundNodes = Array.from(messageNode.querySelectorAll("[style*='background-image'],[class*='image-msg'],[class*='ImageMessage']"));
+    for (const backgroundNode of backgroundNodes) {
+      const url = backgroundUrl(backgroundNode);
+      if (url || !targets.length) {
+        addTarget(backgroundNode, url);
+      }
+    }
+    return targets;
+  }
+
   function parseMessageNode(node, displayName, index) {
     if (!isLikelyChatMessageNode(node)) return null;
     const isMine = isAgentMessageNode(node);
@@ -538,8 +686,9 @@
     let contentType = "text";
     let content = "";
     let assetUrl = "";
+    let assetSourceKind = "";
 
-    const image = node.querySelector(".image-msg img,[class*='image-msg'] img,[class*='ImageMessage'] img");
+    const image = imageTargets(node)[0];
     const goods = node.querySelector(".good-card,[class*='GoodsCard']");
     const order = node.querySelector(".order-card,.kwaishop-cs-BizOrderCard,[class*='OrderCard']");
     const textNode = node.querySelector(".kwaishop-cs-BizTextCard,[class*='BizTextCard']");
@@ -549,7 +698,8 @@
       content = textOf(systemNode);
     } else if (image) {
       contentType = "image";
-      assetUrl = image.currentSrc || image.src || "";
+      assetUrl = image.asset_url || "";
+      assetSourceKind = sourceKind(assetUrl);
       content = assetUrl ? "[image]" : textOf(node);
     } else if (goods) {
       contentType = "product";
@@ -592,6 +742,7 @@
       content_type: contentType,
       content,
       asset_url: assetUrl,
+      asset_source_kind: assetSourceKind,
       time_text: timeText,
       platform_msg_id: node.id || "",
       confidence: content ? 75 : 50,
@@ -676,6 +827,7 @@
 
   async function prepareReplyDraft(command) {
     const text = command.text || "";
+    const contentType = command.content_type || "text";
     const targetName = command.display_name || "";
     let currentName = currentConversationName();
     let selectedResult = null;
@@ -730,13 +882,31 @@
     }
 
     input.focus();
-    if ("value" in input) {
-      input.value = text;
+    let imagePasteResult = null;
+    if (contentType === "image") {
+      imagePasteResult = await pasteImageDataUrl(input, command.image_data_url || "", command.file_name || "image.png");
+      if (!imagePasteResult.ok) {
+        send({
+          type: "draft_result",
+          request_id: command.request_id,
+          prepared: false,
+          status: "error",
+          error: imagePasteResult.error || "image_paste_failed",
+          reason: imagePasteResult.reason || "",
+          display_name: currentName,
+          conversation_key: command.conversation_key || ""
+        });
+        return;
+      }
     } else {
-      input.textContent = text;
+      if ("value" in input) {
+        input.value = text;
+      } else {
+        input.textContent = text;
+      }
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
     }
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
     let enterResult = null;
     if (command.allow_send_enter) {
       enterResult = dispatchEnterToSend(input);
@@ -750,6 +920,7 @@
         status: "success",
         reason: [
           selectedResult && selectedResult.reason ? selectedResult.reason : "",
+          imagePasteResult ? `image_paste=${imagePasteResult.method}` : "",
           enterResult ? `send_method=enter, keydown=${enterResult.keydown}, keypress=${enterResult.keypress}, keyup=${enterResult.keyup}` : ""
         ].filter(Boolean).join("; "),
         display_name: currentName,
@@ -825,6 +996,58 @@
         `text=${clickResult.text || "-"}`
       ].join(", ")
     };
+  }
+
+  async function pasteImageDataUrl(input, dataUrl, fileName) {
+    if (!dataUrl || !dataUrl.startsWith("data:image/")) {
+      return { ok: false, error: "image_data_url_missing", reason: "image data url is empty or invalid" };
+    }
+    if (typeof DataTransfer === "undefined" || typeof File === "undefined") {
+      return { ok: false, error: "browser_image_paste_unsupported", reason: "DataTransfer/File API unavailable" };
+    }
+    try {
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const safeFileName = fileName || `image-${Date.now()}.png`;
+      const file = new File([blob], safeFileName, { type: blob.type || "image/png" });
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      let pasteEvent = null;
+      try {
+        pasteEvent = new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          clipboardData: transfer
+        });
+      } catch (_error) {
+        pasteEvent = new Event("paste", { bubbles: true, cancelable: true, composed: true });
+      }
+      if (!pasteEvent.clipboardData || pasteEvent.clipboardData.files.length === 0) {
+        try {
+          Object.defineProperty(pasteEvent, "clipboardData", { value: transfer });
+        } catch (_error) {
+          return { ok: false, error: "clipboard_data_bind_failed", reason: "failed to bind DataTransfer to paste event" };
+        }
+      }
+      const accepted = input.dispatchEvent(pasteEvent);
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste" }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(800);
+      console.info("[YY PDD agent] image paste dispatched", {
+        accepted,
+        file_name: safeFileName,
+        mime_type: file.type,
+        bytes: file.size
+      });
+      return { ok: true, method: `paste_event:${accepted ? "accepted" : "default_prevented"}` };
+    } catch (error) {
+      return {
+        ok: false,
+        error: "image_paste_exception",
+        reason: error && error.message ? error.message : String(error)
+      };
+    }
   }
 
   function clickConversationNode(node) {

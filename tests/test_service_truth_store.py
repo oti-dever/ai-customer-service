@@ -11,6 +11,7 @@ if str(PYTHON_DIR) not in sys.path:
     sys.path.insert(0, str(PYTHON_DIR))
 
 from service.rpa_bridge import RpaEventStore
+from service.cache_snapshot import build_cache_snapshot
 import service.truth_store as truth_store_module
 from service.truth_store import PythonServiceTruthStore
 
@@ -22,6 +23,57 @@ def temporary_directory():
 
 
 class ServiceTruthStoreTests(unittest.TestCase):
+    def test_pdd_web_image_message_persists_media_path_to_snapshot(self):
+        with temporary_directory() as tmp:
+            db_path = Path(tmp) / "service.db"
+            store = RpaEventStore(truth_store=PythonServiceTruthStore(db_path))
+            image_path = str((Path(tmp) / "pdd-image.png").resolve())
+
+            store.append(
+                {
+                    "event_id": "evt-pdd-img-1",
+                    "event_type": "message_observed",
+                    "platform": "pdd_web",
+                    "account_id": "acct-1",
+                    "conversation_key": "pdd_web:acct-1:buyer-1",
+                    "occurred_at": "2026-07-02T13:14:54",
+                    "payload": {
+                        "platform_msg_id": "pdd-img-1",
+                        "display_name": "buyer-1",
+                        "sender_name": "buyer-1",
+                        "sender_role": "customer",
+                        "direction": "inbound",
+                        "content_type": "image",
+                        "content": "[image]",
+                        "content_image_path": image_path,
+                        "evidence_ref": image_path,
+                        "source_type": "dom_observed",
+                        "confidence": 80,
+                    },
+                }
+            )
+
+            conn = sqlite3.connect(str(db_path))
+            try:
+                row = conn.execute(
+                    """
+                    SELECT content_image_path, evidence_ref
+                    FROM pdd_web_messages
+                    WHERE platform_message_id = 'pdd-img-1'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row[0], image_path)
+                self.assertEqual(row[1], image_path)
+            finally:
+                conn.close()
+
+            snapshot = build_cache_snapshot(platform="pdd_web", db_path=db_path)
+            self.assertEqual(snapshot["status"], "success")
+            messages = snapshot["conversations"][0]["messages"]
+            self.assertEqual(messages[0]["content_image_path"], image_path)
+            self.assertEqual(messages[0]["evidence_ref"], image_path)
+
     def test_event_store_persists_observed_conversation_and_message(self):
         with temporary_directory() as tmp:
             db_path = Path(tmp) / "service.db"

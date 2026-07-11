@@ -4,14 +4,17 @@ import base64
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import socket
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
+from .image_poc import DEFAULT_MEDIA_DIR, save_data_url
 from .parser import conversation_key as page_conversation_key
 from .parser import event_from_page_conversation, event_from_page_message
 from .pdd_logging import get_logger
@@ -20,7 +23,7 @@ PLATFORM_PDD_WEB = "pdd_web"
 DEFAULT_ACCOUNT_ID = "local_pdd_web"
 DEFAULT_AGENT_HOST = "127.0.0.1"
 DEFAULT_AGENT_PORT = 8771
-AGENT_COMMAND_TIMEOUT_SEC = 3.0
+AGENT_COMMAND_TIMEOUT_SEC = 8.0
 OBSERVATION_MESSAGE_TYPES = {"conversation_snapshot", "message_snapshot"}
 logger = get_logger(__name__)
 
@@ -32,6 +35,16 @@ class EventSink(Protocol):
 
 def clean(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def image_file_to_data_url(path: str, mime_type: str = "") -> str:
+    source = Path(path)
+    if not source.exists() or not source.is_file():
+        raise FileNotFoundError(path)
+    guessed = clean(mime_type) or (mimetypes.guess_type(str(source))[0] or "")
+    if not guessed.startswith("image/"):
+        guessed = "image/png"
+    return f"data:{guessed};base64,{base64.b64encode(source.read_bytes()).decode('ascii')}"
 
 
 def payload_status(status: str, request_id: str = "", **extra: Any) -> dict[str, Any]:
@@ -159,17 +172,35 @@ class _PageAgentWebSocketServer:
             logger.info("PDD page-agent connected from %s:%s", addr[0], addr[1])
 
             client.settimeout(None)
+            message_parts: list[bytes] = []
+            fragmented_opcode: int | None = None
             while self._running:
                 frame = self._recv_frame(client)
                 if frame is None:
                     break
-                opcode, payload = frame
+                fin, opcode, payload = frame
                 if opcode == 0x8:
                     break
-                if opcode != 0x1:
+                if opcode in {0x9, 0xA}:
+                    continue
+                if opcode == 0x1:
+                    if fin:
+                        message_payload = payload
+                    else:
+                        fragmented_opcode = opcode
+                        message_parts = [payload]
+                        continue
+                elif opcode == 0x0 and fragmented_opcode == 0x1:
+                    message_parts.append(payload)
+                    if not fin:
+                        continue
+                    message_payload = b"".join(message_parts)
+                    message_parts = []
+                    fragmented_opcode = None
+                else:
                     continue
                 try:
-                    message = json.loads(payload.decode("utf-8"))
+                    message = json.loads(message_payload.decode("utf-8"))
                     response_json = self._adapter.handle_page_agent_message(message)
                 except Exception as exc:
                     logger.exception("PDD page-agent message failed")
@@ -204,11 +235,12 @@ class _PageAgentWebSocketServer:
             headers[key.strip().lower()] = value.strip()
         return headers
 
-    def _recv_frame(self, client: socket.socket) -> tuple[int, bytes] | None:
+    def _recv_frame(self, client: socket.socket) -> tuple[bool, int, bytes] | None:
         head = self._recv_exact(client, 2)
         if not head:
             return None
         first, second = head[0], head[1]
+        fin = bool(first & 0x80)
         opcode = first & 0x0F
         masked = bool(second & 0x80)
         length = second & 0x7F
@@ -228,7 +260,7 @@ class _PageAgentWebSocketServer:
             return None
         if masked and mask:
             payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-        return opcode, payload
+        return fin, opcode, payload
 
     def _recv_exact(self, client: socket.socket, size: int) -> bytes | None:
         data = bytearray()
@@ -286,10 +318,12 @@ class PddWebSidecarAdapter:
         start_page_agent_server: bool = True,
         agent_host: str = DEFAULT_AGENT_HOST,
         agent_port: int | None = None,
+        media_dir: Path | str = DEFAULT_MEDIA_DIR,
     ) -> None:
         self._store = store
         self._connected = False
         self._account_id = DEFAULT_ACCOUNT_ID
+        self._media_dir = Path(media_dir)
         self._page_agent = PageAgentState()
         self._observer_thread = None
         self._seen_message_ids: set[str] = set()
@@ -406,6 +440,29 @@ class PddWebSidecarAdapter:
     def _prepare_reply_draft(self, params: dict[str, Any], _request_id: str) -> dict[str, Any]:
         if not self._page_agent.connected:
             return self._page_agent_offline_result()
+        content_type = clean(params.get("content_type")) or "text"
+        file_path = clean(params.get("file_path") or params.get("image_path"))
+        image_data_url = ""
+        if content_type == "image":
+            if not file_path:
+                return {
+                    "accepted": False,
+                    "prepared": False,
+                    "status": "error",
+                    "error": "image_file_path_required",
+                    "reason": "pdd_web_image_send_requires_local_file_path",
+                }
+            try:
+                image_data_url = image_file_to_data_url(file_path, clean(params.get("mime_type")))
+            except Exception as exc:
+                logger.warning("PDD image draft data_url build failed file_path=%s error=%s", file_path, exc)
+                return {
+                    "accepted": False,
+                    "prepared": False,
+                    "status": "error",
+                    "error": "image_file_unavailable",
+                    "reason": str(exc),
+                }
         request_id = f"draft-{int(time.time() * 1000)}"
         event = threading.Event()
         holder: dict[str, Any] = {}
@@ -417,7 +474,9 @@ class PddWebSidecarAdapter:
             "conversation_key": clean(params.get("conversation_key")),
             "display_name": clean(params.get("display_name")),
             "text": clean(params.get("text")),
-            "content_type": clean(params.get("content_type")) or "text",
+            "content_type": content_type,
+            "file_name": clean(params.get("file_name")) or Path(file_path).name,
+            "image_data_url": image_data_url,
             "require_target_verification": bool(params.get("require_target_verification", True)),
             "select_conversation_before_draft": bool(params.get("select_conversation_before_draft", False)),
             "prefer_unread": bool(params.get("prefer_unread", False)),
@@ -463,6 +522,7 @@ class PddWebSidecarAdapter:
             )
             content_type = clean(params.get("content_type")) or "text"
             text = clean(params.get("text"))
+            file_path = clean(params.get("file_path") or params.get("image_path"))
             self._store.append(
                 {
                     "event_type": "send_result_observed",
@@ -492,7 +552,9 @@ class PddWebSidecarAdapter:
                         "client_message_id": client_message_id,
                         "display_name": display_name,
                         "content_type": content_type,
-                        "content": text,
+                        "content": text if content_type == "text" else "[image]",
+                        "content_image_path": file_path if content_type == "image" else "",
+                        "evidence_ref": file_path if content_type == "image" else "",
                     },
                 }
             )
@@ -706,12 +768,18 @@ class PddWebSidecarAdapter:
         if not isinstance(items, list):
             items = []
         display_name = clean(message.get("display_name") or message.get("conversation_name"))
+        image_items = [
+            item
+            for item in items
+            if isinstance(item, dict) and clean(item.get("content_type") or item.get("type")).lower() in {"image", "pic"}
+        ]
         events: list[dict[str, Any]] = []
         appended = 0
         for item in items:
             if not isinstance(item, dict):
                 continue
-            event = event_from_page_message(item, account_id=self._account_id, display_name=display_name)
+            normalized_item = self._persist_message_media(item)
+            event = event_from_page_message(normalized_item, account_id=self._account_id, display_name=display_name)
             platform_msg_id = clean(event.get("payload", {}).get("platform_msg_id"))
             events.append(event)
             if platform_msg_id and platform_msg_id in self._seen_message_ids:
@@ -724,14 +792,80 @@ class PddWebSidecarAdapter:
             self._latest_messages = events
             self._page_agent.last_seen_at = _now_iso()
         logger.info(
-            "PDD message_snapshot display_name=%s received=%s converted=%s appended=%s types=%s",
+            "PDD message_snapshot display_name=%s received=%s converted=%s appended=%s types=%s "
+            "image_count=%s image_data_urls=%s image_fetch_errors=%s image_asset_urls=%s",
             display_name,
             len(items),
             len(events),
             appended,
             [clean((event.get("payload") or {}).get("content_type")) for event in events[:8]],
+            len(image_items),
+            sum(1 for item in image_items if clean(item.get("asset_data_url"))),
+            [
+                clean(item.get("asset_fetch_error"))[:160]
+                for item in image_items
+                if clean(item.get("asset_fetch_error"))
+            ][:5],
+            [
+                clean(item.get("asset_url"))[:160]
+                for item in image_items
+                if clean(item.get("asset_url"))
+            ][:5],
         )
         return appended
+
+    def _persist_message_media(self, item: dict[str, Any]) -> dict[str, Any]:
+        if clean(item.get("content_type") or item.get("type")).lower() not in {"image", "pic"}:
+            return item
+        asset_url = clean(item.get("asset_url"))
+        data_url = clean(item.get("asset_data_url"))
+        if not data_url and asset_url.startswith("data:"):
+            data_url = asset_url
+        if not data_url:
+            return item
+
+        normalized = dict(item)
+        normalized.pop("asset_data_url", None)
+        prefix_seed = clean(item.get("platform_msg_id")) or clean(item.get("asset_url")) or str(time.time())
+        prefix = "pdd_web_image_" + hashlib.sha1(prefix_seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        try:
+            saved = save_data_url(data_url, self._media_dir, prefix=prefix)
+        except Exception as exc:  # noqa: BLE001 - adapter should keep message flow alive if media saving fails.
+            raw = normalized.get("raw") if isinstance(normalized.get("raw"), dict) else {}
+            normalized["raw"] = {
+                **raw,
+                "asset_save_error": str(exc),
+                "asset_url": clean(item.get("asset_url")),
+            }
+            logger.warning(
+                "PDD image asset save failed platform_msg_id=%s asset_url=%s error=%s",
+                clean(item.get("platform_msg_id")),
+                clean(item.get("asset_url")),
+                exc,
+            )
+            return normalized
+
+        path = clean(saved.get("path"))
+        raw = normalized.get("raw") if isinstance(normalized.get("raw"), dict) else {}
+        normalized["content_image_path"] = path
+        normalized["evidence_ref"] = path
+        normalized["raw"] = {
+            **raw,
+            "asset_url": clean(item.get("asset_url")),
+            "asset_source_kind": clean(item.get("asset_source_kind") or item.get("source_kind")),
+            "asset_capture_method": clean(item.get("asset_capture_method")) or clean(saved.get("method")),
+            "asset_mime_type": clean(saved.get("mime_type")),
+            "asset_sha1": clean(saved.get("sha1")),
+            "asset_bytes": int(saved.get("bytes") or 0),
+        }
+        logger.info(
+            "PDD image asset saved platform_msg_id=%s path=%s bytes=%s source=%s",
+            clean(item.get("platform_msg_id")),
+            path,
+            saved.get("bytes"),
+            clean(item.get("asset_url"))[:160],
+        )
+        return normalized
 
     def _handle_debug_snapshot(self, message: dict[str, Any]) -> None:
         conversation_hits = message.get("conversation_selector_hits")

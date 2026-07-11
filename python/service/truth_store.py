@@ -784,6 +784,36 @@ class PythonServiceTruthStore:
               FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_qq_messages_conv_id ON qq_messages(conversation_id);
+            CREATE TABLE IF NOT EXISTS pdd_web_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              message_id INTEGER NOT NULL UNIQUE,
+              conversation_id INTEGER NOT NULL,
+              pdd_web_account_id TEXT DEFAULT '',
+              pdd_web_conversation_key TEXT DEFAULT '',
+              pdd_web_display_name TEXT DEFAULT '',
+              platform_message_id TEXT DEFAULT '',
+              direction TEXT DEFAULT '',
+              sender_role TEXT DEFAULT '',
+              raw_sender TEXT DEFAULT '',
+              raw_timestamp_text TEXT DEFAULT '',
+              parser_source TEXT DEFAULT '',
+              source_type TEXT DEFAULT '',
+              confidence INTEGER DEFAULT 0,
+              verification_status TEXT DEFAULT '',
+              original_timestamp TEXT DEFAULT '',
+              content_image_path TEXT DEFAULT '',
+              role_method TEXT DEFAULT '',
+              role_confidence REAL DEFAULT 0,
+              bubble_rect TEXT DEFAULT '',
+              message_list_rect TEXT DEFAULT '',
+              evidence_ref TEXT DEFAULT '',
+              raw_payload_json TEXT DEFAULT '',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_pdd_web_messages_conv_id ON pdd_web_messages(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_pdd_web_messages_platform_message_id ON pdd_web_messages(platform_message_id);
             CREATE TABLE IF NOT EXISTS rpa_events (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               event_id TEXT UNIQUE,
@@ -879,6 +909,16 @@ class PythonServiceTruthStore:
             "INSERT OR IGNORE INTO qq_messages (message_id, conversation_id, platform_message_id, source_type, confidence, verification_status, original_timestamp, content_image_path, evidence_ref, raw_payload_json) SELECT m.id, m.conversation_id, m.platform_message_id, m.source_type, m.confidence, m.verification_status, m.original_timestamp, m.content_image_path, m.content_image_path, '{}' FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.platform = 'qq'",
             "CREATE INDEX IF NOT EXISTS idx_qianniu_messages_platform_message_id ON qianniu_messages(platform_message_id)",
             "CREATE INDEX IF NOT EXISTS idx_qq_messages_platform_message_id ON qq_messages(platform_message_id)",
+            "CREATE TABLE IF NOT EXISTS pdd_web_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL UNIQUE, conversation_id INTEGER NOT NULL, pdd_web_account_id TEXT DEFAULT '', pdd_web_conversation_key TEXT DEFAULT '', pdd_web_display_name TEXT DEFAULT '', platform_message_id TEXT DEFAULT '', direction TEXT DEFAULT '', sender_role TEXT DEFAULT '', raw_sender TEXT DEFAULT '', raw_timestamp_text TEXT DEFAULT '', parser_source TEXT DEFAULT '', source_type TEXT DEFAULT '', confidence INTEGER DEFAULT 0, verification_status TEXT DEFAULT '', original_timestamp TEXT DEFAULT '', content_image_path TEXT DEFAULT '', role_method TEXT DEFAULT '', role_confidence REAL DEFAULT 0, bubble_rect TEXT DEFAULT '', message_list_rect TEXT DEFAULT '', evidence_ref TEXT DEFAULT '', raw_payload_json TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE, FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE)",
+            "ALTER TABLE pdd_web_messages ADD COLUMN raw_sender TEXT DEFAULT ''",
+            "ALTER TABLE pdd_web_messages ADD COLUMN raw_timestamp_text TEXT DEFAULT ''",
+            "ALTER TABLE pdd_web_messages ADD COLUMN parser_source TEXT DEFAULT ''",
+            "ALTER TABLE pdd_web_messages ADD COLUMN role_method TEXT DEFAULT ''",
+            "ALTER TABLE pdd_web_messages ADD COLUMN role_confidence REAL DEFAULT 0",
+            "ALTER TABLE pdd_web_messages ADD COLUMN bubble_rect TEXT DEFAULT ''",
+            "ALTER TABLE pdd_web_messages ADD COLUMN message_list_rect TEXT DEFAULT ''",
+            "CREATE INDEX IF NOT EXISTS idx_pdd_web_messages_conv_id ON pdd_web_messages(conversation_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pdd_web_messages_platform_message_id ON pdd_web_messages(platform_message_id)",
             "ALTER TABLE conversations DROP COLUMN source_type",
             "ALTER TABLE conversations DROP COLUMN confidence",
             "ALTER TABLE conversations DROP COLUMN cache_scope",
@@ -1493,7 +1533,7 @@ class PythonServiceTruthStore:
         event: dict[str, Any],
     ) -> None:
         platform = _clean(event.get("platform")).lower()
-        if platform not in {"wechat", "qianniu", "qq"} or message_id <= 0 or conversation_id <= 0:
+        if platform not in {"wechat", "qianniu", "qq", "pdd_web"} or message_id <= 0 or conversation_id <= 0:
             return
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         account_id = _clean(event.get("account_id"))

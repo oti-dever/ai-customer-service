@@ -5,8 +5,14 @@
   "description": "Local page agent for observing Pinduoduo customer-service pages.",
   "permissions": [],
   "host_permissions": [
-    "https://*.pinduoduo.com/*"
+    "https://*.pinduoduo.com/*",
+    "https://*.yangkeduo.com/*",
+    "https://*.pddpic.com/*",
+    "https://*.pddugc.com/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [
