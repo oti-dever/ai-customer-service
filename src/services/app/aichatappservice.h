@@ -5,6 +5,7 @@
 #include "../ai/aiprovidercatalog.h"
 #include "../ai/aitypes.h"
 #include <QObject>
+#include <QStringList>
 
 class AiServiceFacade;
 class IAiStreamingSession;
@@ -129,6 +130,49 @@ struct ReplyImageTrace {
     QList<ReplyImageCandidate> candidates;
 };
 
+struct ReplyIntentDecision {
+    QString intent = QStringLiteral("normal_question");
+    QString workflow = QStringLiteral("normal_text_reply");
+    QString source = QStringLiteral("heuristic");
+    QString reason;
+    QString rawJson;
+    QString errorText;
+    QString imageQuery;
+    QString replyGoal;
+    QString email;
+    QString templateId;
+    QString nextAction;
+    QString businessObjectName;
+    QStringList missingSlots;
+    QStringList riskFlags;
+    double confidence = 0.0;
+    bool modelRouted = false;
+    bool needCustomerReply = true;
+    bool needDocSearch = true;
+    bool needImageSearch = false;
+    bool needEmail = false;
+};
+
+struct ReplyActionPlan {
+    QString workflow = QStringLiteral("normal_text_reply");
+    QString replyMode = QStringLiteral("text");
+    QString imageQuery;
+    QString replyInstruction;
+    QStringList requiredActions;
+    QStringList blockedActions;
+    bool generateReply = true;
+    bool needDocSearch = true;
+    bool needImageSearch = false;
+    bool allowImageAttachments = false;
+    bool hasImageAttachment = false;
+    bool needEmail = false;
+    bool askForEmail = false;
+    bool askForTemplate = false;
+    bool emailServiceRequired = false;
+    bool directExternalLinkBlocked = false;
+    bool requiresHumanReview = false;
+};
+
 struct ReplyContextInput {
     enum class Source {
         AggregateConversation,
@@ -146,6 +190,8 @@ struct ReplyContextResult {
     QString knowledgeStatus;
     QString imageStatus;
     QString linkedImageName;
+    ReplyIntentDecision intent;
+    ReplyActionPlan actionPlan;
     ReplyKnowledgeTrace knowledgeTrace;
     ReplyImageTrace imageTrace;
     QList<KnowledgeSnippetContext> knowledgeSnippets;
@@ -169,13 +215,17 @@ public:
         int conversationId,
         const QString& sessionModelKey,
         const QList<KnowledgeSnippetContext>& knowledgeSnippets = {},
-        const AggregateReplyStrategy& strategy = {}) const;
+        const AggregateReplyStrategy& strategy = {},
+        const ReplyIntentDecision& intent = {},
+        const ReplyActionPlan& actionPlan = {}) const;
     AggregateAiBuiltRequest buildRobotSandboxReplyRequest(
         const QString& sessionModelKey,
         const QList<AiConversationTurn>& recentTurns,
         const QString& latestUserText,
         const QList<KnowledgeSnippetContext>& knowledgeSnippets = {},
-        const AggregateReplyStrategy& strategy = {}) const;
+        const AggregateReplyStrategy& strategy = {},
+        const ReplyIntentDecision& intent = {},
+        const ReplyActionPlan& actionPlan = {}) const;
     ReplyContextResult buildReplyContext(const ReplyContextInput& input) const;
     AggregateAiBuiltRequest buildAggregateCustomerProfileRequest(int conversationId,
                                                                  const QString& sessionModelKey) const;
@@ -184,6 +234,12 @@ public:
                                        QObject* parent) const;
 
 private:
+    ReplyIntentDecision classifyReplyIntent(const ReplyContextInput& input,
+                                            const QString& latestText,
+                                            const QString& latestImagePath,
+                                            const QList<AiConversationTurn>& recentTurns,
+                                            const QString& platform,
+                                            bool latestIsImageOnly) const;
     QNetworkAccessManager* m_network = nullptr;
     AiServiceFacade* m_facade = nullptr;
 };

@@ -29,7 +29,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QAudioOutput>
+#include <QEventLoop>
 #include <QMediaPlayer>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QPointer>
 #include <QSettings>
 #include <QSet>
 #include <QStringConverter>
@@ -62,6 +67,7 @@
 #include <QMimeData>
 #include <QMimeDatabase>
 #include <QMouseEvent>
+#include <QMetaObject>
 #include <QAction>
 #include <QAbstractButton>
 #include <QMenu>
@@ -87,6 +93,7 @@
 #include <QSvgRenderer>
 #include <QTextDocument>
 #include <QTextStream>
+#include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -947,6 +954,30 @@ bool autoReplyMessagesAreSimilar(const QString& left, const QString& right)
     return dice >= 0.72;
 }
 
+bool aggregateReplyDeniesImageAvailability(const QString& text)
+{
+    const QString normalized = text.trimmed().toLower();
+    if (normalized.isEmpty())
+        return false;
+    const QStringList denySignals = {
+        QStringLiteral("没有图片"),
+        QStringLiteral("暂无图片"),
+        QStringLiteral("没有实拍"),
+        QStringLiteral("暂无实拍"),
+        QStringLiteral("不能发图"),
+        QStringLiteral("无法发图"),
+        QStringLiteral("图片不可用"),
+        QStringLiteral("没有对应图片"),
+        QStringLiteral("no image"),
+        QStringLiteral("not available"),
+    };
+    for (const QString& signal : denySignals) {
+        if (normalized.contains(signal))
+            return true;
+    }
+    return false;
+}
+
 QStringList aggregateAutoReplyTextMessages(const QString& generatedText,
                                            bool allowMultiple,
                                            int maxMessages,
@@ -1690,6 +1721,129 @@ QString aggregateLogPreview(QString text, int maxLen = 160)
     return text.left(maxLen) + QStringLiteral("...");
 }
 
+QString aggregateEmailResponseDetail(const QJsonObject& response, const QString& transportError)
+{
+    return response.value(QStringLiteral("detail")).toString(
+        response.value(QStringLiteral("error")).toString(transportError)).trimmed();
+}
+
+QString aggregateWorkflowEmailSuccessMessage()
+{
+    return QStringLiteral("亲，资料已发送到您的邮箱，请注意查收。");
+}
+
+QString aggregateWorkflowEmailFailureMessage()
+{
+    return QStringLiteral("亲，邮件发送暂时异常，我这边帮您进一步处理。");
+}
+
+struct AggregateWorkflowEmailResult
+{
+    int conversationId = 0;
+    qint64 requestEventId = 0;
+    QString traceId;
+    QJsonObject response;
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    QString error;
+    int elapsedMs = 0;
+};
+
+QJsonObject aggregateBlockingJsonPostOnWorker(const QUrl& url,
+                                              const QJsonObject& payload,
+                                              int timeoutMs,
+                                              Ipc::ResponseStatus* statusOut,
+                                              QString* errorOut)
+{
+    QNetworkAccessManager network;
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setTransferTimeout(timeoutMs);
+    QNetworkReply* reply = network.post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QTimer::singleShot(timeoutMs, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    QJsonObject object;
+    if (!reply->isFinished()) {
+        reply->abort();
+        if (statusOut)
+            *statusOut = Ipc::ResponseStatus::Timeout;
+        if (errorOut)
+            *errorOut = QStringLiteral("request_timeout");
+        reply->deleteLater();
+        return object;
+    }
+
+    const QByteArray body = reply->readAll();
+    const QJsonDocument document = QJsonDocument::fromJson(body);
+    if (document.isObject())
+        object = document.object();
+
+    if (reply->error() != QNetworkReply::NoError) {
+        if (statusOut)
+            *statusOut = Ipc::ResponseStatus::Error;
+        if (errorOut) {
+            const QString detail = object.value(QStringLiteral("detail")).toString(
+                object.value(QStringLiteral("error")).toString());
+            *errorOut = detail.isEmpty() ? reply->errorString() : detail;
+        }
+        reply->deleteLater();
+        return object;
+    }
+
+    if (!document.isObject()) {
+        if (statusOut)
+            *statusOut = Ipc::ResponseStatus::Error;
+        if (errorOut)
+            *errorOut = QStringLiteral("invalid_json_response");
+        reply->deleteLater();
+        return object;
+    }
+
+    if (statusOut)
+        *statusOut = Ipc::ResponseStatus::Success;
+    if (errorOut)
+        errorOut->clear();
+    reply->deleteLater();
+    return object;
+}
+
+AggregateWorkflowEmailResult sendAggregateWorkflowEmailOnWorker(const QString& endpoint,
+                                                                int conversationId,
+                                                                qint64 requestEventId,
+                                                                const QString& traceId,
+                                                                const QString& recipient,
+                                                                const QString& scene,
+                                                                const QString& templateId)
+{
+    AggregateWorkflowEmailResult result;
+    result.conversationId = conversationId;
+    result.requestEventId = requestEventId;
+    result.traceId = traceId;
+
+    QElapsedTimer timer;
+    timer.start();
+    QJsonObject payload;
+    payload.insert(QStringLiteral("to"), recipient.trimmed());
+    payload.insert(QStringLiteral("scene"), scene.trimmed().isEmpty()
+                                        ? QStringLiteral("link_request")
+                                        : scene.trimmed());
+    payload.insert(QStringLiteral("conversation_id"), conversationId);
+    payload.insert(QStringLiteral("trace_id"), traceId);
+    if (!templateId.trimmed().isEmpty())
+        payload.insert(QStringLiteral("template_id"), templateId.trimmed());
+    result.response = aggregateBlockingJsonPostOnWorker(
+        QUrl(endpoint + QStringLiteral("/api/email/send")),
+        payload,
+        30000,
+        &result.status,
+        &result.error);
+    result.elapsedMs = int(timer.elapsed());
+    return result;
+}
+
 QStringList sortedAggregatePlatformSet(const QSet<QString>& values)
 {
     QStringList list;
@@ -1785,6 +1939,8 @@ void appendAggregateAiTraceStart(const QString& traceId,
                                  const QString& sessionModelKey,
                                  const AiProviderConfig& config,
                                  const AiRequest& request,
+                                 const ReplyIntentDecision& intent,
+                                 const ReplyActionPlan& actionPlan,
                                  const AggregateKnowledgeTrace& knowledgeTrace,
                                  const AggregateImageTrace& imageTrace,
                                  const AggregateReplyRuntimeConfig& runtimeConfig)
@@ -1851,6 +2007,48 @@ void appendAggregateAiTraceStart(const QString& traceId,
     lines << QStringLiteral("[recent chat history - last 10]");
     lines << formatAggregateTraceHistory(conversationId);
     lines << QString();
+    lines << QStringLiteral("[intent router / action plan]");
+    lines << QStringLiteral("intent: %1").arg(intent.intent);
+    lines << QStringLiteral("workflow: %1").arg(intent.workflow);
+    lines << QStringLiteral("next_action: %1").arg(intent.nextAction.trimmed().isEmpty()
+                                                     ? QStringLiteral("(empty)")
+                                                     : intent.nextAction.trimmed());
+    lines << QStringLiteral("intent_source: %1").arg(intent.source);
+    lines << QStringLiteral("confidence: %1").arg(intent.confidence, 0, 'f', 2);
+    lines << QStringLiteral("model_routed: %1").arg(aggregateBoolLabel(intent.modelRouted));
+    lines << QStringLiteral("reason: %1").arg(intent.reason.trimmed().isEmpty()
+                                                ? QStringLiteral("(empty)")
+                                                : intent.reason.trimmed());
+    lines << QStringLiteral("need_customer_reply: %1").arg(aggregateBoolLabel(intent.needCustomerReply));
+    lines << QStringLiteral("need_doc_search: %1").arg(aggregateBoolLabel(actionPlan.needDocSearch));
+    lines << QStringLiteral("need_image_search: %1").arg(aggregateBoolLabel(actionPlan.needImageSearch));
+    lines << QStringLiteral("image_query: %1").arg(actionPlan.imageQuery.trimmed().isEmpty()
+                                                    ? QStringLiteral("(empty)")
+                                                    : actionPlan.imageQuery.trimmed());
+    lines << QStringLiteral("need_email: %1").arg(aggregateBoolLabel(actionPlan.needEmail));
+    lines << QStringLiteral("ask_for_template: %1").arg(aggregateBoolLabel(actionPlan.askForTemplate));
+    lines << QStringLiteral("ask_for_email: %1").arg(aggregateBoolLabel(actionPlan.askForEmail));
+    lines << QStringLiteral("email_service_required: %1").arg(aggregateBoolLabel(actionPlan.emailServiceRequired));
+    lines << QStringLiteral("email_template_id: %1").arg(intent.templateId.trimmed().isEmpty()
+                                                            ? QStringLiteral("(empty)")
+                                                            : intent.templateId.trimmed());
+    lines << QStringLiteral("business_object: %1").arg(intent.businessObjectName.trimmed().isEmpty()
+                                                          ? QStringLiteral("(empty)")
+                                                          : intent.businessObjectName.trimmed());
+    lines << QStringLiteral("direct_external_link_blocked: %1").arg(aggregateBoolLabel(actionPlan.directExternalLinkBlocked));
+    lines << QStringLiteral("missing_slots: %1").arg(intent.missingSlots.isEmpty()
+                                                       ? QStringLiteral("(empty)")
+                                                       : intent.missingSlots.join(QStringLiteral(",")));
+    lines << QStringLiteral("risk_flags: %1").arg(intent.riskFlags.isEmpty()
+                                                    ? QStringLiteral("(empty)")
+                                                    : intent.riskFlags.join(QStringLiteral(",")));
+    if (!intent.errorText.trimmed().isEmpty())
+        lines << QStringLiteral("router_error: %1").arg(intent.errorText.left(300));
+    if (!intent.rawJson.trimmed().isEmpty()) {
+        lines << QStringLiteral("[intent raw json]");
+        lines << intent.rawJson.trimmed().left(2000);
+    }
+    lines << QString();
     lines << QStringLiteral("[knowledge retrieval]");
     lines << formatAggregateTraceKnowledge(knowledgeTrace);
     lines << QString();
@@ -1867,6 +2065,8 @@ struct AggregateReplyBuildContext {
     QString traceId;
     AggregateReplyRuntimeConfig runtimeConfig;
     QString knowledgeStatus;
+    ReplyIntentDecision intent;
+    ReplyActionPlan actionPlan;
     AggregateKnowledgeTrace knowledgeTrace;
     AggregateImageTrace imageTrace;
     QList<KnowledgeSnippetContext> knowledgeSnippets;
@@ -1994,6 +2194,8 @@ AggregateReplyBuildContext buildAggregateReplyContext(AiChatAppService* service,
     input.runtimeConfig = toSharedReplyRuntimeConfig(context.runtimeConfig);
     const ReplyContextResult shared = service->buildReplyContext(input);
     context.knowledgeStatus = shared.knowledgeStatus;
+    context.intent = shared.intent;
+    context.actionPlan = shared.actionPlan;
     context.knowledgeTrace = toAggregateKnowledgeTrace(shared.knowledgeTrace);
     context.imageTrace = toAggregateImageTrace(shared.imageTrace);
     context.knowledgeSnippets = shared.knowledgeSnippets;
@@ -2008,6 +2210,8 @@ AggregateReplyBuildContext buildAggregateReplyContext(AiChatAppService* service,
                                 context.runtimeConfig.sessionModelKey,
                                 context.built.config,
                                 context.built.request,
+                                context.intent,
+                                context.actionPlan,
                                 context.knowledgeTrace,
                                 context.imageTrace,
                                 context.runtimeConfig);
@@ -8400,6 +8604,10 @@ void AggregateChatForm::abortAggregateAiRequest()
         m_autoReplyTargetConvId = -1;
         m_autoReplyAccumulated.clear();
         m_autoReplyTraceId.clear();
+        m_autoReplyAttachments.clear();
+        m_autoReplyEmailRecipient.clear();
+        m_autoReplyEmailScene.clear();
+        m_autoReplyEmailTemplateId.clear();
     }
     if (m_customerProfileBusy) {
         m_customerProfileBusy = false;
@@ -8439,6 +8647,10 @@ void AggregateChatForm::abortAutoReplyRequest()
         m_autoReplyTargetConvId = -1;
         m_autoReplyAccumulated.clear();
         m_autoReplyTraceId.clear();
+        m_autoReplyAttachments.clear();
+        m_autoReplyEmailRecipient.clear();
+        m_autoReplyEmailScene.clear();
+        m_autoReplyEmailTemplateId.clear();
     }
     updateAggregateAiControlsVisibility();
     refreshRightBarMetrics();
@@ -8452,6 +8664,225 @@ void AggregateChatForm::clearStreamingSession(IAiStreamingSession*& session)
     session->abort();
     session->deleteLater();
     session = nullptr;
+}
+
+void AggregateChatForm::startAutoReplyEmailAction(int conversationId,
+                                                  qint64 requestEventId,
+                                                  const QString& traceId,
+                                                  const QString& recipient,
+                                                  const QString& scene,
+                                                  const QString& templateId)
+{
+    if (conversationId <= 0 || traceId.trimmed().isEmpty()) {
+        finishAutoReplyEmailAction(conversationId,
+                                   requestEventId,
+                                   traceId,
+                                   QJsonObject{{QStringLiteral("status"), QStringLiteral("error")},
+                                               {QStringLiteral("error"), QStringLiteral("invalid_context")}},
+                                   Ipc::ResponseStatus::Error,
+                                   QStringLiteral("invalid_context"),
+                                   0);
+        return;
+    }
+
+    const QString trimmedRecipient = recipient.trimmed();
+    if (trimmedRecipient.isEmpty()) {
+        finishAutoReplyEmailAction(conversationId,
+                                   requestEventId,
+                                   traceId,
+                                   QJsonObject{{QStringLiteral("status"), QStringLiteral("error")},
+                                               {QStringLiteral("error"), QStringLiteral("invalid_recipient")}},
+                                   Ipc::ResponseStatus::Error,
+                                   QStringLiteral("invalid_recipient"),
+                                   0);
+        return;
+    }
+    const QString trimmedTemplateId = templateId.trimmed();
+    if (trimmedTemplateId.isEmpty()) {
+        finishAutoReplyEmailAction(conversationId,
+                                   requestEventId,
+                                   traceId,
+                                   QJsonObject{{QStringLiteral("status"), QStringLiteral("error")},
+                                               {QStringLiteral("error"), QStringLiteral("missing_template_id")},
+                                               {QStringLiteral("detail"), QStringLiteral("邮件模板未明确，不能自动发送邮件")}},
+                                   Ipc::ResponseStatus::Error,
+                                   QStringLiteral("missing_template_id"),
+                                   0);
+        return;
+    }
+
+    appendAggregateAutoReplyLog(
+        QStringLiteral("email_action_started"),
+        {
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+            aggregateLogField(QStringLiteral("trace_id"), traceId),
+            aggregateLogField(QStringLiteral("request_event_id"), QString::number(requestEventId)),
+            aggregateLogField(QStringLiteral("recipient_chars"), QString::number(trimmedRecipient.size())),
+            aggregateLogField(QStringLiteral("scene"), scene.trimmed().isEmpty()
+                                                      ? QStringLiteral("link_request")
+                                                      : scene.trimmed()),
+            aggregateLogField(QStringLiteral("template_id"), trimmedTemplateId),
+        });
+    if (requestEventId > 0) {
+        AiRequestEventDao().appendStage(requestEventId,
+                                        conversationId,
+                                        QStringLiteral("email_action_started"),
+                                        QStringLiteral("workflow=%1 template_id=%2")
+                                            .arg(scene.trimmed().isEmpty()
+                                                     ? QStringLiteral("link_request")
+                                                     : scene.trimmed(),
+                                                 trimmedTemplateId));
+    }
+
+    const QString endpoint = Ipc::IpcService::instance().serviceEndpoint();
+    QPointer<AggregateChatForm> guard(this);
+    QThread* worker = QThread::create([guard,
+                                       endpoint,
+                                       conversationId,
+                                       requestEventId,
+                                       traceId,
+                                       trimmedRecipient,
+                                       scene,
+                                       trimmedTemplateId]() {
+        AggregateWorkflowEmailResult result =
+            sendAggregateWorkflowEmailOnWorker(endpoint,
+                                               conversationId,
+                                               requestEventId,
+                                               traceId,
+                                               trimmedRecipient,
+                                               scene,
+                                               trimmedTemplateId);
+        if (!guard)
+            return;
+        QMetaObject::invokeMethod(guard.data(), [guard, result]() {
+            if (!guard)
+                return;
+            guard->finishAutoReplyEmailAction(result.conversationId,
+                                              result.requestEventId,
+                                              result.traceId,
+                                              result.response,
+                                              result.status,
+                                              result.error,
+                                              result.elapsedMs);
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+}
+
+void AggregateChatForm::finishAutoReplyEmailAction(int conversationId,
+                                                   qint64 requestEventId,
+                                                   const QString& traceId,
+                                                   const QJsonObject& response,
+                                                   Ipc::ResponseStatus status,
+                                                   const QString& error,
+                                                   int elapsedMs)
+{
+    if (!m_autoReplyBusy
+        || conversationId != m_autoReplyTargetConvId
+        || traceId != m_autoReplyTraceId) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("email_action_result_ignored"),
+            {
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("trace_id"), traceId),
+                aggregateLogField(QStringLiteral("current_target_conversation_id"), QString::number(m_autoReplyTargetConvId)),
+                aggregateLogField(QStringLiteral("current_trace_id"), m_autoReplyTraceId),
+                aggregateLogField(QStringLiteral("auto_reply_busy"), aggregateBoolLabel(m_autoReplyBusy)),
+            });
+        return;
+    }
+
+    const bool success =
+        status == Ipc::ResponseStatus::Success
+        && response.value(QStringLiteral("status")).toString(QStringLiteral("success")) != QLatin1String("error");
+    const QString detail = aggregateEmailResponseDetail(response, error);
+    const QString customerMessage = success
+        ? aggregateWorkflowEmailSuccessMessage()
+        : aggregateWorkflowEmailFailureMessage();
+
+    OutgoingMessagePayload payload;
+    OutgoingMessagePart textPart;
+    textPart.type = OutgoingPartType::Text;
+    textPart.text = customerMessage;
+    payload.parts.push_back(textPart);
+    ConversationManager::instance().sendPayload(conversationId, payload);
+
+    appendAggregateAutoReplyLog(
+        success ? QStringLiteral("email_action_succeeded") : QStringLiteral("email_action_failed"),
+        {
+            aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+            aggregateLogField(QStringLiteral("trace_id"), traceId),
+            aggregateLogField(QStringLiteral("request_event_id"), QString::number(requestEventId)),
+            aggregateLogField(QStringLiteral("elapsed_ms"), QString::number(elapsedMs)),
+            aggregateLogField(QStringLiteral("response_status"), response.value(QStringLiteral("status")).toString()),
+            aggregateLogField(QStringLiteral("error_code"), response.value(QStringLiteral("error")).toString()),
+            aggregateLogField(QStringLiteral("message_id"), response.value(QStringLiteral("message_id")).toString()),
+            aggregateLogField(QStringLiteral("template_id"), response.value(QStringLiteral("template_id")).toString()),
+            aggregateLogField(QStringLiteral("detail"), detail.left(220)),
+            aggregateLogField(QStringLiteral("customer_message"), customerMessage),
+        });
+
+    QStringList traceLines;
+    traceLines << QStringLiteral("\n-------------------- Aggregate Workflow Email Action --------------------");
+    traceLines << QStringLiteral("trace_id: %1").arg(traceId);
+    traceLines << QStringLiteral("conversation_id: %1").arg(conversationId);
+    traceLines << QStringLiteral("time: %1").arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+    traceLines << QStringLiteral("status: %1").arg(success ? QStringLiteral("success") : QStringLiteral("failed"));
+    traceLines << QStringLiteral("transport_status: %1").arg(Ipc::toString(status));
+    traceLines << QStringLiteral("elapsed_ms: %1").arg(elapsedMs);
+    traceLines << QStringLiteral("message_id: %1").arg(response.value(QStringLiteral("message_id")).toString());
+    traceLines << QStringLiteral("template_id: %1").arg(response.value(QStringLiteral("template_id")).toString());
+    traceLines << QStringLiteral("error_code: %1").arg(response.value(QStringLiteral("error")).toString());
+    if (!detail.isEmpty())
+        traceLines << QStringLiteral("detail: %1").arg(detail.left(300));
+    traceLines << QStringLiteral("customer_message: %1").arg(customerMessage);
+    traceLines << QStringLiteral("-----------------------------------------------------------------------");
+    appendAggregateAiTraceLog(traceLines.join(QLatin1Char('\n')) + QLatin1Char('\n'));
+
+    if (requestEventId > 0) {
+        AiRequestEventDao eventDao;
+        if (success) {
+            eventDao.appendStage(requestEventId,
+                                 conversationId,
+                                 QStringLiteral("email_action_succeeded"),
+                                 response.value(QStringLiteral("message_id")).toString());
+            eventDao.appendStage(requestEventId, conversationId, QStringLiteral("send_submitted"));
+            eventDao.completeEvent(requestEventId,
+                                   int(m_autoReplyRequestTimer.elapsed()),
+                                   m_autoReplyFirstTokenMs,
+                                   customerMessage.size());
+        } else {
+            eventDao.appendStage(requestEventId,
+                                 conversationId,
+                                 QStringLiteral("email_action_failed"),
+                                 detail.left(120));
+            eventDao.appendStage(requestEventId,
+                                 conversationId,
+                                 QStringLiteral("send_failure_notice_submitted"));
+            eventDao.failEvent(requestEventId,
+                               int(m_autoReplyRequestTimer.elapsed()),
+                               detail.isEmpty() ? error : detail);
+        }
+    }
+
+    m_autoReplyBusy = false;
+    m_autoReplyTargetConvId = -1;
+    m_autoReplyTraceId.clear();
+    m_autoReplyAccumulated.clear();
+    m_autoReplyAttachments.clear();
+    m_autoReplyEmailRecipient.clear();
+    m_autoReplyEmailScene.clear();
+    m_autoReplyEmailTemplateId.clear();
+    m_autoReplyRequestEventId = 0;
+    m_autoReplyFirstTokenMs = 0;
+    updateAggregateAiControlsVisibility();
+    refreshRightBarMetrics();
+    schedulePythonServiceBackfill(300);
+    showStatusMessage(success
+                          ? QStringLiteral("邮件已发送，已自动提醒客户查收")
+                          : QStringLiteral("邮件发送失败，已自动发送异常处理提示"),
+                      success ? 4000 : 6000);
 }
 
 void AggregateChatForm::destroyStreamingSessionNow(IAiStreamingSession*& session)
@@ -8508,6 +8939,9 @@ void AggregateChatForm::shutdownTransientWork()
     m_customerProfileBusy = false;
     m_autoReplyTargetConvId = -1;
     m_autoReplyTraceId.clear();
+    m_autoReplyEmailRecipient.clear();
+    m_autoReplyEmailScene.clear();
+    m_autoReplyEmailTemplateId.clear();
     m_aggregateAiRequestEventId = 0;
     m_autoReplyRequestEventId = 0;
     m_customerProfileRequestEventId = 0;
@@ -8867,6 +9301,113 @@ void AggregateChatForm::tryAggregateAutoReply(int conversationId, const QString&
                                    conversationId,
                                    m_aggregateAiSessionModelKey,
                                    QStringLiteral("aggregate_auto_reply"));
+    if (replyContext.actionPlan.emailServiceRequired
+        && !replyContext.intent.email.trimmed().isEmpty()
+        && !replyContext.intent.templateId.trimmed().isEmpty()) {
+        appendAggregateAutoReplyLog(
+            QStringLiteral("email_workflow_ready"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("trace_id"), replyContext.traceId),
+                aggregateLogField(QStringLiteral("session_model_key"), replyContext.runtimeConfig.sessionModelKey),
+                aggregateLogField(QStringLiteral("config_source"), replyContext.runtimeConfig.source),
+                aggregateLogField(QStringLiteral("bound_robot_id"), replyContext.runtimeConfig.boundRobotId),
+                aggregateLogField(QStringLiteral("intent"), replyContext.intent.intent),
+                aggregateLogField(QStringLiteral("workflow"), replyContext.actionPlan.workflow),
+                aggregateLogField(QStringLiteral("intent_source"), replyContext.intent.source),
+                aggregateLogField(QStringLiteral("intent_confidence"),
+                                  QString::number(replyContext.intent.confidence, 'f', 2)),
+                aggregateLogField(QStringLiteral("email_recipient_chars"),
+                                  QString::number(replyContext.intent.email.trimmed().size())),
+                aggregateLogField(QStringLiteral("email_template_id"),
+                                  replyContext.intent.templateId.trimmed()),
+                aggregateLogField(QStringLiteral("built_request_ok"), aggregateBoolLabel(replyContext.built.ok())),
+                aggregateLogField(QStringLiteral("build_failure_detail"), replyContext.built.failureDetail),
+            });
+
+        m_autoReplyTargetConvId = conversationId;
+        m_autoReplyTraceId = replyContext.traceId;
+        m_autoReplyAllowMultiMessages = false;
+        m_autoReplyMaxMessages = 1;
+        m_autoReplyAccumulated.clear();
+        m_autoReplyAttachments.clear();
+        m_autoReplyEmailRecipient = replyContext.intent.email.trimmed();
+        m_autoReplyEmailScene = replyContext.intent.intent == QLatin1String("link_request")
+            ? QStringLiteral("link_request")
+            : (replyContext.actionPlan.workflow.trimmed().isEmpty()
+                   ? QStringLiteral("workflow_email")
+                   : replyContext.actionPlan.workflow.trimmed());
+        m_autoReplyEmailTemplateId = replyContext.intent.templateId.trimmed();
+        m_autoReplyBusy = true;
+        m_autoReplyRequestTimer.restart();
+        m_autoReplyFirstTokenMs = 0;
+        m_autoReplyRequestEventId = AiRequestEventDao().beginEvent(
+            QStringLiteral("aggregate_auto"),
+            conversationId,
+            replyContext.runtimeConfig.sessionModelKey,
+            replyContext.built.config.model,
+            triggerTag);
+        if (m_autoReplyRequestEventId > 0) {
+            AiRequestEventDao eventDao;
+            eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
+                                 QStringLiteral("auto_started"));
+            eventDao.appendStage(m_autoReplyRequestEventId, conversationId,
+                                 QStringLiteral("context_ready"));
+        }
+        updateAggregateAiControlsVisibility();
+        startAutoReplyEmailAction(conversationId,
+                                  m_autoReplyRequestEventId,
+                                  m_autoReplyTraceId,
+                                  m_autoReplyEmailRecipient,
+                                  m_autoReplyEmailScene,
+                                  m_autoReplyEmailTemplateId);
+        showStatusMessage(QStringLiteral("AI 自动回复：正在通过邮件服务发送资料..."), 0);
+        qInfo() << "[AggregateAutoReply] email workflow started trigger=" << triggerTag
+                << "conv=" << conversationId
+                << "traceId=" << m_autoReplyTraceId
+                << "templateId=" << m_autoReplyEmailTemplateId
+                << "recipientChars=" << m_autoReplyEmailRecipient.size();
+        return;
+    }
+    if (replyContext.actionPlan.needEmail) {
+        const QString reason = replyContext.actionPlan.askForTemplate
+            ? QStringLiteral("waiting_for_template")
+            : (replyContext.actionPlan.askForEmail
+                   ? QStringLiteral("waiting_for_email")
+                   : QStringLiteral("email_action_not_ready"));
+        appendAggregateAutoReplyLog(
+            QStringLiteral("email_workflow_not_executed"),
+            {
+                aggregateLogField(QStringLiteral("trigger"), triggerTag),
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(conversationId)),
+                aggregateLogField(QStringLiteral("trace_id"), replyContext.traceId),
+                aggregateLogField(QStringLiteral("reason"), reason),
+                aggregateLogField(QStringLiteral("intent"), replyContext.intent.intent),
+                aggregateLogField(QStringLiteral("workflow"), replyContext.actionPlan.workflow),
+                aggregateLogField(QStringLiteral("next_action"), replyContext.intent.nextAction),
+                aggregateLogField(QStringLiteral("ask_for_template"),
+                                  aggregateBoolLabel(replyContext.actionPlan.askForTemplate)),
+                aggregateLogField(QStringLiteral("ask_for_email"),
+                                  aggregateBoolLabel(replyContext.actionPlan.askForEmail)),
+                aggregateLogField(QStringLiteral("email_service_required"),
+                                  aggregateBoolLabel(replyContext.actionPlan.emailServiceRequired)),
+                aggregateLogField(QStringLiteral("email_template_id"),
+                                  replyContext.intent.templateId.trimmed()),
+                aggregateLogField(QStringLiteral("email_present"),
+                                  aggregateBoolLabel(!replyContext.intent.email.trimmed().isEmpty())),
+                aggregateLogField(QStringLiteral("missing_slots"),
+                                  replyContext.intent.missingSlots.join(QStringLiteral(","))),
+            });
+        qInfo() << "[AggregateAutoReply] email workflow not executed"
+                << "trigger=" << triggerTag
+                << "conv=" << conversationId
+                << "traceId=" << replyContext.traceId
+                << "reason=" << reason
+                << "templateId=" << replyContext.intent.templateId.trimmed()
+                << "emailPresent=" << !replyContext.intent.email.trimmed().isEmpty()
+                << "missingSlots=" << replyContext.intent.missingSlots.join(QStringLiteral(","));
+    }
     if (!handleAggregateBuildFailure(this, replyContext.built, true, &skipReason)) {
         appendAggregateAiTraceFinish(replyContext.traceId,
                                      conversationId,
@@ -8887,6 +9428,9 @@ void AggregateChatForm::tryAggregateAutoReply(int conversationId, const QString&
                 aggregateLogField(QStringLiteral("config_status"), replyContext.runtimeConfig.statusText),
                 aggregateLogField(QStringLiteral("bound_robot_id"), replyContext.runtimeConfig.boundRobotId),
                 aggregateLogField(QStringLiteral("failure_detail"), replyContext.built.failureDetail),
+                aggregateLogField(QStringLiteral("intent"), replyContext.intent.intent),
+                aggregateLogField(QStringLiteral("workflow"), replyContext.actionPlan.workflow),
+                aggregateLogField(QStringLiteral("intent_source"), replyContext.intent.source),
                 aggregateLogField(QStringLiteral("knowledge_status"), replyContext.knowledgeStatus),
                 aggregateLogField(QStringLiteral("knowledge_failure_stage"),
                                   replyContext.knowledgeTrace.failureStage),
@@ -8916,6 +9460,23 @@ void AggregateChatForm::tryAggregateAutoReply(int conversationId, const QString&
             aggregateLogField(QStringLiteral("max_auto_send_messages"),
                               QString::number(replyContext.runtimeConfig.maxAutoSendMessages)),
             aggregateLogField(QStringLiteral("model"), replyContext.built.config.model),
+            aggregateLogField(QStringLiteral("intent"), replyContext.intent.intent),
+            aggregateLogField(QStringLiteral("workflow"), replyContext.actionPlan.workflow),
+            aggregateLogField(QStringLiteral("intent_source"), replyContext.intent.source),
+            aggregateLogField(QStringLiteral("intent_confidence"),
+                              QString::number(replyContext.intent.confidence, 'f', 2)),
+            aggregateLogField(QStringLiteral("need_image_search"),
+                              aggregateBoolLabel(replyContext.actionPlan.needImageSearch)),
+            aggregateLogField(QStringLiteral("need_email"),
+                              aggregateBoolLabel(replyContext.actionPlan.needEmail)),
+            aggregateLogField(QStringLiteral("ask_for_template"),
+                              aggregateBoolLabel(replyContext.actionPlan.askForTemplate)),
+            aggregateLogField(QStringLiteral("ask_for_email"),
+                              aggregateBoolLabel(replyContext.actionPlan.askForEmail)),
+            aggregateLogField(QStringLiteral("email_service_required"),
+                              aggregateBoolLabel(replyContext.actionPlan.emailServiceRequired)),
+            aggregateLogField(QStringLiteral("email_template_id"),
+                              replyContext.intent.templateId.trimmed()),
             aggregateLogField(QStringLiteral("knowledge_status"), replyContext.knowledgeStatus),
             aggregateLogField(QStringLiteral("knowledge_failure_stage"), replyContext.knowledgeTrace.failureStage),
             aggregateLogField(QStringLiteral("knowledge_results"),
@@ -9013,7 +9574,7 @@ void AggregateChatForm::onAutoReplyCompleted()
     m_autoReplyTargetConvId = -1;
     const QString text = m_autoReplyAccumulated.trimmed();
     m_autoReplyAccumulated.clear();
-    const QVector<OutgoingMessagePart> imageAttachments = m_autoReplyAttachments;
+    QVector<OutgoingMessagePart> imageAttachments = m_autoReplyAttachments;
     m_autoReplyAttachments.clear();
     const bool allowMultipleMessages = m_autoReplyAllowMultiMessages;
     const int maxMessages = m_autoReplyMaxMessages;
@@ -9072,6 +9633,21 @@ void AggregateChatForm::onAutoReplyCompleted()
             aggregateLogField(QStringLiteral("reply_length"), QString::number(text.size())),
             aggregateLogField(QStringLiteral("reply_preview"), aggregateLogPreview(text)),
         });
+    const bool suppressImageAttachments =
+        !imageAttachments.isEmpty() && aggregateReplyDeniesImageAvailability(text);
+    if (suppressImageAttachments) {
+        const int suppressedCount = imageAttachments.size();
+        imageAttachments.clear();
+        appendAggregateAutoReplyLog(
+            QStringLiteral("image_attachments_suppressed"),
+            {
+                aggregateLogField(QStringLiteral("conversation_id"), QString::number(cid)),
+                aggregateLogField(QStringLiteral("trace_id"), traceId),
+                aggregateLogField(QStringLiteral("suppressed_count"), QString::number(suppressedCount)),
+                aggregateLogField(QStringLiteral("reason"), QStringLiteral("model_denied_image_availability")),
+                aggregateLogField(QStringLiteral("reply_preview"), aggregateLogPreview(text)),
+            });
+    }
     m_autoReplyTraceId.clear();
     if (m_autoReplyRequestEventId > 0) {
         AiRequestEventDao eventDao;
@@ -9145,6 +9721,9 @@ void AggregateChatForm::onAutoReplyFailed(const QString& reason)
     const QString partial = m_autoReplyAccumulated;
     m_autoReplyAccumulated.clear();
     m_autoReplyAttachments.clear();
+    m_autoReplyEmailRecipient.clear();
+    m_autoReplyEmailScene.clear();
+    m_autoReplyEmailTemplateId.clear();
     m_autoReplyAllowMultiMessages = false;
     m_autoReplyMaxMessages = 1;
     const int durationMs = int(m_autoReplyRequestTimer.elapsed());

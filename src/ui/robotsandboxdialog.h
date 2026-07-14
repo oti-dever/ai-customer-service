@@ -77,6 +77,8 @@ private:
     QString m_lastKnowledgeQuery;
     QString m_lastKnowledgeStatus;
     QString m_lastImageStatus;
+    QString m_lastIntentStatus;
+    QString m_lastWorkflowStatus;
     QString m_lastSplitStatus;
     QString m_lastLinkedImageName;
     QList<KnowledgeSnippetContext> m_lastKnowledgeSnippets;

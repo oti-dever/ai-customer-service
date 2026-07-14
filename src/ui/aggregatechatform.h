@@ -158,6 +158,19 @@ private:
     void clearStreamingSession(IAiStreamingSession*& session);
     /** 自动回复开启后，仅在监听平台收到新入站消息时尝试生成并发送。 */
     void tryAggregateAutoReply(int conversationId, const QString& triggerTag);
+    void startAutoReplyEmailAction(int conversationId,
+                                   qint64 requestEventId,
+                                   const QString& traceId,
+                                   const QString& recipient,
+                                   const QString& scene,
+                                   const QString& templateId);
+    void finishAutoReplyEmailAction(int conversationId,
+                                    qint64 requestEventId,
+                                    const QString& traceId,
+                                    const QJsonObject& response,
+                                    Ipc::ResponseStatus status,
+                                    const QString& error,
+                                    int elapsedMs);
     void relayoutChatInputOverlay();
     void updateMessageListBottomReserve(int overlayBottomPx);
     void syncConversationItemVisualState();
@@ -313,6 +326,9 @@ private:
     QElapsedTimer m_autoReplyRequestTimer;
     int m_autoReplyFirstTokenMs = 0;
     QVector<OutgoingMessagePart> m_autoReplyAttachments;
+    QString m_autoReplyEmailRecipient;
+    QString m_autoReplyEmailScene;
+    QString m_autoReplyEmailTemplateId;
     bool m_customerProfileBusy = false;
     bool m_shuttingDown = false;
     qint64 m_customerProfileRequestEventId = 0;

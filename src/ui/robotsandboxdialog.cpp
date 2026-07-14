@@ -1015,6 +1015,8 @@ void RobotSandboxDialog::appendTraceStart(const AiProviderConfig& config, const 
         sandboxLogField(QStringLiteral("knowledge_base_ids"),
                         jsonStringList(m_robot.value(QStringLiteral("knowledge_base_ids")).toArray()).join(QStringLiteral(","))),
         sandboxLogField(QStringLiteral("latest_user_text"), m_lastQuestion),
+        sandboxLogField(QStringLiteral("intent"), m_lastIntentStatus),
+        sandboxLogField(QStringLiteral("workflow"), m_lastWorkflowStatus),
         sandboxLogField(QStringLiteral("knowledge_query"), m_lastKnowledgeQuery),
         sandboxLogField(QStringLiteral("knowledge_status"), m_lastKnowledgeStatus),
         sandboxLogField(QStringLiteral("linked_image_name"), m_lastLinkedImageName),
@@ -1040,6 +1042,8 @@ void RobotSandboxDialog::appendTraceFinish(const QString& status,
     if (!detail.trimmed().isEmpty())
         lines << sandboxLogField(QStringLiteral("detail"), detail);
     lines << sandboxLogField(QStringLiteral("latest_user_text"), m_lastQuestion);
+    lines << sandboxLogField(QStringLiteral("intent"), m_lastIntentStatus);
+    lines << sandboxLogField(QStringLiteral("workflow"), m_lastWorkflowStatus);
     lines << sandboxLogField(QStringLiteral("knowledge_query"), m_lastKnowledgeQuery);
     lines << sandboxLogField(QStringLiteral("knowledge_status"), m_lastKnowledgeStatus);
     lines << sandboxLogField(QStringLiteral("linked_image_name"), m_lastLinkedImageName);
@@ -1092,6 +1096,8 @@ void RobotSandboxDialog::sendCurrentQuestion()
     m_lastKnowledgeQuery.clear();
     m_lastKnowledgeStatus.clear();
     m_lastImageStatus.clear();
+    m_lastIntentStatus.clear();
+    m_lastWorkflowStatus.clear();
     m_lastSplitStatus.clear();
     m_lastLinkedImageName.clear();
     m_lastKnowledgeSnippets.clear();
@@ -1139,6 +1145,19 @@ void RobotSandboxDialog::sendCurrentQuestion()
     m_lastKnowledgeSnippets = replyContext.knowledgeSnippets;
     m_lastLinkedImageName = replyContext.linkedImageName;
     m_lastImageStatus = replyContext.imageStatus;
+    m_lastIntentStatus = QStringLiteral("%1 source=%2 confidence=%3")
+                             .arg(replyContext.intent.intent,
+                                  replyContext.intent.source,
+                                  QString::number(replyContext.intent.confidence, 'f', 2));
+    m_lastWorkflowStatus = QStringLiteral("%1 mode=%2 image=%3 email=%4 askTemplate=%5 template=%6")
+                               .arg(replyContext.actionPlan.workflow,
+                                    replyContext.actionPlan.replyMode,
+                                    replyContext.actionPlan.needImageSearch ? QStringLiteral("true") : QStringLiteral("false"),
+                                    replyContext.actionPlan.needEmail ? QStringLiteral("true") : QStringLiteral("false"),
+                                    replyContext.actionPlan.askForTemplate ? QStringLiteral("true") : QStringLiteral("false"),
+                                    replyContext.intent.templateId.trimmed().isEmpty()
+                                        ? QStringLiteral("(empty)")
+                                        : replyContext.intent.templateId.trimmed());
     m_imageCandidates = sandboxImageCandidatesFromReply(replyContext.imageCandidates);
     updateImageCandidateSummary(m_lastImageStatus);
 
@@ -1151,10 +1170,13 @@ void RobotSandboxDialog::sendCurrentQuestion()
     m_accumulated.clear();
     appendTraceStart(built.config, built.request);
     addPendingBubble();
+    const QString emailSandboxNote = replyContext.actionPlan.needEmail
+        ? QStringLiteral(" 邮件流程仅在沙盒中生成回复文本，不会真实调用邮件服务。")
+        : QString();
     m_statusLabel->setText(
         QStringLiteral("%1%2")
             .arg(m_lastKnowledgeStatus,
-                 m_lastImageStatus.isEmpty() ? QString() : QStringLiteral(" %1").arg(m_lastImageStatus)));
+                 m_lastImageStatus.isEmpty() ? emailSandboxNote : QStringLiteral(" %1%2").arg(m_lastImageStatus, emailSandboxNote)));
 
     m_session = m_aiService->createSession(built.config, built.request, this);
     connect(m_session, &IAiStreamingSession::delta, this, [this](const QString& delta) {
@@ -1241,10 +1263,14 @@ void RobotSandboxDialog::finishReply()
     }
     m_accumulated.clear();
     m_imageCandidates.clear();
+    const bool sandboxEmailWorkflow = m_lastWorkflowStatus.contains(QStringLiteral("email=true"));
+    QString doneStatus = selectedImage.filePath.isEmpty()
+        ? QStringLiteral("测试回复已生成。")
+        : QStringLiteral("测试回复已生成，并附带 1 张知识库图片。");
+    if (sandboxEmailWorkflow)
+        doneStatus += QStringLiteral(" 邮件流程仅模拟 AI 回复，不会真实发送邮件。");
     setBusy(false,
-            selectedImage.filePath.isEmpty()
-                ? QStringLiteral("测试回复已生成。")
-                : QStringLiteral("测试回复已生成，并附带 1 张知识库图片。"));
+            doneStatus);
     scrollToBottom();
 }
 
