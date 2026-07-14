@@ -16,6 +16,7 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontMetrics>
@@ -37,23 +38,33 @@
 #include <QPixmap>
 #include <QPolygonF>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QScrollArea>
 #include <QAbstractItemView>
 #include <QHeaderView>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSet>
+#include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
+#include <QThread>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
+#include <QStyle>
 #include <QStyleFactory>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QUuid>
 #include <QVariant>
 
@@ -73,7 +84,8 @@ constexpr int kStackDashboard = 0;
 constexpr int kStackRobotStoreConfig = 1;
 constexpr int kStackProductKnowledge = 2;
 constexpr int kStackApiModel = 3;
-constexpr int kStackGeneralSettings = 4;
+constexpr int kStackEmailService = 4;
+constexpr int kStackGeneralSettings = 5;
 
 QTreeWidgetItem* findNavItemByStackIndex(QTreeWidgetItem* node, int stackIdx)
 {
@@ -2951,6 +2963,1001 @@ static QWidget* buildProductKnowledgePage(std::function<void()>* refreshOut = nu
     return page;
 }
 
+struct EmailConfigLoadResult
+{
+    QJsonObject response;
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    QString error;
+    bool serviceReady = false;
+};
+
+struct EmailTemplatesLoadResult
+{
+    QJsonObject response;
+    Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+    QString error;
+    bool serviceReady = false;
+};
+
+QJsonObject blockingJsonGetOnWorker(const QUrl& url,
+                                    int timeoutMs,
+                                    Ipc::ResponseStatus* statusOut,
+                                    QString* errorOut)
+{
+    QNetworkAccessManager network;
+    QNetworkRequest request(url);
+    request.setTransferTimeout(timeoutMs);
+    QNetworkReply* reply = network.get(request);
+
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QTimer::singleShot(timeoutMs, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    QJsonObject object;
+    if (!reply->isFinished()) {
+        reply->abort();
+        if (statusOut)
+            *statusOut = Ipc::ResponseStatus::Timeout;
+        if (errorOut)
+            *errorOut = QStringLiteral("request_timeout");
+        reply->deleteLater();
+        return object;
+    }
+
+    const QByteArray body = reply->readAll();
+    const QJsonDocument document = QJsonDocument::fromJson(body);
+    if (document.isObject())
+        object = document.object();
+
+    if (reply->error() != QNetworkReply::NoError) {
+        if (statusOut)
+            *statusOut = Ipc::ResponseStatus::Error;
+        if (errorOut) {
+            const QString detail = object.value(QStringLiteral("detail")).toString(
+                object.value(QStringLiteral("error")).toString());
+            *errorOut = detail.isEmpty() ? reply->errorString() : detail;
+        }
+        reply->deleteLater();
+        return object;
+    }
+
+    if (!document.isObject()) {
+        if (statusOut)
+            *statusOut = Ipc::ResponseStatus::Error;
+        if (errorOut)
+            *errorOut = QStringLiteral("invalid_json_response");
+        reply->deleteLater();
+        return object;
+    }
+
+    if (statusOut)
+        *statusOut = Ipc::ResponseStatus::Success;
+    if (errorOut)
+        errorOut->clear();
+    reply->deleteLater();
+    return object;
+}
+
+bool waitEmailServiceReadyOnWorker(const QString& endpoint, QString* errorOut)
+{
+    QString lastError;
+    for (int i = 0; i < 10; ++i) {
+        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+        QJsonObject response = blockingJsonGetOnWorker(QUrl(endpoint + QStringLiteral("/api/health")),
+                                                       1000,
+                                                       &status,
+                                                       &lastError);
+        if (status == Ipc::ResponseStatus::Success && response.value(QStringLiteral("healthy")).toBool(false)) {
+            if (errorOut)
+                errorOut->clear();
+            return true;
+        }
+        QThread::msleep(200);
+    }
+    if (errorOut)
+        *errorOut = lastError.isEmpty() ? QStringLiteral("Python AI 服务未就绪") : lastError;
+    return false;
+}
+
+EmailConfigLoadResult loadEmailConfigOnWorker(const QString& endpoint)
+{
+    EmailConfigLoadResult result;
+    QString error;
+    result.serviceReady = waitEmailServiceReadyOnWorker(endpoint, &error);
+    if (!result.serviceReady) {
+        result.status = Ipc::ResponseStatus::Error;
+        result.error = error.isEmpty() ? QStringLiteral("Python AI 服务未就绪") : error;
+        return result;
+    }
+
+    result.response = blockingJsonGetOnWorker(QUrl(endpoint + QStringLiteral("/api/email/config")),
+                                              5000,
+                                              &result.status,
+                                              &result.error);
+    return result;
+}
+
+EmailTemplatesLoadResult loadEmailTemplatesOnWorker(const QString& endpoint)
+{
+    EmailTemplatesLoadResult result;
+    QString error;
+    result.serviceReady = waitEmailServiceReadyOnWorker(endpoint, &error);
+    if (!result.serviceReady) {
+        result.status = Ipc::ResponseStatus::Error;
+        result.error = error.isEmpty() ? QStringLiteral("Python AI 服务未就绪") : error;
+        return result;
+    }
+
+    QUrl url(endpoint + QStringLiteral("/api/email/templates"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("include_body"), QStringLiteral("1"));
+    url.setQuery(query);
+    result.response = blockingJsonGetOnWorker(url,
+                                              5000,
+                                              &result.status,
+                                              &result.error);
+    return result;
+}
+
+QString emailResponseDetail(const QJsonObject& response, const QString& transportError)
+{
+    return response.value(QStringLiteral("detail")).toString(
+        response.value(QStringLiteral("error")).toString(transportError)).trimmed();
+}
+
+int comboIndexByData(QComboBox* combo, const QString& value)
+{
+    if (!combo)
+        return -1;
+    for (int i = 0; i < combo->count(); ++i) {
+        if (combo->itemData(i).toString() == value)
+            return i;
+    }
+    return -1;
+}
+
+class EmailServiceConfigPage final : public QWidget
+{
+public:
+    explicit EmailServiceConfigPage(std::function<void()>* refreshFn, QWidget* parent = nullptr)
+        : QWidget(parent)
+    {
+        setObjectName(QStringLiteral("aiBackendEmailServicePage"));
+        buildUi();
+        if (refreshFn)
+            *refreshFn = [this]() {
+                loadConfig();
+                loadTemplates();
+            };
+        if (m_statusLabel) {
+            setStatusMessage(
+                QStringLiteral("邮件服务依赖 Python 服务。请先在聚合界面启动 Python 服务，或连接到已运行的服务。"),
+                QStringLiteral("info"));
+        }
+    }
+
+private:
+    void buildUi()
+    {
+        auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(0, 0, 0, 0);
+        root->setSpacing(0);
+
+        auto* scroll = new QScrollArea(this);
+        scroll->setObjectName(QStringLiteral("aiBackendEmailServiceScroll"));
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+        auto* content = new QWidget(scroll);
+        content->setObjectName(QStringLiteral("aiBackendEmailServiceScrollViewport"));
+
+        auto* outer = new QVBoxLayout(content);
+        outer->setContentsMargins(32, 28, 32, 32);
+        outer->setSpacing(16);
+
+        auto* title = new QLabel(QStringLiteral("邮件服务"), content);
+        title->setObjectName(QStringLiteral("aiBackendPageTitle"));
+        outer->addWidget(title);
+
+        auto* subtitle = new QLabel(
+            QStringLiteral("配置发件邮箱和业务邮件模板。当客户索要看图地址、链接或资料时，系统可按模板通过邮件发送，平台聊天只提示查收。"),
+            content);
+        subtitle->setObjectName(QStringLiteral("aiBackendPageSubtitle"));
+        subtitle->setWordWrap(true);
+        outer->addWidget(subtitle);
+
+        auto* card = new QFrame(content);
+        card->setObjectName(QStringLiteral("aiBackendCard"));
+        card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        auto* cardLayout = new QVBoxLayout(card);
+        cardLayout->setContentsMargins(20, 18, 20, 18);
+        cardLayout->setSpacing(14);
+
+        auto* form = new QFormLayout;
+        form->setContentsMargins(0, 0, 0, 0);
+        form->setHorizontalSpacing(16);
+        form->setVerticalSpacing(12);
+        form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        m_enabledCheck = new QCheckBox(QStringLiteral("启用邮件服务"), card);
+        m_enabledCheck->setObjectName(QStringLiteral("aiBackendEmailCheck"));
+        m_enabledCheck->setChecked(true);
+        form->addRow(QString(), m_enabledCheck);
+
+        m_providerCombo = new QComboBox(card);
+        m_providerCombo->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_providerCombo->addItem(QStringLiteral("QQ 邮箱"), QStringLiteral("qq"));
+        m_providerCombo->addItem(QStringLiteral("Gmail"), QStringLiteral("gmail"));
+        m_providerCombo->addItem(QStringLiteral("自定义 SMTP"), QStringLiteral("custom"));
+        form->addRow(QStringLiteral("邮箱类型"), m_providerCombo);
+
+        m_senderEdit = new QLineEdit(card);
+        m_senderEdit->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_senderEdit->setPlaceholderText(QStringLiteral("例如 xxx@qq.com"));
+        form->addRow(QStringLiteral("发件邮箱"), m_senderEdit);
+
+        m_authCodeEdit = new QLineEdit(card);
+        m_authCodeEdit->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_authCodeEdit->setEchoMode(QLineEdit::Password);
+        m_authCodeEdit->setPlaceholderText(QStringLiteral("邮箱授权码 / App Password"));
+        form->addRow(QStringLiteral("授权码"), m_authCodeEdit);
+
+        m_smtpHostEdit = new QLineEdit(card);
+        m_smtpHostEdit->setObjectName(QStringLiteral("aiBackendEmailField"));
+        form->addRow(QStringLiteral("SMTP 主机"), m_smtpHostEdit);
+
+        m_smtpPortSpin = new QSpinBox(card);
+        m_smtpPortSpin->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_smtpPortSpin->setRange(1, 65535);
+        form->addRow(QStringLiteral("SMTP 端口"), m_smtpPortSpin);
+
+        m_securityCombo = new QComboBox(card);
+        m_securityCombo->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_securityCombo->addItem(QStringLiteral("SSL"), QStringLiteral("ssl"));
+        m_securityCombo->addItem(QStringLiteral("STARTTLS"), QStringLiteral("starttls"));
+        m_securityCombo->addItem(QStringLiteral("None"), QStringLiteral("none"));
+        form->addRow(QStringLiteral("加密方式"), m_securityCombo);
+
+        m_testRecipientEdit = new QLineEdit(card);
+        m_testRecipientEdit->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_testRecipientEdit->setPlaceholderText(QStringLiteral("用于接收测试邮件的邮箱"));
+        form->addRow(QStringLiteral("测试收件邮箱"), m_testRecipientEdit);
+
+        cardLayout->addLayout(form);
+
+        auto* hint = new QLabel(
+            QStringLiteral("测试邮件内容固定：主题 hi，正文 你好。授权码不会在界面回显，也不会通过读取接口返回明文。"),
+            card);
+        hint->setObjectName(QStringLiteral("aiBackendHint"));
+        hint->setWordWrap(true);
+        cardLayout->addWidget(hint);
+
+        auto* actions = new QHBoxLayout;
+        actions->setContentsMargins(0, 0, 0, 0);
+        actions->addStretch(1);
+        m_refreshButton = new QPushButton(QStringLiteral("重新加载"), card);
+        m_refreshButton->setObjectName(QStringLiteral("aiBackendSecondaryBtn"));
+        m_saveButton = new QPushButton(QStringLiteral("保存配置"), card);
+        m_saveButton->setObjectName(QStringLiteral("aiBackendBluePrimaryBtn"));
+        m_testButton = new QPushButton(QStringLiteral("发送测试邮件"), card);
+        m_testButton->setObjectName(QStringLiteral("aiBackendBluePrimaryBtn"));
+        actions->addWidget(m_refreshButton);
+        actions->addWidget(m_saveButton);
+        actions->addWidget(m_testButton);
+        cardLayout->addLayout(actions);
+
+        outer->addWidget(card, 0);
+
+        auto* templateCard = new QFrame(content);
+        templateCard->setObjectName(QStringLiteral("aiBackendCard"));
+        templateCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        auto* templateLayout = new QVBoxLayout(templateCard);
+        templateLayout->setContentsMargins(20, 18, 20, 18);
+        templateLayout->setSpacing(12);
+
+        auto* templateTitle = new QLabel(QStringLiteral("邮件模板 / 草稿"), templateCard);
+        templateTitle->setObjectName(QStringLiteral("aiBackendSectionTitle"));
+        templateLayout->addWidget(templateTitle);
+
+        auto* templateHint = new QLabel(
+            QStringLiteral("AI 只选择模板 ID；真实主题、正文和链接由这里维护。平台聊天不会直接发送正文里的 URL。"),
+            templateCard);
+        templateHint->setObjectName(QStringLiteral("aiBackendHint"));
+        templateHint->setWordWrap(true);
+        templateLayout->addWidget(templateHint);
+
+        m_templateTable = new QTableWidget(templateCard);
+        m_templateTable->setObjectName(QStringLiteral("aiBackendEmailTemplateTable"));
+        m_templateTable->setColumnCount(4);
+        m_templateTable->setHorizontalHeaderLabels({
+            QStringLiteral("名称"),
+            QStringLiteral("场景"),
+            QStringLiteral("启用"),
+            QStringLiteral("主题"),
+        });
+        m_templateTable->horizontalHeader()->setStretchLastSection(true);
+        m_templateTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        m_templateTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        m_templateTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        m_templateTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_templateTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_templateTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_templateTable->setMinimumHeight(160);
+        m_templateTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        templateLayout->addWidget(m_templateTable, 0);
+
+        auto* templateForm = new QFormLayout;
+        templateForm->setContentsMargins(0, 0, 0, 0);
+        templateForm->setHorizontalSpacing(16);
+        templateForm->setVerticalSpacing(10);
+        templateForm->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        auto* templateIdRow = new QHBoxLayout;
+        templateIdRow->setContentsMargins(0, 0, 0, 0);
+        templateIdRow->setSpacing(10);
+        m_templateIdEdit = new QLineEdit(templateCard);
+        m_templateIdEdit->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_templateIdEdit->setPlaceholderText(QStringLiteral("可留空，保存时自动生成"));
+        m_templateEnabledCheck = new QCheckBox(QStringLiteral("启用"), templateCard);
+        m_templateEnabledCheck->setObjectName(QStringLiteral("aiBackendEmailCheck"));
+        m_templateEnabledCheck->setChecked(true);
+        templateIdRow->addWidget(m_templateIdEdit, 1);
+        templateIdRow->addWidget(m_templateEnabledCheck);
+        templateForm->addRow(QStringLiteral("模板 ID"), templateIdRow);
+
+        m_templateNameEdit = new QLineEdit(templateCard);
+        m_templateNameEdit->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_templateNameEdit->setPlaceholderText(QStringLiteral("例如 极霸猫店铺看图地址"));
+        templateForm->addRow(QStringLiteral("模板名称"), m_templateNameEdit);
+
+        m_templateSceneCombo = new QComboBox(templateCard);
+        m_templateSceneCombo->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_templateSceneCombo->addItem(QStringLiteral("店铺看图地址"), QStringLiteral("store_view_link"));
+        m_templateSceneCombo->addItem(QStringLiteral("下载/资料链接"), QStringLiteral("download_link"));
+        m_templateSceneCombo->addItem(QStringLiteral("售后资料"), QStringLiteral("after_sales_material"));
+        m_templateSceneCombo->addItem(QStringLiteral("自定义资料"), QStringLiteral("custom_material"));
+        templateForm->addRow(QStringLiteral("业务场景"), m_templateSceneCombo);
+
+        m_templateSubjectEdit = new QLineEdit(templateCard);
+        m_templateSubjectEdit->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_templateSubjectEdit->setPlaceholderText(QStringLiteral("邮件主题"));
+        templateForm->addRow(QStringLiteral("邮件主题"), m_templateSubjectEdit);
+
+        m_templateAliasesEdit = new QLineEdit(templateCard);
+        m_templateAliasesEdit->setObjectName(QStringLiteral("aiBackendEmailField"));
+        m_templateAliasesEdit->setPlaceholderText(QStringLiteral("多个别名用逗号分隔，例如 极霸猫,极霸猫店铺,极霸猫看图地址"));
+        templateForm->addRow(QStringLiteral("别名"), m_templateAliasesEdit);
+
+        m_templateBodyEdit = new QPlainTextEdit(templateCard);
+        m_templateBodyEdit->setObjectName(QStringLiteral("aiBackendEmailText"));
+        m_templateBodyEdit->setPlaceholderText(QStringLiteral("邮件正文，可包含 URL、群号等内容；这些内容只通过邮件发送，不直接发到平台聊天。"));
+        m_templateBodyEdit->setMinimumHeight(140);
+        m_templateBodyEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        templateForm->addRow(QStringLiteral("邮件正文"), m_templateBodyEdit);
+
+        templateLayout->addLayout(templateForm);
+
+        auto* templateActions = new QHBoxLayout;
+        templateActions->setContentsMargins(0, 0, 0, 0);
+        templateActions->addStretch(1);
+        m_templateRefreshButton = new QPushButton(QStringLiteral("刷新模板"), templateCard);
+        m_templateRefreshButton->setObjectName(QStringLiteral("aiBackendSecondaryBtn"));
+        m_templateNewButton = new QPushButton(QStringLiteral("新建模板"), templateCard);
+        m_templateNewButton->setObjectName(QStringLiteral("aiBackendSecondaryBtn"));
+        m_templateSaveButton = new QPushButton(QStringLiteral("保存模板"), templateCard);
+        m_templateSaveButton->setObjectName(QStringLiteral("aiBackendBluePrimaryBtn"));
+        m_templateTestButton = new QPushButton(QStringLiteral("测试发送模板"), templateCard);
+        m_templateTestButton->setObjectName(QStringLiteral("aiBackendBluePrimaryBtn"));
+        m_templateDeleteButton = new QPushButton(QStringLiteral("删除模板"), templateCard);
+        m_templateDeleteButton->setObjectName(QStringLiteral("aiBackendSecondaryBtn"));
+        templateActions->addWidget(m_templateRefreshButton);
+        templateActions->addWidget(m_templateNewButton);
+        templateActions->addWidget(m_templateSaveButton);
+        templateActions->addWidget(m_templateTestButton);
+        templateActions->addWidget(m_templateDeleteButton);
+        templateLayout->addLayout(templateActions);
+
+        m_templateImportEdit = new QPlainTextEdit(templateCard);
+        m_templateImportEdit->setObjectName(QStringLiteral("aiBackendEmailText"));
+        m_templateImportEdit->setPlaceholderText(QStringLiteral("可粘贴“主题：...\\n正文：...”格式内容后批量导入模板。"));
+        m_templateImportEdit->setMinimumHeight(86);
+        m_templateImportEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        templateLayout->addWidget(m_templateImportEdit);
+
+        auto* importActions = new QHBoxLayout;
+        importActions->setContentsMargins(0, 0, 0, 0);
+        importActions->addStretch(1);
+        m_templateImportButton = new QPushButton(QStringLiteral("导入粘贴内容"), templateCard);
+        m_templateImportButton->setObjectName(QStringLiteral("aiBackendSecondaryBtn"));
+        importActions->addWidget(m_templateImportButton);
+        templateLayout->addLayout(importActions);
+
+        outer->addWidget(templateCard, 0);
+
+        m_statusLabel = new QLabel(content);
+        m_statusLabel->setObjectName(QStringLiteral("aiBackendStatusLabel"));
+        m_statusLabel->setWordWrap(true);
+        outer->addWidget(m_statusLabel);
+        outer->addStretch(1);
+
+        scroll->setWidget(content);
+        root->addWidget(scroll, 1);
+
+        connect(m_providerCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() {
+            if (!m_loading)
+                applyProviderDefaults(true);
+        });
+        connect(m_refreshButton, &QPushButton::clicked, this, [this]() { loadConfig(); });
+        connect(m_saveButton, &QPushButton::clicked, this, [this]() { saveConfig(true); });
+        connect(m_testButton, &QPushButton::clicked, this, [this]() { sendTestEmail(); });
+        connect(m_templateRefreshButton, &QPushButton::clicked, this, [this]() { loadTemplates(); });
+        connect(m_templateNewButton, &QPushButton::clicked, this, [this]() { clearTemplateForm(); });
+        connect(m_templateSaveButton, &QPushButton::clicked, this, [this]() { saveTemplate(); });
+        connect(m_templateTestButton, &QPushButton::clicked, this, [this]() { sendTemplateTestEmail(); });
+        connect(m_templateDeleteButton, &QPushButton::clicked, this, [this]() { deleteTemplate(); });
+        connect(m_templateImportButton, &QPushButton::clicked, this, [this]() { importTemplatesFromText(); });
+        connect(m_templateTable, &QTableWidget::itemSelectionChanged, this, [this]() {
+            fillTemplateFormFromSelection();
+        });
+        applyProviderDefaults(false);
+    }
+
+    void applyProviderDefaults(bool overwrite)
+    {
+        const QString provider = m_providerCombo->currentData().toString();
+        QString host;
+        int port = 465;
+        QString security = QStringLiteral("ssl");
+        if (provider == QLatin1String("gmail")) {
+            host = QStringLiteral("smtp.gmail.com");
+            port = 587;
+            security = QStringLiteral("starttls");
+        } else if (provider == QLatin1String("custom")) {
+            if (overwrite)
+                return;
+        } else {
+            host = QStringLiteral("smtp.qq.com");
+            port = 465;
+            security = QStringLiteral("ssl");
+        }
+
+        if (overwrite || m_smtpHostEdit->text().trimmed().isEmpty())
+            m_smtpHostEdit->setText(host);
+        if (overwrite || m_smtpPortSpin->value() <= 1)
+            m_smtpPortSpin->setValue(port);
+        const int secIndex = comboIndexByData(m_securityCombo, security);
+        if (secIndex >= 0 && (overwrite || m_securityCombo->currentIndex() < 0))
+            m_securityCombo->setCurrentIndex(secIndex);
+    }
+
+    bool ensureService(QString* errorOut)
+    {
+        QString error;
+        if (!Ipc::IpcService::instance().ensureServiceAvailable(&error)) {
+            if (errorOut)
+                *errorOut = error;
+            setStatusMessage(QStringLiteral("Python 服务不可用：%1").arg(error.left(160)),
+                             QStringLiteral("error"));
+            return false;
+        }
+        return true;
+    }
+
+    void loadConfig()
+    {
+        const int requestId = ++m_loadRequestId;
+        const QString endpoint = Ipc::IpcService::instance().serviceEndpoint();
+        setBusy(true, QStringLiteral("正在加载邮件配置..."), QStringLiteral("info"));
+
+        QPointer<EmailServiceConfigPage> guard(this);
+        QThread* worker = QThread::create([guard, endpoint, requestId]() {
+            EmailConfigLoadResult result = loadEmailConfigOnWorker(endpoint);
+            if (!guard)
+                return;
+            QMetaObject::invokeMethod(guard.data(), [guard, requestId, result]() {
+                if (!guard)
+                    return;
+                guard->handleLoadConfigResult(requestId, result);
+            }, Qt::QueuedConnection);
+        });
+        connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+        worker->start();
+    }
+
+    void handleLoadConfigResult(int requestId, const EmailConfigLoadResult& result)
+    {
+        if (requestId != m_loadRequestId)
+            return;
+        setBusy(false);
+
+        if (!result.serviceReady) {
+            setStatusMessage(QStringLiteral("Python 服务不可用：%1").arg(result.error.left(160)),
+                             QStringLiteral("error"));
+            return;
+        }
+
+        if (result.status != Ipc::ResponseStatus::Success
+            || result.response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+            const QString detail = emailResponseDetail(result.response, result.error);
+            setStatusMessage(QStringLiteral("读取邮件配置失败：%1").arg(detail.left(180)),
+                             QStringLiteral("error"));
+            return;
+        }
+
+        const QJsonObject config = result.response.value(QStringLiteral("config")).toObject();
+        m_loading = true;
+        const QString provider = config.value(QStringLiteral("provider")).toString(QStringLiteral("qq"));
+        const int providerIndex = comboIndexByData(m_providerCombo, provider);
+        if (providerIndex >= 0)
+            m_providerCombo->setCurrentIndex(providerIndex);
+        m_enabledCheck->setChecked(config.value(QStringLiteral("enabled")).toBool(false));
+        m_senderEdit->setText(config.value(QStringLiteral("sender_email")).toString());
+        m_authCodeEdit->clear();
+        m_authCodeSaved = config.value(QStringLiteral("auth_code_saved")).toBool(false);
+        m_authCodeEdit->setPlaceholderText(m_authCodeSaved
+                                               ? QStringLiteral("已保存；留空表示继续使用原授权码")
+                                               : QStringLiteral("邮箱授权码 / App Password"));
+        m_smtpHostEdit->setText(config.value(QStringLiteral("smtp_host")).toString());
+        m_smtpPortSpin->setValue(config.value(QStringLiteral("smtp_port")).toInt(465));
+        const int securityIndex =
+            comboIndexByData(m_securityCombo, config.value(QStringLiteral("security")).toString(QStringLiteral("ssl")));
+        if (securityIndex >= 0)
+            m_securityCombo->setCurrentIndex(securityIndex);
+        m_loading = false;
+        if (m_smtpHostEdit->text().trimmed().isEmpty())
+            applyProviderDefaults(false);
+
+        setStatusMessage(m_authCodeSaved
+                             ? QStringLiteral("已加载邮件配置，授权码已保存。")
+                             : QStringLiteral("已加载邮件配置，请填写授权码后保存。"),
+                         QStringLiteral("info"));
+    }
+
+    void loadTemplates()
+    {
+        const int requestId = ++m_templatesLoadRequestId;
+        const QString endpoint = Ipc::IpcService::instance().serviceEndpoint();
+        setBusy(true, QStringLiteral("正在加载邮件模板..."), QStringLiteral("info"));
+
+        QPointer<EmailServiceConfigPage> guard(this);
+        QThread* worker = QThread::create([guard, endpoint, requestId]() {
+            EmailTemplatesLoadResult result = loadEmailTemplatesOnWorker(endpoint);
+            if (!guard)
+                return;
+            QMetaObject::invokeMethod(guard.data(), [guard, requestId, result]() {
+                if (!guard)
+                    return;
+                guard->handleLoadTemplatesResult(requestId, result);
+            }, Qt::QueuedConnection);
+        });
+        connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+        worker->start();
+    }
+
+    void handleLoadTemplatesResult(int requestId, const EmailTemplatesLoadResult& result)
+    {
+        if (requestId != m_templatesLoadRequestId)
+            return;
+        setBusy(false);
+
+        if (!result.serviceReady) {
+            setStatusMessage(QStringLiteral("Python 服务不可用：%1").arg(result.error.left(160)),
+                             QStringLiteral("error"));
+            return;
+        }
+
+        if (result.status != Ipc::ResponseStatus::Success
+            || result.response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+            const QString detail = emailResponseDetail(result.response, result.error);
+            setStatusMessage(QStringLiteral("读取邮件模板失败：%1").arg(detail.left(180)),
+                             QStringLiteral("error"));
+            return;
+        }
+
+        m_templates = result.response.value(QStringLiteral("templates")).toArray();
+        populateTemplateTable();
+        if (m_templates.isEmpty())
+            clearTemplateForm();
+        setStatusMessage(QStringLiteral("已加载邮件模板：%1 个。").arg(m_templates.size()),
+                         QStringLiteral("info"));
+    }
+
+    void populateTemplateTable()
+    {
+        if (!m_templateTable)
+            return;
+        QSignalBlocker blocker(m_templateTable);
+        m_templateTable->setRowCount(m_templates.size());
+        for (int row = 0; row < m_templates.size(); ++row) {
+            const QJsonObject item = m_templates.at(row).toObject();
+            auto* nameItem = new QTableWidgetItem(item.value(QStringLiteral("name")).toString());
+            nameItem->setData(Qt::UserRole, item.value(QStringLiteral("template_id")).toString());
+            m_templateTable->setItem(row, 0, nameItem);
+            m_templateTable->setItem(row, 1, new QTableWidgetItem(item.value(QStringLiteral("scene")).toString()));
+            m_templateTable->setItem(row, 2, new QTableWidgetItem(item.value(QStringLiteral("enabled")).toBool(true)
+                                                                      ? QStringLiteral("是")
+                                                                      : QStringLiteral("否")));
+            m_templateTable->setItem(row, 3, new QTableWidgetItem(item.value(QStringLiteral("subject")).toString()));
+        }
+        if (!m_templates.isEmpty()) {
+            m_templateTable->selectRow(0);
+            fillTemplateFormFromSelection();
+        }
+    }
+
+    QJsonObject selectedTemplateObject() const
+    {
+        if (!m_templateTable)
+            return {};
+        const int row = m_templateTable->currentRow();
+        if (row < 0 || row >= m_templates.size())
+            return {};
+        return m_templates.at(row).toObject();
+    }
+
+    QStringList aliasesFromJson(const QJsonValue& value) const
+    {
+        QStringList out;
+        const QJsonArray array = value.toArray();
+        out.reserve(array.size());
+        for (const QJsonValue& item : array) {
+            const QString text = item.toString().trimmed();
+            if (!text.isEmpty())
+                out.append(text);
+        }
+        out.removeDuplicates();
+        return out;
+    }
+
+    QJsonArray aliasesToJsonArray(const QString& text) const
+    {
+        QJsonArray array;
+        QStringList parts = text.split(QRegularExpression(QStringLiteral("[,，\\n]+")),
+                                       Qt::SkipEmptyParts);
+        parts.removeDuplicates();
+        for (QString part : parts) {
+            part = part.trimmed();
+            if (!part.isEmpty())
+                array.append(part);
+        }
+        return array;
+    }
+
+    void fillTemplateFormFromSelection()
+    {
+        const QJsonObject item = selectedTemplateObject();
+        if (item.isEmpty())
+            return;
+        m_templateIdEdit->setText(item.value(QStringLiteral("template_id")).toString());
+        m_templateNameEdit->setText(item.value(QStringLiteral("name")).toString());
+        const int sceneIndex = comboIndexByData(m_templateSceneCombo,
+                                                item.value(QStringLiteral("scene")).toString(QStringLiteral("store_view_link")));
+        if (sceneIndex >= 0)
+            m_templateSceneCombo->setCurrentIndex(sceneIndex);
+        m_templateEnabledCheck->setChecked(item.value(QStringLiteral("enabled")).toBool(true));
+        m_templateSubjectEdit->setText(item.value(QStringLiteral("subject")).toString());
+        m_templateAliasesEdit->setText(aliasesFromJson(item.value(QStringLiteral("aliases"))).join(QStringLiteral(",")));
+        m_templateBodyEdit->setPlainText(item.value(QStringLiteral("body")).toString());
+    }
+
+    void clearTemplateForm()
+    {
+        if (m_templateTable)
+            m_templateTable->clearSelection();
+        m_templateIdEdit->clear();
+        m_templateNameEdit->clear();
+        const int sceneIndex = comboIndexByData(m_templateSceneCombo, QStringLiteral("store_view_link"));
+        if (sceneIndex >= 0)
+            m_templateSceneCombo->setCurrentIndex(sceneIndex);
+        m_templateEnabledCheck->setChecked(true);
+        m_templateSubjectEdit->clear();
+        m_templateAliasesEdit->clear();
+        m_templateBodyEdit->clear();
+        setStatusMessage(QStringLiteral("已进入新建模板状态。"), QStringLiteral("info"));
+    }
+
+    QJsonObject templatePayloadFromForm() const
+    {
+        QJsonObject payload;
+        const QString templateId = m_templateIdEdit->text().trimmed();
+        if (!templateId.isEmpty())
+            payload.insert(QStringLiteral("template_id"), templateId);
+        payload.insert(QStringLiteral("name"), m_templateNameEdit->text().trimmed());
+        payload.insert(QStringLiteral("scene"), m_templateSceneCombo->currentData().toString());
+        payload.insert(QStringLiteral("enabled"), m_templateEnabledCheck->isChecked());
+        payload.insert(QStringLiteral("subject"), m_templateSubjectEdit->text().trimmed());
+        payload.insert(QStringLiteral("body"), m_templateBodyEdit->toPlainText());
+        payload.insert(QStringLiteral("aliases"), aliasesToJsonArray(m_templateAliasesEdit->text()));
+        return payload;
+    }
+
+    void saveTemplate()
+    {
+        if (m_templateNameEdit->text().trimmed().isEmpty()) {
+            setStatusMessage(QStringLiteral("请填写模板名称。"), QStringLiteral("warning"));
+            return;
+        }
+        if (m_templateSubjectEdit->text().trimmed().isEmpty()) {
+            setStatusMessage(QStringLiteral("请填写邮件主题。"), QStringLiteral("warning"));
+            return;
+        }
+        if (m_templateBodyEdit->toPlainText().trimmed().isEmpty()) {
+            setStatusMessage(QStringLiteral("请填写邮件正文。"), QStringLiteral("warning"));
+            return;
+        }
+
+        QString error;
+        if (!ensureService(&error))
+            return;
+
+        setBusy(true, QStringLiteral("正在保存邮件模板..."), QStringLiteral("info"));
+        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+        const QJsonObject response =
+            Ipc::IpcService::instance().saveEmailTemplate(templatePayloadFromForm(), 5000, &status, &error);
+        setBusy(false);
+        if (status != Ipc::ResponseStatus::Success
+            || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+            const QString detail = emailResponseDetail(response, error);
+            setStatusMessage(QStringLiteral("保存邮件模板失败：%1").arg(detail.left(220)),
+                             QStringLiteral("error"));
+            return;
+        }
+        const QJsonObject saved = response.value(QStringLiteral("template")).toObject();
+        m_templateIdEdit->setText(saved.value(QStringLiteral("template_id")).toString());
+        setStatusMessage(QStringLiteral("邮件模板已保存。"), QStringLiteral("success"));
+        loadTemplates();
+    }
+
+    void deleteTemplate()
+    {
+        const QString templateId = m_templateIdEdit->text().trimmed();
+        if (templateId.isEmpty()) {
+            setStatusMessage(QStringLiteral("请选择要删除的模板。"), QStringLiteral("warning"));
+            return;
+        }
+        QString error;
+        if (!ensureService(&error))
+            return;
+
+        setBusy(true, QStringLiteral("正在删除邮件模板..."), QStringLiteral("info"));
+        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+        const QJsonObject response =
+            Ipc::IpcService::instance().deleteEmailTemplate(templateId, 5000, &status, &error);
+        setBusy(false);
+        if (status != Ipc::ResponseStatus::Success
+            || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+            const QString detail = emailResponseDetail(response, error);
+            setStatusMessage(QStringLiteral("删除邮件模板失败：%1").arg(detail.left(220)),
+                             QStringLiteral("error"));
+            return;
+        }
+        clearTemplateForm();
+        setStatusMessage(QStringLiteral("邮件模板已删除。"), QStringLiteral("success"));
+        loadTemplates();
+    }
+
+    void sendTemplateTestEmail()
+    {
+        const QString recipient = m_testRecipientEdit->text().trimmed();
+        if (recipient.isEmpty()) {
+            setStatusMessage(QStringLiteral("请先在上方填写测试收件邮箱。"), QStringLiteral("warning"));
+            return;
+        }
+
+        const QString templateId = m_templateIdEdit->text().trimmed();
+        if (templateId.isEmpty()) {
+            setStatusMessage(QStringLiteral("请先保存或选择一个邮件模板，再测试发送。"), QStringLiteral("warning"));
+            return;
+        }
+
+        if (!saveConfig(false))
+            return;
+
+        QString error;
+        setBusy(true, QStringLiteral("正在按当前模板发送测试邮件..."), QStringLiteral("info"));
+        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+        const QJsonObject response = Ipc::IpcService::instance().sendEmail(
+            recipient,
+            m_templateSceneCombo->currentData().toString(),
+            0,
+            QStringLiteral("email-template-test"),
+            templateId,
+            30000,
+            &status,
+            &error);
+        setBusy(false);
+
+        if (status != Ipc::ResponseStatus::Success
+            || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+            const QString detail = emailResponseDetail(response, error);
+            setStatusMessage(QStringLiteral("模板测试邮件发送失败：%1").arg(detail.left(220)),
+                             QStringLiteral("error"));
+            return;
+        }
+
+        setStatusMessage(QStringLiteral("模板测试邮件发送成功，请到测试收件邮箱查收。模板 ID：%1")
+                             .arg(templateId),
+                         QStringLiteral("success"));
+    }
+
+    void importTemplatesFromText()
+    {
+        const QString text = m_templateImportEdit->toPlainText().trimmed();
+        if (text.isEmpty()) {
+            setStatusMessage(QStringLiteral("请先粘贴“主题/正文”格式的模板内容。"), QStringLiteral("warning"));
+            return;
+        }
+        QString error;
+        if (!ensureService(&error))
+            return;
+
+        setBusy(true, QStringLiteral("正在导入邮件模板..."), QStringLiteral("info"));
+        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+        const QJsonObject response =
+            Ipc::IpcService::instance().importEmailTemplates(text, 10000, &status, &error);
+        setBusy(false);
+        if (status != Ipc::ResponseStatus::Success
+            || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+            const QString detail = emailResponseDetail(response, error);
+            setStatusMessage(QStringLiteral("导入邮件模板失败：%1").arg(detail.left(220)),
+                             QStringLiteral("error"));
+            return;
+        }
+        const int count = response.value(QStringLiteral("count")).toInt();
+        m_templateImportEdit->clear();
+        setStatusMessage(QStringLiteral("已导入邮件模板：%1 个。").arg(count),
+                         QStringLiteral("success"));
+        loadTemplates();
+    }
+
+    bool saveConfig(bool showMessage)
+    {
+        if (m_senderEdit->text().trimmed().isEmpty()) {
+            setStatusMessage(QStringLiteral("请填写发件邮箱。"), QStringLiteral("warning"));
+            return false;
+        }
+        if (m_smtpHostEdit->text().trimmed().isEmpty()) {
+            setStatusMessage(QStringLiteral("请填写 SMTP 主机。"), QStringLiteral("warning"));
+            return false;
+        }
+
+        QString error;
+        if (!ensureService(&error))
+            return false;
+
+        QJsonObject payload;
+        payload.insert(QStringLiteral("enabled"), m_enabledCheck->isChecked());
+        payload.insert(QStringLiteral("provider"), m_providerCombo->currentData().toString());
+        payload.insert(QStringLiteral("sender_email"), m_senderEdit->text().trimmed());
+        if (!m_authCodeEdit->text().isEmpty())
+            payload.insert(QStringLiteral("auth_code"), m_authCodeEdit->text());
+        payload.insert(QStringLiteral("keep_existing_auth_code"), true);
+        payload.insert(QStringLiteral("smtp_host"), m_smtpHostEdit->text().trimmed());
+        payload.insert(QStringLiteral("smtp_port"), m_smtpPortSpin->value());
+        payload.insert(QStringLiteral("security"), m_securityCombo->currentData().toString());
+
+        setBusy(true, QStringLiteral("正在保存邮件配置..."), QStringLiteral("info"));
+        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+        const QJsonObject response = Ipc::IpcService::instance().saveEmailConfig(payload, 5000, &status, &error);
+        setBusy(false);
+        if (status != Ipc::ResponseStatus::Success
+            || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+            const QString detail = emailResponseDetail(response, error);
+            setStatusMessage(QStringLiteral("保存邮件配置失败：%1").arg(detail.left(180)),
+                             QStringLiteral("error"));
+            return false;
+        }
+
+        const QJsonObject config = response.value(QStringLiteral("config")).toObject();
+        m_authCodeSaved = config.value(QStringLiteral("auth_code_saved")).toBool(m_authCodeSaved);
+        m_authCodeEdit->clear();
+        m_authCodeEdit->setPlaceholderText(m_authCodeSaved
+                                               ? QStringLiteral("已保存；留空表示继续使用原授权码")
+                                               : QStringLiteral("邮箱授权码 / App Password"));
+        if (showMessage)
+            setStatusMessage(QStringLiteral("邮件配置已保存。"), QStringLiteral("success"));
+        return true;
+    }
+
+    void sendTestEmail()
+    {
+        const QString recipient = m_testRecipientEdit->text().trimmed();
+        if (recipient.isEmpty()) {
+            setStatusMessage(QStringLiteral("请填写测试收件邮箱。"), QStringLiteral("warning"));
+            return;
+        }
+        if (!saveConfig(false))
+            return;
+
+        QString error;
+        setBusy(true, QStringLiteral("正在发送测试邮件..."), QStringLiteral("info"));
+        Ipc::ResponseStatus status = Ipc::ResponseStatus::Error;
+        const QJsonObject response = Ipc::IpcService::instance().sendTestEmail(recipient, 30000, &status, &error);
+        setBusy(false);
+        if (status != Ipc::ResponseStatus::Success
+            || response.value(QStringLiteral("status")).toString(QStringLiteral("success")) == QLatin1String("error")) {
+            const QString detail = emailResponseDetail(response, error);
+            setStatusMessage(QStringLiteral("测试邮件发送失败：%1").arg(detail.left(220)),
+                             QStringLiteral("error"));
+            return;
+        }
+        setStatusMessage(QStringLiteral("测试邮件发送成功。主题：hi，正文：你好。"),
+                         QStringLiteral("success"));
+    }
+
+    void setBusy(bool busy, const QString& status = QString(), const QString& tone = QString())
+    {
+        m_saveButton->setEnabled(!busy);
+        m_testButton->setEnabled(!busy);
+        m_refreshButton->setEnabled(!busy);
+        if (m_templateRefreshButton)
+            m_templateRefreshButton->setEnabled(!busy);
+        if (m_templateNewButton)
+            m_templateNewButton->setEnabled(!busy);
+        if (m_templateSaveButton)
+            m_templateSaveButton->setEnabled(!busy);
+        if (m_templateTestButton)
+            m_templateTestButton->setEnabled(!busy);
+        if (m_templateDeleteButton)
+            m_templateDeleteButton->setEnabled(!busy);
+        if (m_templateImportButton)
+            m_templateImportButton->setEnabled(!busy);
+        if (!status.trimmed().isEmpty())
+            setStatusMessage(status, tone.isEmpty() ? QStringLiteral("info") : tone);
+    }
+
+    void setStatusMessage(const QString& message, const QString& tone)
+    {
+        if (!m_statusLabel)
+            return;
+        m_statusLabel->setText(message);
+        m_statusLabel->setProperty("statusTone", tone.trimmed().isEmpty() ? QStringLiteral("info") : tone.trimmed());
+        m_statusLabel->style()->unpolish(m_statusLabel);
+        m_statusLabel->style()->polish(m_statusLabel);
+        m_statusLabel->update();
+    }
+
+    bool m_loading = false;
+    bool m_authCodeSaved = false;
+    QCheckBox* m_enabledCheck = nullptr;
+    QComboBox* m_providerCombo = nullptr;
+    QLineEdit* m_senderEdit = nullptr;
+    QLineEdit* m_authCodeEdit = nullptr;
+    QLineEdit* m_smtpHostEdit = nullptr;
+    QSpinBox* m_smtpPortSpin = nullptr;
+    QComboBox* m_securityCombo = nullptr;
+    QLineEdit* m_testRecipientEdit = nullptr;
+    QPushButton* m_refreshButton = nullptr;
+    QPushButton* m_saveButton = nullptr;
+    QPushButton* m_testButton = nullptr;
+    QTableWidget* m_templateTable = nullptr;
+    QLineEdit* m_templateIdEdit = nullptr;
+    QLineEdit* m_templateNameEdit = nullptr;
+    QComboBox* m_templateSceneCombo = nullptr;
+    QCheckBox* m_templateEnabledCheck = nullptr;
+    QLineEdit* m_templateSubjectEdit = nullptr;
+    QLineEdit* m_templateAliasesEdit = nullptr;
+    QPlainTextEdit* m_templateBodyEdit = nullptr;
+    QPlainTextEdit* m_templateImportEdit = nullptr;
+    QPushButton* m_templateRefreshButton = nullptr;
+    QPushButton* m_templateNewButton = nullptr;
+    QPushButton* m_templateSaveButton = nullptr;
+    QPushButton* m_templateTestButton = nullptr;
+    QPushButton* m_templateDeleteButton = nullptr;
+    QPushButton* m_templateImportButton = nullptr;
+    QLabel* m_statusLabel = nullptr;
+    QJsonArray m_templates;
+    int m_loadRequestId = 0;
+    int m_templatesLoadRequestId = 0;
+};
+
+QWidget* buildEmailServicePage(std::function<void()>* refreshFn, QWidget* parent)
+{
+    return new EmailServiceConfigPage(refreshFn, parent);
+}
+
 } // namespace
 
 AiCustomerServiceBackendWindow::AiCustomerServiceBackendWindow(QWidget* parent)
@@ -2975,6 +3982,7 @@ AiCustomerServiceBackendWindow::AiCustomerServiceBackendWindow(QWidget* parent)
     m_stack->addWidget(buildProductKnowledgePage(&m_refreshProductKnowledgeBases));
     m_apiConfigPage = new AiProviderConfigPage(central);
     m_stack->addWidget(m_apiConfigPage);
+    m_stack->addWidget(buildEmailServicePage(&m_refreshEmailServiceConfig, central));
     m_stack->addWidget(makePlaceholderPage(QStringLiteral("通用设置")));
 
     QWidget* nav = buildNavSidebar();
@@ -3003,6 +4011,12 @@ AiCustomerServiceBackendWindow::AiCustomerServiceBackendWindow(QWidget* parent)
         m_stack->setCurrentIndex(idx);
         if (idx == kStackRobotStoreConfig && m_refreshRobotConfigs)
             m_refreshRobotConfigs();
+        if (idx == kStackEmailService && m_refreshEmailServiceConfig) {
+            QTimer::singleShot(0, this, [this]() {
+                if (m_stack && m_stack->currentIndex() == kStackEmailService && m_refreshEmailServiceConfig)
+                    m_refreshEmailServiceConfig();
+            });
+        }
         if (idx == kStackProductKnowledge && !m_productKnowledgeLoaded && m_refreshProductKnowledgeBases) {
             m_productKnowledgeLoaded = true;
             QTimer::singleShot(0, this, [this]() {
@@ -3056,6 +4070,7 @@ QWidget* AiCustomerServiceBackendWindow::buildNavSidebar()
     addTopLeaf(QStringLiteral("知识库"), kStackProductKnowledge);
 
     addTopLeaf(QStringLiteral("API 配置/模型"), kStackApiModel);
+    addTopLeaf(QStringLiteral("邮件服务"), kStackEmailService);
     addTopLeaf(QStringLiteral("通用设置"), kStackGeneralSettings);
 
     agentGroup->setExpanded(true);
@@ -3429,6 +4444,156 @@ QLabel#aiBackendInfoBannerIcon {
 }
 QLabel#aiBackendInfoBannerTitle { color: #1e40af; font-size: 15px; font-weight: 700; background: transparent; }
 QLabel#aiBackendInfoBannerBody { color: #334155; font-size: 13px; background: transparent; }
+QWidget#aiBackendEmailServicePage { background: %1; }
+QWidget#aiBackendEmailServicePage QScrollArea#aiBackendEmailServiceScroll {
+  background: %1;
+  border: none;
+}
+QWidget#aiBackendEmailServicePage QScrollArea#aiBackendEmailServiceScroll QWidget#aiBackendEmailServiceScrollViewport {
+  background: %1;
+  border: none;
+}
+QWidget#aiBackendEmailServicePage QLabel {
+  color: #475569;
+  font-size: 13px;
+  background: transparent;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendPageTitle {
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 700;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendPageSubtitle {
+  color: #64748b;
+  font-size: 14px;
+}
+QWidget#aiBackendEmailServicePage QFrame#aiBackendCard {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendHint {
+  color: #64748b;
+  font-size: 13px;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendSectionTitle {
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 700;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendStatusLabel {
+  color: #334155;
+  font-size: 13px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendStatusLabel[statusTone="success"] {
+  color: #166534;
+  background: #dcfce7;
+  border-color: #86efac;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendStatusLabel[statusTone="error"] {
+  color: #991b1b;
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendStatusLabel[statusTone="warning"] {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #fcd34d;
+}
+QWidget#aiBackendEmailServicePage QLabel#aiBackendStatusLabel[statusTone="info"] {
+  color: #334155;
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+QWidget#aiBackendEmailServicePage QCheckBox#aiBackendEmailCheck {
+  color: #334155;
+  font-size: 14px;
+  spacing: 8px;
+  background: transparent;
+}
+QWidget#aiBackendEmailServicePage QCheckBox#aiBackendEmailCheck::indicator {
+  width: 16px;
+  height: 16px;
+}
+QWidget#aiBackendEmailServicePage QLineEdit#aiBackendEmailField,
+QWidget#aiBackendEmailServicePage QComboBox#aiBackendEmailField,
+QWidget#aiBackendEmailServicePage QSpinBox#aiBackendEmailField {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  color: #0f172a;
+  padding: 8px 10px;
+  min-height: 22px;
+  font-size: 14px;
+  selection-background-color: #bfdbfe;
+  selection-color: #0f172a;
+}
+QWidget#aiBackendEmailServicePage QPlainTextEdit#aiBackendEmailText {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  color: #0f172a;
+  padding: 8px 10px;
+  font-size: 14px;
+  selection-background-color: #bfdbfe;
+  selection-color: #0f172a;
+}
+QWidget#aiBackendEmailServicePage QLineEdit#aiBackendEmailField:focus,
+QWidget#aiBackendEmailServicePage QComboBox#aiBackendEmailField:focus,
+QWidget#aiBackendEmailServicePage QSpinBox#aiBackendEmailField:focus {
+  border: 1px solid #2563eb;
+  background: #ffffff;
+}
+QWidget#aiBackendEmailServicePage QPlainTextEdit#aiBackendEmailText:focus {
+  border: 1px solid #2563eb;
+  background: #ffffff;
+}
+QWidget#aiBackendEmailServicePage QLineEdit#aiBackendEmailField:disabled,
+QWidget#aiBackendEmailServicePage QComboBox#aiBackendEmailField:disabled,
+QWidget#aiBackendEmailServicePage QSpinBox#aiBackendEmailField:disabled {
+  background: #f1f5f9;
+  color: #94a3b8;
+}
+QWidget#aiBackendEmailServicePage QLineEdit#aiBackendEmailField::placeholder {
+  color: #94a3b8;
+}
+QWidget#aiBackendEmailServicePage QTableWidget#aiBackendEmailTemplateTable {
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  gridline-color: #e2e8f0;
+  selection-background-color: #dbeafe;
+  selection-color: #0f172a;
+}
+QWidget#aiBackendEmailServicePage QTableWidget#aiBackendEmailTemplateTable QHeaderView::section {
+  background: #f8fafc;
+  color: #334155;
+  border: none;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 6px 8px;
+  font-weight: 600;
+}
+QWidget#aiBackendEmailServicePage QComboBox#aiBackendEmailField QAbstractItemView {
+  background: #ffffff;
+  color: #0f172a;
+  selection-background-color: #dbeafe;
+  selection-color: #0f172a;
+  border: 1px solid #e2e8f0;
+}
+QWidget#aiBackendEmailServicePage QPushButton#aiBackendBluePrimaryBtn:disabled {
+  background: #93c5fd;
+  color: #eff6ff;
+}
+QWidget#aiBackendEmailServicePage QPushButton#aiBackendSecondaryBtn:disabled {
+  background: #f8fafc;
+  color: #94a3b8;
+  border-color: #e2e8f0;
+}
 QWidget#aiProviderConfigPage { background: %1; }
 QWidget#aiProviderConfigPage QScrollArea#aiProviderConfigScroll { background: %1; border: none; }
 QWidget#aiProviderConfigPage QScrollArea#aiProviderConfigScroll QWidget#aiProviderConfigScrollViewport {

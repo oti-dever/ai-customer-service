@@ -29,6 +29,7 @@ public:
     bool isServiceAvailable() const { return m_serviceAvailable; }
     QString serviceEndpoint() const { return m_endpoint; }
     void setServiceEndpoint(const QString& endpoint);
+    void markServiceAvailable();
     void markServiceUnavailable();
     void loadConnectionSettings();
     void saveConnectionSettings() const;
@@ -137,6 +138,41 @@ public:
                                 ResponseStatus* statusOut = nullptr,
                                 QString* errorOut = nullptr,
                                 const QStringList& baseIds = QStringList());
+    QJsonObject fetchEmailConfig(int timeoutMs = 5000,
+                                 ResponseStatus* statusOut = nullptr,
+                                 QString* errorOut = nullptr);
+    QJsonObject saveEmailConfig(const QJsonObject& payload,
+                                int timeoutMs = 5000,
+                                ResponseStatus* statusOut = nullptr,
+                                QString* errorOut = nullptr);
+    QJsonObject sendTestEmail(const QString& toEmail,
+                              int timeoutMs = 30000,
+                              ResponseStatus* statusOut = nullptr,
+                              QString* errorOut = nullptr);
+    QJsonObject sendEmail(const QString& toEmail,
+                          const QString& scene = QString(),
+                          int conversationId = 0,
+                          const QString& traceId = QString(),
+                          const QString& templateId = QString(),
+                          int timeoutMs = 30000,
+                          ResponseStatus* statusOut = nullptr,
+                          QString* errorOut = nullptr);
+    QJsonObject fetchEmailTemplates(bool includeBody = true,
+                                    int timeoutMs = 5000,
+                                    ResponseStatus* statusOut = nullptr,
+                                    QString* errorOut = nullptr);
+    QJsonObject saveEmailTemplate(const QJsonObject& payload,
+                                  int timeoutMs = 5000,
+                                  ResponseStatus* statusOut = nullptr,
+                                  QString* errorOut = nullptr);
+    QJsonObject deleteEmailTemplate(const QString& templateId,
+                                    int timeoutMs = 5000,
+                                    ResponseStatus* statusOut = nullptr,
+                                    QString* errorOut = nullptr);
+    QJsonObject importEmailTemplates(const QString& text,
+                                     int timeoutMs = 10000,
+                                     ResponseStatus* statusOut = nullptr,
+                                     QString* errorOut = nullptr);
     QJsonObject fetchPlatformReplay(const QString& platform = QString(),
                                     const QString& cursor = QString(),
                                     int limit = 100,

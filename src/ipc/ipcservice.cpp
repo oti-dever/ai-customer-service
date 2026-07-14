@@ -72,6 +72,15 @@ void IpcService::setServiceEndpoint(const QString& endpoint)
     }
 }
 
+void IpcService::markServiceAvailable()
+{
+    if (!m_serviceAvailable) {
+        m_serviceAvailable = true;
+        emit serviceStatusChanged(true);
+    }
+    startCommandWebSocketClient();
+}
+
 void IpcService::markServiceUnavailable()
 {
     stopCommandWebSocketClient();
@@ -934,6 +943,166 @@ QJsonObject IpcService::searchKnowledge(const QString& queryText,
             << "queryChars=" << queryText.size()
             << "baseIds=" << baseIdArray.size()
             << "results=" << response.value(QStringLiteral("results")).toArray().size()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::fetchEmailConfig(int timeoutMs, ResponseStatus* statusOut, QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/email/config"));
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    const QJsonObject config = response.value(QStringLiteral("config")).toObject();
+    qInfo() << "[IpcService] email config fetched"
+            << "provider=" << config.value(QStringLiteral("provider")).toString()
+            << "sender=" << config.value(QStringLiteral("sender_email_masked")).toString()
+            << "enabled=" << config.value(QStringLiteral("enabled")).toBool()
+            << "authCodeSaved=" << config.value(QStringLiteral("auth_code_saved")).toBool()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::saveEmailConfig(const QJsonObject& payload,
+                                        int timeoutMs,
+                                        ResponseStatus* statusOut,
+                                        QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/email/config"));
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] email config saved"
+            << "provider=" << payload.value(QStringLiteral("provider")).toString()
+            << "senderChars=" << payload.value(QStringLiteral("sender_email")).toString().size()
+            << "smtpHost=" << payload.value(QStringLiteral("smtp_host")).toString()
+            << "smtpPort=" << payload.value(QStringLiteral("smtp_port")).toInt()
+            << "security=" << payload.value(QStringLiteral("security")).toString()
+            << "enabled=" << payload.value(QStringLiteral("enabled")).toBool()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::sendTestEmail(const QString& toEmail,
+                                      int timeoutMs,
+                                      ResponseStatus* statusOut,
+                                      QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/email/test"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("to"), toEmail.trimmed());
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] email test sent"
+            << "toChars=" << toEmail.trimmed().size()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "errorCode=" << response.value(QStringLiteral("error")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::sendEmail(const QString& toEmail,
+                                  const QString& scene,
+                                  int conversationId,
+                                  const QString& traceId,
+                                  const QString& templateId,
+                                  int timeoutMs,
+                                  ResponseStatus* statusOut,
+                                  QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/email/send"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("to"), toEmail.trimmed());
+    payload.insert(QStringLiteral("scene"),
+                   scene.trimmed().isEmpty() ? QStringLiteral("link_request") : scene.trimmed());
+    if (conversationId > 0)
+        payload.insert(QStringLiteral("conversation_id"), conversationId);
+    if (!traceId.trimmed().isEmpty())
+        payload.insert(QStringLiteral("trace_id"), traceId.trimmed());
+    if (!templateId.trimmed().isEmpty())
+        payload.insert(QStringLiteral("template_id"), templateId.trimmed());
+
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] workflow email sent"
+            << "toChars=" << toEmail.trimmed().size()
+            << "scene=" << payload.value(QStringLiteral("scene")).toString()
+            << "templateId=" << templateId.trimmed()
+            << "conversationId=" << conversationId
+            << "traceId=" << traceId
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "errorCode=" << response.value(QStringLiteral("error")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::fetchEmailTemplates(bool includeBody,
+                                            int timeoutMs,
+                                            ResponseStatus* statusOut,
+                                            QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/email/templates"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("include_body"), includeBody ? QStringLiteral("1") : QStringLiteral("0"));
+    url.setQuery(query);
+    QJsonObject response = performJsonGet(url, timeoutMs, statusOut, errorOut);
+    const int count = response.value(QStringLiteral("templates")).toArray().size();
+    qInfo() << "[IpcService] email templates fetched"
+            << "includeBody=" << includeBody
+            << "count=" << count
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::saveEmailTemplate(const QJsonObject& payload,
+                                          int timeoutMs,
+                                          ResponseStatus* statusOut,
+                                          QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/email/templates"));
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] email template saved"
+            << "templateId=" << payload.value(QStringLiteral("template_id")).toString()
+            << "scene=" << payload.value(QStringLiteral("scene")).toString()
+            << "subjectChars=" << payload.value(QStringLiteral("subject")).toString().size()
+            << "bodyChars=" << payload.value(QStringLiteral("body")).toString().size()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::deleteEmailTemplate(const QString& templateId,
+                                            int timeoutMs,
+                                            ResponseStatus* statusOut,
+                                            QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/email/templates/delete"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("template_id"), templateId.trimmed());
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] email template deleted"
+            << "templateId=" << templateId.trimmed()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
+            << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
+            << "error=" << (errorOut ? *errorOut : QString());
+    return response;
+}
+
+QJsonObject IpcService::importEmailTemplates(const QString& text,
+                                             int timeoutMs,
+                                             ResponseStatus* statusOut,
+                                             QString* errorOut)
+{
+    QUrl url(m_endpoint + QStringLiteral("/api/email/templates/import"));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("text"), text);
+    QJsonObject response = performJsonPost(url, payload, timeoutMs, statusOut, errorOut);
+    qInfo() << "[IpcService] email templates imported"
+            << "textChars=" << text.size()
+            << "count=" << response.value(QStringLiteral("count")).toInt()
+            << "responseStatus=" << response.value(QStringLiteral("status")).toString()
             << "status=" << (statusOut ? Ipc::toString(*statusOut) : QStringLiteral("unknown"))
             << "error=" << (errorOut ? *errorOut : QString());
     return response;

@@ -7,6 +7,8 @@
 
 class QProcess;
 class QTimer;
+class QNetworkAccessManager;
+class QNetworkReply;
 
 class PythonServiceController : public QObject
 {
@@ -32,6 +34,7 @@ public:
 
     void startService();
     void stopService();
+    void stopManagedServiceOnExit();
     void refreshConnectionState();
 
 signals:
@@ -47,8 +50,19 @@ private slots:
     void pollStartupHealth();
 
 private:
+    enum class HealthProbePurpose {
+        BeforeStart,
+        StartupPoll,
+        RefreshState
+    };
+
     explicit PythonServiceController(QObject* parent = nullptr);
 
+    void startHealthProbe(HealthProbePurpose purpose, int timeoutMs = 1000);
+    void handleHealthProbeFinished(int probeId,
+                                   HealthProbePurpose purpose,
+                                   QNetworkReply* reply);
+    void launchManagedService(const QString& host, int port);
     void setState(State state);
     void appendHumanLog(const QString& line);
     void appendProcessOutput(const QByteArray& chunk);
@@ -59,9 +73,14 @@ private:
 
     QProcess* m_process = nullptr;
     QTimer* m_startupPollTimer = nullptr;
+    QNetworkAccessManager* m_healthNetwork = nullptr;
+    QNetworkReply* m_healthReply = nullptr;
     State m_state = State::Stopped;
     QStringList m_humanLogs;
     int m_startupPollsRemaining = 0;
+    int m_healthProbeId = 0;
+    QString m_pendingStartHost;
+    int m_pendingStartPort = 8765;
     bool m_stopRequested = false;
 };
 

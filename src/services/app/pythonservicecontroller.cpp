@@ -9,6 +9,11 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
@@ -25,6 +30,7 @@ PythonServiceController& PythonServiceController::instance()
 PythonServiceController::PythonServiceController(QObject* parent)
     : QObject(parent)
     , m_startupPollTimer(new QTimer(this))
+    , m_healthNetwork(new QNetworkAccessManager(this))
 {
     m_startupPollTimer->setInterval(700);
     connect(m_startupPollTimer, &QTimer::timeout,
@@ -84,16 +90,105 @@ void PythonServiceController::startService()
         return;
     }
 
-    const Ipc::HealthCheckResponse health = Ipc::IpcService::instance().checkHealth();
-    if (health.status == Ipc::ResponseStatus::Success && health.healthy) {
-        finishAsConnected(State::ExternalRunning,
-                          QStringLiteral("检测到 Python 服务已经在运行，已直接连接。这个服务不是当前客户端启动的，关闭时不会被强制停止。"));
-        QTimer::singleShot(0, this, []() {
-            Ipc::IpcService::instance().connectToConfiguredService();
-        });
-        return;
+    m_pendingStartHost = host.isEmpty() ? QStringLiteral("127.0.0.1") : host;
+    m_pendingStartPort = port;
+    appendHumanLog(QStringLiteral("正在检查本地 Python 服务状态..."));
+    setState(State::Starting);
+    startHealthProbe(HealthProbePurpose::BeforeStart);
+}
+
+void PythonServiceController::startHealthProbe(HealthProbePurpose purpose, int timeoutMs)
+{
+    if (m_healthReply) {
+        QNetworkReply* oldReply = m_healthReply;
+        m_healthReply = nullptr;
+        oldReply->disconnect(this);
+        oldReply->abort();
+        oldReply->deleteLater();
     }
 
+    QNetworkRequest request{QUrl(Ipc::IpcService::instance().serviceEndpoint() + QStringLiteral("/api/health"))};
+    request.setTransferTimeout(timeoutMs);
+    QNetworkReply* reply = m_healthNetwork->get(request);
+    m_healthReply = reply;
+    const int probeId = ++m_healthProbeId;
+    connect(reply, &QNetworkReply::finished, this, [this, probeId, purpose, reply]() {
+        handleHealthProbeFinished(probeId, purpose, reply);
+    });
+}
+
+void PythonServiceController::handleHealthProbeFinished(int probeId,
+                                                        HealthProbePurpose purpose,
+                                                        QNetworkReply* reply)
+{
+    if (!reply)
+        return;
+    if (reply == m_healthReply)
+        m_healthReply = nullptr;
+
+    const bool current = probeId == m_healthProbeId;
+    QString error;
+    bool healthy = false;
+    if (reply->error() == QNetworkReply::NoError) {
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (doc.isObject())
+            healthy = doc.object().value(QStringLiteral("healthy")).toBool(false);
+        else
+            error = QStringLiteral("invalid_json_response");
+    } else {
+        error = reply->errorString();
+    }
+    reply->deleteLater();
+
+    if (!current)
+        return;
+
+    switch (purpose) {
+    case HealthProbePurpose::BeforeStart:
+        if (m_state != State::Starting)
+            return;
+        if (healthy) {
+            finishAsConnected(
+                State::ExternalRunning,
+                QStringLiteral("检测到 Python 服务已经在运行，已直接连接。这个服务不是当前客户端启动的，关闭时不会被强制停止。"));
+            Ipc::IpcService::instance().markServiceAvailable();
+            return;
+        }
+        launchManagedService(m_pendingStartHost, m_pendingStartPort);
+        return;
+
+    case HealthProbePurpose::StartupPoll:
+        if (m_state != State::Starting)
+            return;
+        if (healthy) {
+            m_startupPollTimer->stop();
+            finishAsConnected(State::Running, QStringLiteral("Python 服务已就绪，可以开始平台监听。"));
+            Ipc::IpcService::instance().markServiceAvailable();
+            return;
+        }
+        --m_startupPollsRemaining;
+        if (m_startupPollsRemaining <= 0) {
+            m_startupPollTimer->stop();
+            appendHumanLog(QStringLiteral("服务启动超时：Python 进程已启动，但健康检查没有通过。%1")
+                               .arg(error.left(160)));
+            setState(State::Failed);
+        }
+        return;
+
+    case HealthProbePurpose::RefreshState:
+        if (healthy) {
+            Ipc::IpcService::instance().markServiceAvailable();
+            setState(isManagedServiceRunning() ? State::Running : State::ExternalRunning);
+        } else {
+            Ipc::IpcService::instance().markServiceUnavailable();
+            setState(State::Stopped);
+        }
+        return;
+    }
+}
+
+void PythonServiceController::launchManagedService(const QString& host, int port)
+{
     if (m_process) {
         m_process->deleteLater();
         m_process = nullptr;
@@ -124,9 +219,8 @@ void PythonServiceController::startService()
     env.insert(QStringLiteral("YY_PARENT_PID"), QString::number(QCoreApplication::applicationPid()));
     const QString bgeVlDir = QDir(QStringLiteral(PROJECT_ROOT_DIR)).filePath(
         QStringLiteral("database/models/bge-vl-base"));
-    if (QFileInfo::exists(bgeVlDir)) {
+    if (QFileInfo::exists(bgeVlDir))
         env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_EMBEDDING_MODEL"), bgeVlDir);
-    }
     const AiProviderConfig doubaoConfig = loadAiProviderConfig(QStringLiteral("doubao:ark"));
     if (doubaoConfig.isValidForChat()) {
         env.insert(QStringLiteral("AI_CUSTOMER_SERVICE_IMAGE_ANALYZER"), QStringLiteral("ark"));
@@ -158,7 +252,7 @@ void PythonServiceController::startService()
 
     m_stopRequested = false;
     m_startupPollsRemaining = 50;
-    appendHumanLog(QStringLiteral("正在启动 Python 服务（debug 模式），请稍等。"));
+    appendHumanLog(QStringLiteral("正在启动 Python 服务（%1 模式），请稍候。").arg(mode));
     setState(State::Starting);
     m_process->start(pythonExe.isEmpty() ? QStringLiteral("python") : pythonExe, args);
 }
@@ -192,6 +286,30 @@ void PythonServiceController::stopService()
     scheduleForceKill();
 }
 
+void PythonServiceController::stopManagedServiceOnExit()
+{
+    if (m_healthReply) {
+        QNetworkReply* reply = m_healthReply;
+        m_healthReply = nullptr;
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
+    }
+    m_startupPollTimer->stop();
+
+    if (!m_process || m_process->state() == QProcess::NotRunning)
+        return;
+
+    qInfo() << "[PythonServiceController] stop managed service on exit"
+            << "pid=" << m_process->processId();
+    m_stopRequested = true;
+    m_process->terminate();
+    if (!m_process->waitForFinished(1500)) {
+        m_process->kill();
+        m_process->waitForFinished(1000);
+    }
+}
+
 void PythonServiceController::refreshConnectionState()
 {
     if (isBusy())
@@ -200,11 +318,7 @@ void PythonServiceController::refreshConnectionState()
         setState(State::Running);
         return;
     }
-    if (Ipc::IpcService::instance().isServiceAvailable()) {
-        setState(State::ExternalRunning);
-        return;
-    }
-    setState(State::Stopped);
+    startHealthProbe(HealthProbePurpose::RefreshState);
 }
 
 void PythonServiceController::onProcessStarted()
@@ -247,7 +361,7 @@ void PythonServiceController::onProcessFinished(int exitCode, QProcess::ExitStat
                            .arg(static_cast<int>(exitStatus)));
         setState(State::Failed);
         QTimer::singleShot(0, this, []() {
-            Ipc::IpcService::instance().connectToConfiguredService();
+            PythonServiceController::instance().refreshConnectionState();
         });
     }
     m_stopRequested = false;
@@ -293,22 +407,8 @@ void PythonServiceController::pollStartupHealth()
         return;
     }
 
-    Ipc::HealthCheckResponse health = Ipc::IpcService::instance().checkHealth();
-    if (health.status == Ipc::ResponseStatus::Success && health.healthy) {
-        m_startupPollTimer->stop();
-        finishAsConnected(State::Running, QStringLiteral("Python 服务已就绪，可以开始平台监听。"));
-        QTimer::singleShot(0, this, []() {
-            Ipc::IpcService::instance().connectToConfiguredService();
-        });
-        return;
-    }
-
-    --m_startupPollsRemaining;
-    if (m_startupPollsRemaining <= 0) {
-        m_startupPollTimer->stop();
-        appendHumanLog(QStringLiteral("服务启动超时：Python 进程已启动，但健康检查没有通过。"));
-        setState(State::Failed);
-    }
+    if (!m_healthReply)
+        startHealthProbe(HealthProbePurpose::StartupPoll);
 }
 
 void PythonServiceController::setState(State state)

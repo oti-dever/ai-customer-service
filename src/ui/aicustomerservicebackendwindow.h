@@ -29,6 +29,7 @@ private:
     AiProviderConfigPage* m_apiConfigPage = nullptr;
     std::function<void()> m_refreshRobotConfigs;
     std::function<void()> m_refreshProductKnowledgeBases;
+    std::function<void()> m_refreshEmailServiceConfig;
     bool m_productKnowledgeLoaded = false;
 };
 

@@ -16,6 +16,7 @@ import time
 
 from .ai_suggestion import build_ai_suggestion_response
 from .cache_snapshot import build_cache_snapshot, build_conversation_list, build_conversation_messages
+from .email_service import get_email_service
 from .knowledge_store import get_knowledge_store
 from . import rpa_bridge
 
@@ -355,6 +356,13 @@ class AiServiceHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if path == "/api/email/config":
+            self._send_json({"status": "success", "config": get_email_service().load_config().to_public_dict()})
+            return
+        if path == "/api/email/templates":
+            include_body = query.get("include_body", ["1"])[0].strip().lower() not in {"0", "false", "no"}
+            self._send_json(get_email_service().list_templates(include_body=include_body))
+            return
         self._send_json({"status": "error", "error": "not_found"}, status_code=404)
 
     def do_POST(self) -> None:
@@ -374,6 +382,60 @@ class AiServiceHandler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
                 return
             self._send_json(rpa_bridge.get_bridge().command(payload))
+            return
+        if path == "/api/email/config":
+            payload = self._read_json_body()
+            if payload is None:
+                self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
+                return
+            result = get_email_service().save_config(payload)
+            self._send_json(result, status_code=200 if result.get("status") == "success" else 400)
+            return
+        if path == "/api/email/test":
+            payload = self._read_json_body()
+            if payload is None:
+                self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
+                return
+            result = get_email_service().test_send(str(payload.get("to") or ""))
+            self._send_json(result, status_code=200 if result.get("status") == "success" else 400)
+            return
+        if path == "/api/email/templates":
+            payload = self._read_json_body()
+            if payload is None:
+                self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
+                return
+            result = get_email_service().save_template(payload)
+            self._send_json(result, status_code=200 if result.get("status") == "success" else 400)
+            return
+        if path == "/api/email/templates/delete":
+            payload = self._read_json_body()
+            if payload is None:
+                self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
+                return
+            result = get_email_service().delete_template(str(payload.get("template_id") or ""))
+            self._send_json(result, status_code=200 if result.get("status") == "success" else 400)
+            return
+        if path == "/api/email/templates/import":
+            payload = self._read_json_body()
+            if payload is None:
+                self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
+                return
+            result = get_email_service().import_templates(payload)
+            self._send_json(result, status_code=200 if result.get("status") == "success" else 400)
+            return
+        if path == "/api/email/send":
+            payload = self._read_json_body()
+            if payload is None:
+                self._send_json({"status": "error", "error": "invalid_json"}, status_code=400)
+                return
+            result = get_email_service().send(
+                to_email=str(payload.get("to") or ""),
+                scene=str(payload.get("scene") or "manual"),
+                trace_id=str(payload.get("trace_id") or ""),
+                conversation_id=payload.get("conversation_id") if isinstance(payload.get("conversation_id"), int) else None,
+                template_id=str(payload.get("template_id") or ""),
+            )
+            self._send_json(result, status_code=200 if result.get("status") == "success" else 400)
             return
         if path == "/api/conversations/clear_messages":
             payload = self._read_json_body()

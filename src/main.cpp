@@ -4,6 +4,7 @@
 #include "core/conversationmanager.h"
 #include "core/platformbootstrap.h"
 #include "ipc/ipcservice.h"
+#include "services/app/pythonservicecontroller.h"
 #include "utils/appsettings.h"
 #include "utils/applystyle.h"
 #include "utils/logger.h"
@@ -13,6 +14,7 @@
 #include <QCoreApplication>
 #include <QIcon>
 #include <QMessageBox>
+#include <QTimer>
 
 int main(int argc, char* argv[])
 {
@@ -40,6 +42,7 @@ int main(int argc, char* argv[])
     qInfo() << "数据库初始化成功";
 
     QObject::connect(&a, &QCoreApplication::aboutToQuit, [] {
+        PythonServiceController::instance().stopManagedServiceOnExit();
         Ipc::IpcService::instance().shutdown();
         SwordCursor::restore();
     });
@@ -57,6 +60,9 @@ int main(int argc, char* argv[])
 
     MainWindow w(login.loggedInUsername());
     w.show();
+    QTimer::singleShot(0, [] {
+        PythonServiceController::instance().startService();
+    });
     qInfo() << "已进入AI客服主界面, 用户:" << login.loggedInUsername();
 
     int ret = a.exec();
