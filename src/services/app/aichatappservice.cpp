@@ -582,17 +582,216 @@ QString maskEmailAddressForPrompt(const QString& email)
     return QStringLiteral("%1***@%2").arg(visible, domain);
 }
 
-bool recentContextSuggestsEmailDeliveryWorkflow(const QList<AiConversationTurn>& recentTurns)
+bool containsAnyTerm(const QString& text, const QStringList& terms)
 {
-    const int start = qMax(0, recentTurns.size() - 6);
-    for (int i = start; i < recentTurns.size(); ++i) {
-        const QString text = firstTextPart(recentTurns.at(i)).trimmed();
-        if (text.isEmpty())
-            continue;
-        if (containsExternalLinkRequest(text))
+    const QString value = text.trimmed().toLower();
+    if (value.isEmpty())
+        return false;
+    for (const QString& term : terms) {
+        if (!term.trimmed().isEmpty() && value.contains(term.trimmed().toLower()))
             return true;
     }
     return false;
+}
+
+bool containsExplicitExternalLinkRequest(const QString& text)
+{
+    const QString value = text.trimmed().toLower();
+    if (value.isEmpty())
+        return false;
+    if (containsAnyTerm(value, {
+            QStringLiteral("\u94fe\u63a5"),
+            QStringLiteral("\u8fde\u63a5"),
+            QStringLiteral("\u8fde\u7ed3"),
+            QStringLiteral("\u7f51\u5740"),
+            QStringLiteral("url"),
+            QStringLiteral("http"),
+            QStringLiteral("\u53d1\u6211\u5730\u5740"),
+            QStringLiteral("\u7ed9\u6211\u5730\u5740"),
+            QStringLiteral("\u4e0b\u8f7d\u5730\u5740"),
+            QStringLiteral("\u770b\u56fe\u5730\u5740"),
+            QStringLiteral("\u5e97\u94fa\u770b\u56fe\u5730\u5740"),
+            QStringLiteral("\u5e97\u94fa\u5730\u5740"),
+            QStringLiteral("\u7c89\u4e1d\u7fa4"),
+            QStringLiteral("\u7fa4\u94fe\u63a5"),
+            QStringLiteral("\u7fa4\u8fde\u63a5"),
+            QStringLiteral("\u7fa4\u8fde\u7ed3"),
+        })) {
+        return true;
+    }
+
+    const bool mentionsEmail = containsAnyTerm(value, {
+        QStringLiteral("\u90ae\u7bb1"),
+        QStringLiteral("\u90ae\u4ef6"),
+        QStringLiteral("email"),
+        QStringLiteral("e-mail"),
+    });
+    if (!mentionsEmail)
+        return false;
+    return containsAnyTerm(value, {
+        QStringLiteral("\u53d1"),
+        QStringLiteral("\u53d1\u9001"),
+        QStringLiteral("\u5bc4"),
+        QStringLiteral("\u6536"),
+        QStringLiteral("\u901a\u8fc7"),
+        QStringLiteral("\u90ae\u7bb1\u53d1"),
+        QStringLiteral("\u53d1\u90ae\u7bb1"),
+        QStringLiteral("\u53d1\u5230\u90ae\u7bb1"),
+        QStringLiteral("send"),
+    });
+}
+
+bool isAssistantTurn(const AiConversationTurn& turn)
+{
+    const QString role = turn.role.trimmed().toLower();
+    return role == QLatin1String("assistant") || role == QLatin1String("out");
+}
+
+bool isUserTurn(const AiConversationTurn& turn)
+{
+    const QString role = turn.role.trimmed().toLower();
+    return role == QLatin1String("user") || role == QLatin1String("in") || role == QLatin1String("customer");
+}
+
+bool assistantConfirmsEmailDeliveryCompleted(const QString& text)
+{
+    return containsAnyTerm(text, {
+        QStringLiteral("\u5df2\u53d1\u9001"),
+        QStringLiteral("\u5df2\u7ecf\u53d1\u9001"),
+        QStringLiteral("\u5df2\u53d1"),
+        QStringLiteral("\u53d1\u597d\u4e86"),
+        QStringLiteral("\u53d1\u9001\u6210\u529f"),
+        QStringLiteral("\u8bf7\u6ce8\u610f\u67e5\u6536"),
+        QStringLiteral("\u6ce8\u610f\u67e5\u6536"),
+        QStringLiteral("\u67e5\u6536\u90ae\u7bb1"),
+        QStringLiteral("\u90ae\u4ef6\u5df2\u53d1\u9001"),
+        QStringLiteral("\u8d44\u6599\u5df2\u53d1\u9001"),
+        QStringLiteral("sent to your email"),
+    });
+}
+
+bool assistantAsksForEmailAddress(const QString& text)
+{
+    if (!containsAnyTerm(text, {
+            QStringLiteral("\u90ae\u7bb1"),
+            QStringLiteral("\u90ae\u4ef6"),
+            QStringLiteral("email"),
+            QStringLiteral("e-mail"),
+        })) {
+        return false;
+    }
+    if (assistantConfirmsEmailDeliveryCompleted(text))
+        return false;
+    return containsAnyTerm(text, {
+        QStringLiteral("\u63d0\u4f9b"),
+        QStringLiteral("\u7559\u4e00\u4e0b"),
+        QStringLiteral("\u53d1\u4e00\u4e0b"),
+        QStringLiteral("\u7ed9\u4e00\u4e0b"),
+        QStringLiteral("\u7ed9\u4e2a"),
+        QStringLiteral("\u586b\u4e00\u4e0b"),
+        QStringLiteral("\u65b9\u4fbf"),
+        QStringLiteral("\u9ebb\u70e6"),
+        QStringLiteral("\u8bf7\u4f9b"),
+        QStringLiteral("\u90ae\u7bb1\u5730\u5740"),
+        QStringLiteral("provide"),
+        QStringLiteral("send"),
+    });
+}
+
+bool assistantAsksForEmailTemplate(const QString& text)
+{
+    if (assistantConfirmsEmailDeliveryCompleted(text))
+        return false;
+    return containsAnyTerm(text, {
+        QStringLiteral("\u5177\u4f53\u8981\u770b\u54ea\u4e2a"),
+        QStringLiteral("\u8981\u770b\u54ea\u4e2a"),
+        QStringLiteral("\u54ea\u4e2a\u5e97\u94fa"),
+        QStringLiteral("\u54ea\u5bb6\u5e97\u94fa"),
+        QStringLiteral("\u54ea\u4e2a\u5e97"),
+        QStringLiteral("\u54ea\u5bb6\u5e97"),
+        QStringLiteral("\u54ea\u4e00\u4efd"),
+        QStringLiteral("\u54ea\u4e00\u4e2a"),
+        QStringLiteral("\u54ea\u4e2a\u6a21\u677f"),
+        QStringLiteral("\u54ea\u4e2a\u5730\u5740"),
+        QStringLiteral("\u8bf7\u95ee\u662f\u54ea\u4e2a"),
+    });
+}
+
+bool latestLooksLikeStandaloneWorkflowSlot(const QString& text)
+{
+    const QString value = text.trimmed();
+    if (value.isEmpty() || value.size() > 30)
+        return false;
+    if (containsAnyTerm(value, {
+            QStringLiteral("?"),
+            QStringLiteral("\uff1f"),
+            QStringLiteral("\u5417"),
+            QStringLiteral("\u4e48"),
+            QStringLiteral("\u600e\u4e48"),
+            QStringLiteral("\u5982\u4f55"),
+            QStringLiteral("\u4ec0\u4e48"),
+            QStringLiteral("\u4e3a\u4ec0\u4e48"),
+            QStringLiteral("\u591a\u5c11"),
+            QStringLiteral("\u591a\u5927"),
+            QStringLiteral("\u533a\u522b"),
+        })) {
+        return false;
+    }
+    return true;
+}
+
+struct EmailWorkflowContext
+{
+    QString status = QStringLiteral("none");
+    QString reason;
+    bool awaitingEmail = false;
+    bool awaitingTemplate = false;
+    bool active = false;
+};
+
+EmailWorkflowContext detectActiveEmailWorkflowContext(const QList<AiConversationTurn>& recentTurns,
+                                                      const QString& latestText)
+{
+    EmailWorkflowContext context;
+    int end = recentTurns.size() - 1;
+    const QString latest = latestText.trimmed();
+    if (end >= 0 && !latest.isEmpty()) {
+        const AiConversationTurn& tail = recentTurns.at(end);
+        if (isUserTurn(tail) && firstTextPart(tail).trimmed() == latest)
+            --end;
+    }
+    if (end < 0)
+        return context;
+
+    const int start = qMax(0, end - 7);
+    for (int i = end; i >= start; --i) {
+        const AiConversationTurn& turn = recentTurns.at(i);
+        if (!isAssistantTurn(turn))
+            continue;
+        const QString text = firstTextPart(turn).trimmed();
+        if (text.isEmpty())
+            continue;
+        if (assistantConfirmsEmailDeliveryCompleted(text)) {
+            context.status = QStringLiteral("completed");
+            context.reason = QStringLiteral("recent_assistant_email_delivery_completed");
+            return context;
+        }
+        if (assistantAsksForEmailAddress(text)) {
+            context.status = QStringLiteral("awaiting_email");
+            context.reason = QStringLiteral("recent_assistant_asked_for_email");
+            context.awaitingEmail = true;
+            context.active = true;
+            return context;
+        }
+        if (assistantAsksForEmailTemplate(text)) {
+            context.status = QStringLiteral("awaiting_template");
+            context.reason = QStringLiteral("recent_assistant_asked_for_template");
+            context.awaitingTemplate = true;
+            context.active = true;
+            return context;
+        }
+    }
+    return context;
 }
 
 struct EmailTemplateCatalogItem
@@ -782,14 +981,21 @@ ReplyIntentDecision heuristicReplyIntent(const QString& latestText,
     const QString latest = latestText.trimmed();
     const QString email = extractEmailAddress(latest);
     const bool wantsImage = queryRequestsImageAttachment(latest) || looksLikeImageFilename(latest);
-    const bool wantsLink = containsExternalLinkRequest(latest);
+    const bool wantsLink = containsExplicitExternalLinkRequest(latest);
+    const EmailWorkflowContext emailWorkflow =
+        detectActiveEmailWorkflowContext(recentTurns, latest);
+    intent.activeEmailWorkflowStatus = emailWorkflow.status;
+    intent.activeEmailWorkflowReason = emailWorkflow.reason;
     const bool emailCompletesLinkWorkflow =
-        !email.isEmpty() && recentContextSuggestsEmailDeliveryWorkflow(recentTurns);
+        !email.isEmpty() && emailWorkflow.awaitingEmail;
     QString matchedTemplateName;
-    const QString matchedTemplateId =
-        matchEmailTemplateIdFromContext(latest, recentTurns, emailTemplates, &matchedTemplateName);
+    const QString matchedTemplateId = (wantsLink || emailCompletesLinkWorkflow || emailWorkflow.awaitingTemplate)
+        ? matchEmailTemplateIdFromContext(latest, recentTurns, emailTemplates, &matchedTemplateName)
+        : matchEmailTemplateIdFromText(latest, emailTemplates, &matchedTemplateName);
     const bool templateCompletesLinkWorkflow =
-        !matchedTemplateId.isEmpty() && recentContextSuggestsEmailDeliveryWorkflow(recentTurns);
+        emailWorkflow.awaitingTemplate
+        && latestLooksLikeStandaloneWorkflowSlot(latest)
+        && !matchedTemplateId.isEmpty();
 
     if (latestIsImageOnly) {
         intent.intent = QStringLiteral("normal_question");
@@ -815,6 +1021,7 @@ ReplyIntentDecision heuristicReplyIntent(const QString& latestText,
         intent.intent = QStringLiteral("link_request");
         intent.templateId = matchedTemplateId;
         intent.businessObjectName = matchedTemplateName;
+        intent.allowFallbackIntentOverride = true;
         const bool missingTemplate = matchedTemplateId.isEmpty();
         intent.workflow = missingTemplate
             ? QStringLiteral("collect_template_for_link")
@@ -914,6 +1121,15 @@ QString canonicalIntentName(QString intent)
     return QStringLiteral("unknown");
 }
 
+bool isLinkWorkflowName(const QString& workflow)
+{
+    const QString value = workflow.trimmed();
+    return value == QLatin1String("collect_template_for_link")
+        || value == QLatin1String("collect_email_for_link")
+        || value == QLatin1String("email_service_required")
+        || value == QLatin1String("email_delivery");
+}
+
 ReplyIntentDecision parseReplyIntentDecision(const QString& modelOutput,
                                              const ReplyIntentDecision& fallback,
                                              const QString& latestText)
@@ -934,16 +1150,37 @@ ReplyIntentDecision parseReplyIntentDecision(const QString& modelOutput,
     out.modelRouted = true;
     out.rawJson = modelOutput.trimmed().left(4000);
     out.errorText.clear();
-    out.intent = canonicalIntentName(object.value(QStringLiteral("intent")).toString(fallback.intent));
-    out.workflow = object.value(QStringLiteral("workflow")).toString(fallback.workflow).trimmed();
+    const QString modelIntent =
+        canonicalIntentName(object.value(QStringLiteral("intent")).toString(fallback.intent));
+    const QString modelWorkflow =
+        object.value(QStringLiteral("workflow")).toString(fallback.workflow).trimmed();
+    const bool modelNeedDocSearch =
+        jsonBoolValue(object, QStringLiteral("need_doc_search"), fallback.needDocSearch);
+    out.modelIntentBeforeOverride = modelIntent;
+    out.modelWorkflowBeforeOverride = modelWorkflow;
+    out.modelNeedDocSearchBeforeOverride = modelNeedDocSearch;
+    out.fallbackIntent = fallback.intent;
+    out.fallbackWorkflow = fallback.workflow;
+    out.fallbackReason = fallback.reason;
+    out.routeOverrideApplied = false;
+    out.routeOverrideReason.clear();
+    out.intent = modelIntent;
+    out.workflow = modelWorkflow;
     out.reason = object.value(QStringLiteral("reason")).toString(fallback.reason).trimmed();
     out.imageQuery = object.value(QStringLiteral("image_query")).toString(fallback.imageQuery).trimmed();
     out.replyGoal = object.value(QStringLiteral("reply_goal")).toString(fallback.replyGoal).trimmed();
     out.email = object.value(QStringLiteral("email")).toString(fallback.email).trimmed();
     out.templateId = object.value(QStringLiteral("template_id")).toString(fallback.templateId).trimmed();
     out.nextAction = object.value(QStringLiteral("next_action")).toString(fallback.nextAction).trimmed();
-    const QJsonObject businessObject = object.value(QStringLiteral("business_object")).toObject();
-    out.businessObjectName = businessObject.value(QStringLiteral("name")).toString(fallback.businessObjectName).trimmed();
+    const QJsonValue businessObjectValue = object.value(QStringLiteral("business_object"));
+    if (businessObjectValue.isObject()) {
+        const QJsonObject businessObject = businessObjectValue.toObject();
+        out.businessObjectName = businessObject.value(QStringLiteral("name"))
+                                     .toString(fallback.businessObjectName)
+                                     .trimmed();
+    } else {
+        out.businessObjectName = businessObjectValue.toString(fallback.businessObjectName).trimmed();
+    }
     if (out.email.isEmpty())
         out.email = extractEmailAddress(latestText);
     out.missingSlots = jsonStringListValue(object.value(QStringLiteral("missing_slots")));
@@ -951,16 +1188,26 @@ ReplyIntentDecision parseReplyIntentDecision(const QString& modelOutput,
     out.confidence = qBound(0.0, object.value(QStringLiteral("confidence")).toDouble(fallback.confidence), 1.0);
 
     const bool heuristicImage = queryRequestsImageAttachment(latestText) || looksLikeImageFilename(latestText);
-    const bool heuristicLink = containsExternalLinkRequest(latestText);
-    const bool fallbackLink = fallback.intent == QLatin1String("link_request");
+    const bool heuristicLink = containsExplicitExternalLinkRequest(latestText);
+    const bool fallbackLink = fallback.intent == QLatin1String("link_request")
+        && fallback.allowFallbackIntentOverride;
     const bool confidentImageIntent = out.intent == QLatin1String("image_request") && out.confidence >= 0.60;
     const bool confidentLinkIntent = out.intent == QLatin1String("link_request") && out.confidence >= 0.55;
 
     if (heuristicLink || fallbackLink || confidentLinkIntent) {
+        const QString originalIntent = out.intent;
         out.intent = QStringLiteral("link_request");
+        if (originalIntent != out.intent) {
+            out.routeOverrideApplied = true;
+            out.routeOverrideReason = heuristicLink
+                ? QStringLiteral("latest_external_link_keyword")
+                : (fallbackLink
+                       ? QStringLiteral("active_email_workflow_fallback")
+                       : QStringLiteral("confident_model_link_intent"));
+        }
         out.needEmail = true;
         out.needImageSearch = false;
-        out.needDocSearch = jsonBoolValue(object, QStringLiteral("need_doc_search"), false);
+        out.needDocSearch = modelNeedDocSearch;
         if (out.templateId.isEmpty() && !out.missingSlots.contains(QStringLiteral("template")))
             out.missingSlots << QStringLiteral("template");
         if (!out.templateId.isEmpty()
@@ -969,7 +1216,7 @@ ReplyIntentDecision parseReplyIntentDecision(const QString& modelOutput,
             out.missingSlots << QStringLiteral("email");
         if (!out.riskFlags.contains(QStringLiteral("direct_external_link_blocked")))
             out.riskFlags << QStringLiteral("direct_external_link_blocked");
-        if (out.workflow.isEmpty() || out.workflow == QLatin1String("normal_text_reply"))
+        if (!isLinkWorkflowName(out.workflow))
             out.workflow = out.templateId.isEmpty()
                 ? QStringLiteral("collect_template_for_link")
                 : (out.email.isEmpty()
@@ -982,17 +1229,25 @@ ReplyIntentDecision parseReplyIntentDecision(const QString& modelOutput,
                        ? QStringLiteral("ask_email")
                        : QStringLiteral("send_email"));
     } else if (heuristicImage || confidentImageIntent) {
+        const QString originalIntent = out.intent;
         out.intent = QStringLiteral("image_request");
-        out.needDocSearch = jsonBoolValue(object, QStringLiteral("need_doc_search"), true);
+        if (originalIntent != out.intent) {
+            out.routeOverrideApplied = true;
+            out.routeOverrideReason = heuristicImage
+                ? QStringLiteral("latest_image_keyword")
+                : QStringLiteral("confident_model_image_intent");
+        }
+        out.needDocSearch = modelNeedDocSearch;
         out.needImageSearch = jsonBoolValue(object, QStringLiteral("need_image_search"), true);
         out.needEmail = false;
         if (out.imageQuery.isEmpty())
             out.imageQuery = latestText.trimmed();
-        if (out.workflow.isEmpty() || out.workflow == QLatin1String("normal_text_reply"))
+        if (out.workflow.isEmpty() || out.workflow == QLatin1String("normal_text_reply")
+            || isLinkWorkflowName(out.workflow))
             out.workflow = QStringLiteral("send_product_image");
     } else if (out.intent == QLatin1String("human_handoff")) {
         out.needCustomerReply = jsonBoolValue(object, QStringLiteral("need_customer_reply"), true);
-        out.needDocSearch = jsonBoolValue(object, QStringLiteral("need_doc_search"), false);
+        out.needDocSearch = modelNeedDocSearch;
         out.needImageSearch = false;
         if (out.workflow.isEmpty())
             out.workflow = QStringLiteral("human_review");
@@ -1005,10 +1260,10 @@ ReplyIntentDecision parseReplyIntentDecision(const QString& modelOutput,
     } else {
         out.intent = QStringLiteral("normal_question");
         out.needCustomerReply = jsonBoolValue(object, QStringLiteral("need_customer_reply"), true);
-        out.needDocSearch = jsonBoolValue(object, QStringLiteral("need_doc_search"), fallback.needDocSearch);
+        out.needDocSearch = modelNeedDocSearch;
         out.needImageSearch = false;
         out.needEmail = false;
-        if (out.workflow.isEmpty())
+        if (out.workflow.isEmpty() || isLinkWorkflowName(out.workflow))
             out.workflow = QStringLiteral("normal_text_reply");
     }
 
@@ -1401,6 +1656,11 @@ ReplyIntentDecision AiChatAppService::classifyReplyIntent(const ReplyContextInpu
                 << "templateId=" << decision.templateId
                 << "missingSlots=" << decision.missingSlots.join(QStringLiteral(","))
                 << "emailPresent=" << !decision.email.trimmed().isEmpty()
+                << "modelIntent=" << decision.modelIntentBeforeOverride
+                << "fallbackIntent=" << decision.fallbackIntent
+                << "overrideApplied=" << decision.routeOverrideApplied
+                << "overrideReason=" << decision.routeOverrideReason
+                << "emailWorkflowStatus=" << decision.activeEmailWorkflowStatus
                 << "confidence=" << decision.confidence
                 << "templateCatalogCount=" << emailTemplates.size()
                 << "error=" << decision.errorText.left(160);

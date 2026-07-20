@@ -2016,6 +2016,37 @@ void appendAggregateAiTraceStart(const QString& traceId,
     lines << QStringLiteral("intent_source: %1").arg(intent.source);
     lines << QStringLiteral("confidence: %1").arg(intent.confidence, 0, 'f', 2);
     lines << QStringLiteral("model_routed: %1").arg(aggregateBoolLabel(intent.modelRouted));
+    lines << QStringLiteral("model_intent_before_override: %1")
+                 .arg(intent.modelIntentBeforeOverride.trimmed().isEmpty()
+                          ? QStringLiteral("(empty)")
+                          : intent.modelIntentBeforeOverride.trimmed());
+    lines << QStringLiteral("model_workflow_before_override: %1")
+                 .arg(intent.modelWorkflowBeforeOverride.trimmed().isEmpty()
+                          ? QStringLiteral("(empty)")
+                          : intent.modelWorkflowBeforeOverride.trimmed());
+    lines << QStringLiteral("model_need_doc_search_before_override: %1")
+                 .arg(aggregateBoolLabel(intent.modelNeedDocSearchBeforeOverride));
+    lines << QStringLiteral("fallback_intent: %1").arg(intent.fallbackIntent.trimmed().isEmpty()
+                                                            ? QStringLiteral("(empty)")
+                                                            : intent.fallbackIntent.trimmed());
+    lines << QStringLiteral("fallback_workflow: %1").arg(intent.fallbackWorkflow.trimmed().isEmpty()
+                                                              ? QStringLiteral("(empty)")
+                                                              : intent.fallbackWorkflow.trimmed());
+    lines << QStringLiteral("fallback_reason: %1").arg(intent.fallbackReason.trimmed().isEmpty()
+                                                            ? QStringLiteral("(empty)")
+                                                            : intent.fallbackReason.trimmed());
+    lines << QStringLiteral("route_override_applied: %1").arg(aggregateBoolLabel(intent.routeOverrideApplied));
+    lines << QStringLiteral("route_override_reason: %1").arg(intent.routeOverrideReason.trimmed().isEmpty()
+                                                                 ? QStringLiteral("(empty)")
+                                                                 : intent.routeOverrideReason.trimmed());
+    lines << QStringLiteral("active_email_workflow_status: %1")
+                 .arg(intent.activeEmailWorkflowStatus.trimmed().isEmpty()
+                          ? QStringLiteral("(empty)")
+                          : intent.activeEmailWorkflowStatus.trimmed());
+    lines << QStringLiteral("active_email_workflow_reason: %1")
+                 .arg(intent.activeEmailWorkflowReason.trimmed().isEmpty()
+                          ? QStringLiteral("(empty)")
+                          : intent.activeEmailWorkflowReason.trimmed());
     lines << QStringLiteral("reason: %1").arg(intent.reason.trimmed().isEmpty()
                                                 ? QStringLiteral("(empty)")
                                                 : intent.reason.trimmed());
