@@ -8,10 +8,11 @@ from typing import Any
 
 from .config import AppConfig, load_config
 from .detector import QianniuDetector
-from .qianniu_logging import get_logger
+from .qianniu_logging import get_listen_flow_logger, get_logger
 from .uia import is_control_available
 
 logger = get_logger(__name__)
+listen_flow_logger = get_listen_flow_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -97,17 +98,41 @@ class QianniuSender:
         dry_run: bool = True,
         chat_root: Any | None = None,
         input_field: Any | None = None,
+        allow_global_find: bool = True,
     ) -> SendResult:
         total_started_at = time.perf_counter()
+        listen_flow_logger.info(
+            "listen_flow sender_send_text_start text_len=%s dry_run=%s chat_root_available=%s input_field_available=%s allow_global_find=%s",
+            len(text),
+            dry_run,
+            bool(chat_root),
+            bool(input_field),
+            allow_global_find,
+        )
         if not text.strip():
+            listen_flow_logger.info(
+                "listen_flow sender_send_text_done ok=False stage=validate detail=empty_text elapsed_ms=%.1f",
+                (time.perf_counter() - total_started_at) * 1000.0,
+            )
             return SendResult(ok=False, stage="validate", detail="empty text")
 
         reused_chat_root = chat_root is not None
         find_chat_ms = 0.0
         if chat_root is None:
+            if not allow_global_find:
+                listen_flow_logger.info(
+                    "listen_flow sender_find_chat_done ok=False method=global_find_skipped elapsed_ms=0.0"
+                )
+                return SendResult(ok=False, stage="find_chat", detail="chat root not provided")
             stage_started_at = time.perf_counter()
+            listen_flow_logger.info("listen_flow sender_find_chat_start method=find_current_chat")
             handle = self.detector.find_current_chat()
             find_chat_ms = (time.perf_counter() - stage_started_at) * 1000.0
+            listen_flow_logger.info(
+                "listen_flow sender_find_chat_done method=find_current_chat found_chat=%s elapsed_ms=%.1f",
+                bool(handle),
+                find_chat_ms,
+            )
             if not handle:
                 logger.info(
                     "qianniu sender_timing action=send_text total_ms=%.1f find_chat_ms=%.1f ok=False stage=find_chat dry_run=%s",
@@ -115,18 +140,45 @@ class QianniuSender:
                     find_chat_ms,
                     dry_run,
                 )
+                listen_flow_logger.info(
+                    "listen_flow sender_send_text_done ok=False stage=find_chat detail=chat_window_not_found elapsed_ms=%.1f",
+                    (time.perf_counter() - total_started_at) * 1000.0,
+                )
                 return SendResult(ok=False, stage="find_chat", detail="chat window not found")
             chat_root = handle.chat_root
 
         stage_started_at = time.perf_counter()
+        listen_flow_logger.info(
+            "listen_flow sender_resolve_input_start reused_chat_root=%s input_field_provided=%s",
+            reused_chat_root,
+            bool(input_field),
+        )
         input_field = self._resolve_input_field(chat_root, input_field)
         if not input_field and reused_chat_root:
-            fallback_started_at = time.perf_counter()
-            handle = self.detector.find_current_chat()
-            find_chat_ms += (time.perf_counter() - fallback_started_at) * 1000.0
-            if handle:
-                input_field = self._resolve_input_field(handle.chat_root)
+            if allow_global_find:
+                fallback_started_at = time.perf_counter()
+                listen_flow_logger.info("listen_flow sender_find_chat_start method=fallback_find_current_chat")
+                handle = self.detector.find_current_chat()
+                fallback_ms = (time.perf_counter() - fallback_started_at) * 1000.0
+                find_chat_ms += fallback_ms
+                listen_flow_logger.info(
+                    "listen_flow sender_find_chat_done method=fallback_find_current_chat found_chat=%s elapsed_ms=%.1f",
+                    bool(handle),
+                    fallback_ms,
+                )
+                if handle:
+                    input_field = self._resolve_input_field(handle.chat_root)
+            else:
+                listen_flow_logger.info(
+                    "listen_flow sender_find_chat_done method=fallback_find_current_chat skipped=True reason=chat_root_supplied"
+                )
         resolve_input_ms = (time.perf_counter() - stage_started_at) * 1000.0
+        listen_flow_logger.info(
+            "listen_flow sender_resolve_input_done found_input=%s reused_chat_root=%s elapsed_ms=%.1f",
+            bool(input_field),
+            reused_chat_root,
+            resolve_input_ms,
+        )
         if not input_field:
             logger.info(
                 "qianniu sender_timing action=send_text total_ms=%.1f find_chat_ms=%.1f resolve_input_ms=%.1f ok=False stage=find_input dry_run=%s reused_chat_root=%s",
@@ -135,6 +187,10 @@ class QianniuSender:
                 resolve_input_ms,
                 dry_run,
                 reused_chat_root,
+            )
+            listen_flow_logger.info(
+                "listen_flow sender_send_text_done ok=False stage=find_input detail=input_field_not_found elapsed_ms=%.1f",
+                (time.perf_counter() - total_started_at) * 1000.0,
             )
             return SendResult(ok=False, stage="find_input", detail="input field not found")
 
@@ -146,11 +202,23 @@ class QianniuSender:
                 resolve_input_ms,
                 reused_chat_root,
             )
+            listen_flow_logger.info(
+                "listen_flow sender_send_text_done ok=True stage=dry_run elapsed_ms=%.1f",
+                (time.perf_counter() - total_started_at) * 1000.0,
+            )
             return SendResult(ok=True, stage="dry_run", method="none", detail="dry-run, not sent")
 
         stage_started_at = time.perf_counter()
+        listen_flow_logger.info("listen_flow sender_input_start method=auto")
         input_result = self._input_text(input_field, text)
         input_ms = (time.perf_counter() - stage_started_at) * 1000.0
+        listen_flow_logger.info(
+            "listen_flow sender_input_done ok=%s stage=%s method=%s elapsed_ms=%.1f",
+            input_result.ok,
+            input_result.stage,
+            input_result.method,
+            input_ms,
+        )
         if not input_result.ok:
             logger.info(
                 "qianniu sender_timing action=send_text total_ms=%.1f find_chat_ms=%.1f resolve_input_ms=%.1f input_ms=%.1f ok=False stage=%s method=%s dry_run=%s reused_chat_root=%s",
@@ -163,12 +231,26 @@ class QianniuSender:
                 dry_run,
                 reused_chat_root,
             )
+            listen_flow_logger.info(
+                "listen_flow sender_send_text_done ok=False stage=%s detail=%s elapsed_ms=%.1f",
+                input_result.stage,
+                input_result.detail,
+                (time.perf_counter() - total_started_at) * 1000.0,
+            )
             return input_result
 
         time.sleep(0.15)
         stage_started_at = time.perf_counter()
+        listen_flow_logger.info("listen_flow sender_enter_start method=enter_key")
         enter_result = self._send_enter(input_field)
         enter_ms = (time.perf_counter() - stage_started_at) * 1000.0
+        listen_flow_logger.info(
+            "listen_flow sender_enter_done ok=%s stage=%s method=%s elapsed_ms=%.1f",
+            enter_result.ok,
+            enter_result.stage,
+            enter_result.method,
+            enter_ms,
+        )
         logger.info(
             "qianniu sender_timing action=send_text total_ms=%.1f find_chat_ms=%.1f resolve_input_ms=%.1f input_ms=%.1f enter_ms=%.1f ok=%s stage=%s input_method=%s enter_method=%s dry_run=%s reused_chat_root=%s",
             (time.perf_counter() - total_started_at) * 1000.0,
@@ -184,8 +266,20 @@ class QianniuSender:
             reused_chat_root,
         )
         if not enter_result.ok:
+            listen_flow_logger.info(
+                "listen_flow sender_send_text_done ok=False stage=%s detail=%s elapsed_ms=%.1f",
+                enter_result.stage,
+                enter_result.detail,
+                (time.perf_counter() - total_started_at) * 1000.0,
+            )
             return enter_result
 
+        listen_flow_logger.info(
+            "listen_flow sender_send_text_done ok=True stage=sent method=%s+%s elapsed_ms=%.1f",
+            input_result.method,
+            enter_result.method,
+            (time.perf_counter() - total_started_at) * 1000.0,
+        )
         return SendResult(ok=True, stage="sent", method=f"{input_result.method}+{enter_result.method}")
 
     def send_media(
@@ -235,24 +329,62 @@ class QianniuSender:
             return enter_result
         return SendResult(ok=True, stage="sent", method=f"clipboard_file+{enter_result.method}")
 
+    def resolve_input_field(self, chat_root: Any, input_field: Any | None = None) -> Any | None:
+        return self._resolve_input_field(chat_root, input_field)
+
     def _resolve_input_field(self, chat_root: Any, input_field: Any | None = None) -> Any | None:
+        total_started_at = time.perf_counter()
         self._ensure_cache_thread()
+        had_cached_input = self.cached_input_field is not None
         if input_field is not None:
             self.cached_input_field = input_field
             self._cache_thread_id = threading.get_ident()
+            logger.info(
+                "qianniu resolve_input_timing method=provided chat_root_available=%s input_field_provided=True cache_checked=False cache_available=False cache_check_ms=0.0 find_input_ms=0.0 total_ms=%.1f found_input=True",
+                bool(chat_root),
+                (time.perf_counter() - total_started_at) * 1000.0,
+            )
             return input_field
-        if self.cached_input_field is not None and is_control_available(self.cached_input_field):
+
+        cache_check_started_at = time.perf_counter()
+        cached_available = False
+        if had_cached_input:
+            cached_available = is_control_available(self.cached_input_field)
+        cache_check_ms = (time.perf_counter() - cache_check_started_at) * 1000.0
+        if cached_available:
+            logger.info(
+                "qianniu resolve_input_timing method=cache chat_root_available=%s input_field_provided=False cache_checked=True cache_available=True cache_check_ms=%.1f find_input_ms=0.0 total_ms=%.1f found_input=True",
+                bool(chat_root),
+                cache_check_ms,
+                (time.perf_counter() - total_started_at) * 1000.0,
+            )
             return self.cached_input_field
+
+        find_started_at = time.perf_counter()
         input_field = self.detector.find_input_field(chat_root)
+        find_input_ms = (time.perf_counter() - find_started_at) * 1000.0
         if input_field:
             self.cached_input_field = input_field
             self._cache_thread_id = threading.get_ident()
+        logger.info(
+            "qianniu resolve_input_timing method=find_input_field chat_root_available=%s input_field_provided=False cache_checked=%s cache_available=%s cache_check_ms=%.1f find_input_ms=%.1f total_ms=%.1f found_input=%s",
+            bool(chat_root),
+            had_cached_input,
+            cached_available,
+            cache_check_ms,
+            find_input_ms,
+            (time.perf_counter() - total_started_at) * 1000.0,
+            bool(input_field),
+        )
         return input_field
 
     def _ensure_cache_thread(self) -> None:
         current_thread_id = threading.get_ident()
         if self._cache_thread_id in {None, current_thread_id}:
             return
+        self.invalidate_cache()
+
+    def invalidate_cache(self) -> None:
         self.cached_input_field = None
         self._cache_thread_id = None
 

@@ -2,13 +2,51 @@
 #include "../../ipc/ipcservice.h"
 #include <QDateTime>
 #include <QDebug>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QStringConverter>
 #include <QStringList>
+#include <QTextStream>
 #include <QTimer>
 #include <QUuid>
 
 namespace {
 const QString kQianniuSidecarPlatform = QStringLiteral("qianniu");
+
+QString qianniuListenFlowLogPath()
+{
+    const QString logDir = QDir(QStringLiteral(PROJECT_ROOT_DIR))
+                               .filePath(QStringLiteral("python/rpa/logs/qianniu"));
+    QDir().mkpath(logDir);
+    return QDir(logDir).filePath(QStringLiteral("qianniu_listen_flow.log"));
+}
+
+void appendQianniuListenFlowLog(const QString& event, const QStringList& fields = {})
+{
+    static QMutex mutex;
+    QMutexLocker locker(&mutex);
+
+    QFile file(qianniuListenFlowLogPath());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        qWarning() << "[QianniuListenFlow] failed to open log" << file.fileName() << file.errorString();
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    stream << '[' << QDateTime::currentDateTime().toString(Qt::ISODateWithMs) << "] "
+           << "listen_flow cpp_adapter_" << event;
+    for (const QString& field : fields) {
+        const QString trimmed = field.trimmed();
+        if (!trimmed.isEmpty())
+            stream << ' ' << trimmed;
+    }
+    stream << '\n';
+    stream.flush();
+}
 
 QString normalizedDirection(const QString& direction, const QString& senderRole, const QJsonObject& payload)
 {
@@ -62,6 +100,16 @@ QString firstNonEmpty(const QStringList& values)
             return trimmed;
     }
     return QString();
+}
+
+QString accountDisplayNameFromPayload(const QJsonObject& payload)
+{
+    const QJsonObject metadata = payload.value(QStringLiteral("metadata")).toObject();
+    return firstNonEmpty({
+        metadata.value(QStringLiteral("account_display_name")).toString(),
+        payload.value(QStringLiteral("account_display_name")).toString(),
+        metadata.value(QStringLiteral("target_account_display_name")).toString(),
+    });
 }
 
 QString outgoingContentType(const OutgoingMessagePart& part)
@@ -120,10 +168,22 @@ void QianniuRPAAdapter::startListening()
 {
     QElapsedTimer timer;
     timer.start();
+    appendQianniuListenFlowLog(
+        QStringLiteral("start_listening_enter"),
+        {
+            QStringLiteral("account_id=%1").arg(accountId()),
+            QStringLiteral("connected_before=%1").arg(m_connected ? QStringLiteral("true") : QStringLiteral("false")),
+        });
     QString serviceError;
     if (!Ipc::IpcService::instance().connectToConfiguredService(&serviceError)) {
         qWarning() << "[QianniuRPAAdapter] Python service unavailable:"
                    << serviceError << "elapsedMs=" << timer.elapsed();
+        appendQianniuListenFlowLog(
+            QStringLiteral("service_unavailable"),
+            {
+                QStringLiteral("error=%1").arg(serviceError),
+                QStringLiteral("elapsed_ms=%1").arg(timer.elapsed()),
+            });
         return;
     }
 
@@ -133,10 +193,25 @@ void QianniuRPAAdapter::startListening()
     request.accountId = accountId();
     request.parameters.insert(QStringLiteral("mode"), QStringLiteral("listen"));
     request.parameters.insert(QStringLiteral("emit_initial_snapshot"), false);
-    const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 3000);
+    appendQianniuListenFlowLog(
+        QStringLiteral("connect_command_send"),
+        {
+            QStringLiteral("request_id=%1").arg(request.requestId),
+            QStringLiteral("account_id=%1").arg(request.accountId),
+            QStringLiteral("timeout_ms=10000"),
+        });
+    const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 10000);
     if (response.status != Ipc::ResponseStatus::Success) {
         qWarning() << "[QianniuRPAAdapter] connect command failed:"
                    << response.errorMessage << "elapsedMs=" << timer.elapsed();
+        appendQianniuListenFlowLog(
+            QStringLiteral("connect_command_failed"),
+            {
+                QStringLiteral("request_id=%1").arg(request.requestId),
+                QStringLiteral("status=%1").arg(Ipc::toString(response.status)),
+                QStringLiteral("error=%1").arg(response.errorMessage),
+                QStringLiteral("elapsed_ms=%1").arg(timer.elapsed()),
+            });
         return;
     }
 
@@ -144,6 +219,14 @@ void QianniuRPAAdapter::startListening()
         connectPlatform();
     qInfo() << "[QianniuRPAAdapter] startListening with WebSocket command/event bridge"
             << "elapsedMs=" << timer.elapsed();
+    appendQianniuListenFlowLog(
+        QStringLiteral("connect_command_succeeded"),
+        {
+            QStringLiteral("request_id=%1").arg(request.requestId),
+            QStringLiteral("status=%1").arg(Ipc::toString(response.status)),
+            QStringLiteral("connected=%1").arg(m_connected ? QStringLiteral("true") : QStringLiteral("false")),
+            QStringLiteral("elapsed_ms=%1").arg(timer.elapsed()),
+        });
 }
 
 void QianniuRPAAdapter::stopListening()
@@ -199,6 +282,10 @@ void QianniuRPAAdapter::sendMessagePart(const QString& conversationId,
     request.parameters.insert(QStringLiteral("mime_type"), part.mimeType);
     request.parameters.insert(QStringLiteral("size_bytes"), double(part.sizeBytes));
     request.parameters.insert(QStringLiteral("confirm_token"), QStringLiteral("manual_confirmed_by_agent"));
+    for (auto it = part.metadata.constBegin(); it != part.metadata.constEnd(); ++it) {
+        if (!request.parameters.contains(it.key()))
+            request.parameters.insert(it.key(), it.value());
+    }
 
     QElapsedTimer commandTimer;
     commandTimer.start();
@@ -407,6 +494,7 @@ void QianniuRPAAdapter::emitConversationObserved(const QJsonObject& event)
     info.platform = platformName();
     info.platformConversationId = normalizedConversation;
     info.customerName = displayName;
+    info.accountDisplayName = accountDisplayNameFromPayload(payload);
     info.status = QStringLiteral("active");
     info.accountId = event.value(QStringLiteral("account_id")).toString();
     info.sourceType = payload.value(QStringLiteral("source_type")).toString(QStringLiteral("ui_observed"));
@@ -452,6 +540,7 @@ PlatformMessage QianniuRPAAdapter::platformMessageFromEvent(const QJsonObject& e
         msg.createdAt = QDateTime::currentDateTime();
     msg.platformMsgId = payload.value(QStringLiteral("platform_msg_id")).toString();
     msg.senderName = senderName;
+    msg.accountDisplayName = accountDisplayNameFromPayload(payload);
     msg.originalTimestamp = payload.value(QStringLiteral("metadata")).toObject().value(QStringLiteral("timestamp")).toString();
     msg.contentImagePath = payload.value(QStringLiteral("evidence_ref")).toString();
     msg.sourceType = payload.value(QStringLiteral("source_type")).toString(QStringLiteral("ui_observed"));

@@ -37,13 +37,23 @@ class DependencyUnavailable(RuntimeError):
 
 
 @contextlib.contextmanager
-def automation_guard(_label: str = "qianniu") -> Iterator[None]:
-    with _AUTOMATION_LOCK:
+def automation_guard(_label: str = "qianniu", timeout_sec: float | None = None) -> Iterator[None]:
+    if timeout_sec is None:
+        with _AUTOMATION_LOCK:
+            yield
+        return
+
+    acquired = _AUTOMATION_LOCK.acquire(timeout=max(0.0, float(timeout_sec)))
+    if not acquired:
+        raise TimeoutError(f"UIAutomation lock timeout: {_label}")
+    try:
         yield
+    finally:
+        _AUTOMATION_LOCK.release()
 
 
 @contextlib.contextmanager
-def uia_guard(label: str = "qianniu") -> Iterator[None]:
+def uia_guard(label: str = "qianniu", timeout_sec: float | None = None) -> Iterator[None]:
     try:
         import comtypes
     except ImportError as exc:
@@ -51,7 +61,7 @@ def uia_guard(label: str = "qianniu") -> Iterator[None]:
 
     comtypes.CoInitialize()
     try:
-        with automation_guard(label):
+        with automation_guard(label, timeout_sec=timeout_sec):
             yield
     finally:
         comtypes.CoUninitialize()

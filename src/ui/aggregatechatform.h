@@ -148,6 +148,7 @@ private:
     void setPlatformListenControlsEnabled(bool enabled);
     void updatePlatformListenStatusLabel();
     void refreshPythonServiceButtonUi();
+    void openQianniuAccountManagerDialog();
     void showRobotBindingMenu(const QString& platform, QWidget* button, const QPoint& pos);
     void openRobotBindingDialog(const QString& platform);
     void clearRobotBindingForPlatform(const QString& platform);

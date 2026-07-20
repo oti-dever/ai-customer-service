@@ -145,6 +145,8 @@ def main() -> int:
     traces: dict[str, list[str]] = defaultdict(list)
     trace_keys = (
         "request_id",
+        "task_id",
+        "dedupe_key",
         "event_id",
         "eventId",
         "client_message_id",

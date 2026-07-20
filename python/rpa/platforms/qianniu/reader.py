@@ -81,16 +81,16 @@ class QianniuReader:
         self._cache_thread_id = threading.get_ident()
 
         stage_started_at = time.perf_counter()
-        message_display, reused_message_display = self._resolve_message_display(active_chat_root, message_display)
-        find_display_ms = (time.perf_counter() - stage_started_at) * 1000.0
-
-        stage_started_at = time.perf_counter()
         message_web, reused_message_web = self._resolve_message_web(active_chat_root, message_web)
         find_web_ms = (time.perf_counter() - stage_started_at) * 1000.0
 
+        message_display = message_display if is_control_available(message_display) else None
+        reused_message_display = bool(message_display)
+        find_display_ms = 0.0
         display_collect_ms = 0.0
         web_collect_ms = 0.0
         display_point_ms = 0.0
+        display_rect_ms = 0.0
         web_point_ms = 0.0
         web_rect_ms = 0.0
         copy_ms = 0.0
@@ -101,12 +101,12 @@ class QianniuReader:
             copy_ms = (time.perf_counter() - stage_started_at) * 1000.0
             if copied:
                 logger.info(
-                    "qianniu read_messages_timing stage=total ms=%.1f find_chat_ms=%.1f find_display_ms=%.1f display_collect_ms=%.1f display_rect_ms=%.1f display_point_ms=%.1f find_web_ms=%.1f web_collect_ms=%.1f web_rect_ms=%.1f web_point_ms=%.1f copy_ms=%.1f ok=True source=message_web_copy reused_chat_root=%s reused_message_display=%s reused_message_web=%s text_count=1",
+                    "qianniu read_messages_timing stage=total ms=%.1f find_chat_ms=%.1f find_display_ms=%.1f display_collect_ms=%.1f display_rect_ms=%.1f display_point_ms=%.1f find_web_ms=%.1f web_collect_ms=%.1f web_rect_ms=%.1f web_point_ms=%.1f copy_ms=%.1f ok=True source=message_web_copy resolve_order=web_first reused_chat_root=%s reused_message_display=%s reused_message_web=%s text_count=1",
                     (time.perf_counter() - total_started_at) * 1000.0,
                     find_chat_ms,
                     find_display_ms,
                     display_collect_ms,
-                    0.0,
+                    display_rect_ms,
                     display_point_ms,
                     find_web_ms,
                     web_collect_ms,
@@ -118,6 +118,11 @@ class QianniuReader:
                     reused_message_web,
                 )
                 return MessageReadResult(ok=True, source="message_web_copy", texts=[copied])
+
+        if not message_display:
+            stage_started_at = time.perf_counter()
+            message_display, reused_message_display = self._resolve_message_display(active_chat_root, message_display)
+            find_display_ms = (time.perf_counter() - stage_started_at) * 1000.0
 
         if message_display:
             stage_started_at = time.perf_counter()
@@ -295,6 +300,10 @@ class QianniuReader:
         )
         return result, messages
 
+    def resolve_message_web(self, chat_root: Any, message_web: Any | None = None) -> tuple[Any | None, bool]:
+        self._ensure_cache_thread()
+        return self._resolve_message_web(chat_root, message_web)
+
     def _resolve_message_display(self, chat_root: Any, message_display: Any | None = None) -> tuple[Any | None, bool]:
         if is_control_available(message_display):
             self.cached_message_display = message_display
@@ -327,6 +336,9 @@ class QianniuReader:
         current_thread_id = threading.get_ident()
         if self._cache_thread_id in {None, current_thread_id}:
             return
+        self.invalidate_cache()
+
+    def invalidate_cache(self) -> None:
         self.cached_chat_root = None
         self.cached_message_display = None
         self.cached_message_web = None

@@ -84,6 +84,20 @@ bool isHistorySyncMessage(const PlatformMessage& msg)
         || meta.value(QStringLiteral("preserve_conversation_last_message")).toBool(false);
 }
 
+QString eventAccountId(const PlatformMessage& msg)
+{
+    const QString accountId = msg.metadata.value(QStringLiteral("_event_account_id")).toString().trimmed();
+    return accountId.isEmpty() ? msg.platform : accountId;
+}
+
+QString accountDisplayNameFromMessagePayload(const PlatformMessage& msg)
+{
+    if (!msg.accountDisplayName.trimmed().isEmpty())
+        return msg.accountDisplayName.trimmed();
+    const QJsonObject meta = msg.metadata.value(QStringLiteral("metadata")).toObject();
+    return meta.value(QStringLiteral("account_display_name")).toString().trimmed();
+}
+
 } // namespace
 
 MessageRouter::MessageRouter(QObject* parent)
@@ -179,8 +193,14 @@ void MessageRouter::sendMessage(int conversationId, const QString& text, const Q
 
 void MessageRouter::sendPayload(int conversationId, const OutgoingMessagePayload& payload)
 {
-    for (const OutgoingMessagePart& part : payload.parts)
-        sendMessage(conversationId, part);
+    for (const OutgoingMessagePart& part : payload.parts) {
+        OutgoingMessagePart merged = part;
+        for (auto it = payload.metadata.constBegin(); it != payload.metadata.constEnd(); ++it) {
+            if (!merged.metadata.contains(it.key()))
+                merged.metadata.insert(it.key(), it.value());
+        }
+        sendMessage(conversationId, merged);
+    }
 }
 
 void MessageRouter::sendMessage(int conversationId,
@@ -254,6 +274,8 @@ void MessageRouter::sendMessage(int conversationId,
     pendingMessage.metadata.insert(QStringLiteral("file_name"), part.fileName);
     pendingMessage.metadata.insert(QStringLiteral("mime_type"), part.mimeType);
     pendingMessage.metadata.insert(QStringLiteral("size_bytes"), double(part.sizeBytes));
+    if (!conv->accountDisplayName.trimmed().isEmpty())
+        pendingMessage.metadata.insert(QStringLiteral("account_display_name"), conv->accountDisplayName.trimmed());
     pendingMessage.clientMessageId = normalizedClientMessageId;
     QElapsedTimer cacheTimer;
     cacheTimer.start();
@@ -357,6 +379,8 @@ void MessageRouter::onConversationObserved(const ConversationInfo& conv)
     unified.platformConversationId = conv.platformConversationId;
     unified.accountId = conv.accountId;
     unified.title = conv.customerName;
+    if (!conv.accountDisplayName.trimmed().isEmpty())
+        unified.metadata.insert(QStringLiteral("account_display_name"), conv.accountDisplayName.trimmed());
     unified.status = Models::ConversationStatus::Active;
     unified.sourceType = Models::sourceTypeFromString(conv.sourceType);
     unified.confidence = conv.confidence;
@@ -373,7 +397,8 @@ void MessageRouter::onConversationObserved(const ConversationInfo& conv)
                 id,
                 conv.accountId,
                 conv.platformConversationId,
-                conv.customerName);
+                conv.customerName,
+                unified.metadata);
         }
         auto persisted = dao.findById(id);
         if (persisted) {
@@ -744,7 +769,9 @@ int MessageRouter::ensureConversation(const PlatformMessage& msg)
             Models::Conversation observedConversation;
             observedConversation.platformType = Models::platformTypeFromString(msg.platform);
             observedConversation.platformConversationId = msg.platformConversationId;
-            observedConversation.accountId = msg.platform;
+            observedConversation.accountId = eventAccountId(msg);
+            observedConversation.metadata.insert(QStringLiteral("account_display_name"),
+                                                 accountDisplayNameFromMessagePayload(msg));
             observedConversation.title = msg.customerName;
             observedConversation.status = Models::ConversationStatus::Active;
             observedConversation.sourceType = Models::sourceTypeFromString(msg.sourceType);
@@ -759,8 +786,10 @@ int MessageRouter::ensureConversation(const PlatformMessage& msg)
     Models::Conversation observedConversation;
     observedConversation.platformType = Models::platformTypeFromString(msg.platform);
     observedConversation.platformConversationId = msg.platformConversationId;
-    observedConversation.accountId = msg.platform;
+    observedConversation.accountId = eventAccountId(msg);
     observedConversation.title = msg.customerName;
+    observedConversation.metadata.insert(QStringLiteral("account_display_name"),
+                                         accountDisplayNameFromMessagePayload(msg));
     observedConversation.status = Models::ConversationStatus::Active;
     observedConversation.sourceType = Models::sourceTypeFromString(msg.sourceType);
     observedConversation.confidence = msg.confidence;
@@ -773,7 +802,7 @@ int MessageRouter::ensureConversation(const PlatformMessage& msg)
             WechatMessageDao wechatDao;
             wechatDao.upsertConversation(
                 id,
-                msg.platform,
+                eventAccountId(msg),
                 msg.platformConversationId,
                 msg.customerName,
                 msg.metadata);

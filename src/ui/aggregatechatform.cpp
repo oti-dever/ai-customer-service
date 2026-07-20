@@ -49,6 +49,7 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -1885,9 +1886,41 @@ QString aggregateAutoReplyLogPath()
             .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd"))));
 }
 
+QString qianniuListenFlowLogPath()
+{
+    const QString logDir = QDir(QStringLiteral(PROJECT_ROOT_DIR))
+                               .filePath(QStringLiteral("python/rpa/logs/qianniu"));
+    QDir().mkpath(logDir);
+    return QDir(logDir).filePath(QStringLiteral("qianniu_listen_flow.log"));
+}
+
 QString aggregateLogField(const QString& key, const QString& value)
 {
     return QStringLiteral("%1: %2").arg(key, value.trimmed().isEmpty() ? QStringLiteral("(empty)") : value);
+}
+
+void appendQianniuListenFlowLog(const QString& event, const QStringList& fields = {})
+{
+    static QMutex mutex;
+    QMutexLocker locker(&mutex);
+
+    QFile file(qianniuListenFlowLogPath());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        qWarning() << "[QianniuListenFlow] failed to open log" << file.fileName() << file.errorString();
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    stream << '[' << QDateTime::currentDateTime().toString(Qt::ISODateWithMs) << "] "
+           << "listen_flow cpp_aggregate_" << event;
+    for (const QString& field : fields) {
+        const QString trimmed = field.trimmed();
+        if (!trimmed.isEmpty())
+            stream << ' ' << trimmed;
+    }
+    stream << '\n';
+    stream.flush();
 }
 
 void appendAggregateAutoReplyLog(const QString& event, const QStringList& fields = {})
@@ -2509,6 +2542,7 @@ public:
     void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
     {
         const ConversationInfo conv = index.data(ConversationListModel::ConversationRole).value<ConversationInfo>();
+        const QString displayTitle = index.data(Qt::DisplayRole).toString();
         const QString lastDirection = index.data(ConversationListModel::LastDirectionRole).toString();
         const bool selected = option.state.testFlag(QStyle::State_Selected);
         const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
@@ -2588,7 +2622,9 @@ public:
 
         painter->setFont(titleFont);
         painter->setPen(QColor(QStringLiteral("#111827")));
-        const QString title = titleFm.elidedText(conv.customerName, Qt::ElideRight, titleMaxWidth);
+        const QString title = titleFm.elidedText(displayTitle.isEmpty() ? conv.customerName : displayTitle,
+                                                Qt::ElideRight,
+                                                titleMaxWidth);
         painter->drawText(QRect(textRect.left(), titleY, titleMaxWidth, titleFm.height()),
                           Qt::AlignLeft | Qt::AlignVCenter, title);
 
@@ -3749,6 +3785,7 @@ ConversationInfo serviceConversationInfo(const QJsonObject& object)
     info.platformConversationId =
         object.value(QStringLiteral("platform_conversation_id")).toString().trimmed();
     info.accountId = object.value(QStringLiteral("account_id")).toString().trimmed();
+    info.accountDisplayName = object.value(QStringLiteral("account_display_name")).toString().trimmed();
     info.customerName = object.value(QStringLiteral("customer_name")).toString().trimmed();
     if (info.customerName.isEmpty())
         info.customerName = info.platformConversationId;
@@ -4978,13 +5015,94 @@ void AggregateChatForm::onPlatformFilterButtonIdClicked(int id)
     refreshConversationList();
 }
 
+void AggregateChatForm::openQianniuAccountManagerDialog()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("千牛账号管理"));
+    dialog.setMinimumSize(360, 280);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* hint = new QLabel(QStringLiteral("当前千牛已登录店铺账号"), &dialog);
+    hint->setObjectName(QStringLiteral("dialogHintLabel"));
+    layout->addWidget(hint);
+
+    auto* accountList = new QListWidget(&dialog);
+    accountList->setSelectionMode(QAbstractItemView::NoSelection);
+    layout->addWidget(accountList, 1);
+
+    auto* statusLabel = new QLabel(&dialog);
+    statusLabel->setWordWrap(true);
+    layout->addWidget(statusLabel);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto* refreshButton = buttons->addButton(QStringLiteral("刷新"), QDialogButtonBox::ActionRole);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    auto loadAccounts = [accountList, statusLabel, refreshButton]() {
+        accountList->clear();
+        statusLabel->clear();
+        refreshButton->setEnabled(false);
+
+        QString serviceError;
+        if (!Ipc::IpcService::instance().connectToConfiguredService(&serviceError)) {
+            statusLabel->setText(serviceError.isEmpty()
+                                     ? QStringLiteral("无法连接 Python 服务。")
+                                     : serviceError);
+            refreshButton->setEnabled(true);
+            return;
+        }
+
+        Ipc::PlatformCommandRequest request;
+        request.commandType = QStringLiteral("list_accounts");
+        request.platform = QStringLiteral("qianniu");
+        request.accountId = QStringLiteral("qianniu");
+        request.parameters.insert(QStringLiteral("fresh"), true);
+        const auto response = Ipc::IpcService::instance().sendPlatformCommandViaWebSocket(request, 5000);
+        if (response.status != Ipc::ResponseStatus::Success) {
+            statusLabel->setText(response.errorMessage.isEmpty()
+                                     ? QStringLiteral("读取千牛账号失败。")
+                                     : response.errorMessage);
+            refreshButton->setEnabled(true);
+            return;
+        }
+
+        const QJsonArray accounts = response.result.value(QStringLiteral("accounts")).toArray();
+        QStringList names;
+        for (const QJsonValue& value : accounts) {
+            const QString name = value.toObject().value(QStringLiteral("display_name")).toString().trimmed();
+            if (!name.isEmpty())
+                names.append(name);
+        }
+        names.removeDuplicates();
+        for (const QString& name : names)
+            accountList->addItem(name);
+
+        if (names.isEmpty())
+            statusLabel->setText(QStringLiteral("未识别到当前已登录的千牛店铺账号。"));
+        else
+            statusLabel->setText(QStringLiteral("共 %1 个账号").arg(names.size()));
+        refreshButton->setEnabled(true);
+    };
+
+    connect(refreshButton, &QPushButton::clicked, &dialog, loadAccounts);
+    loadAccounts();
+    dialog.exec();
+}
+
 void AggregateChatForm::showRobotBindingMenu(const QString& platform, QWidget* button, const QPoint& pos)
 {
     if (platform.trimmed().isEmpty() || !button)
         return;
 
     QMenu menu(this);
-    const QString displayName = listenPlatformDisplayName(platform);
+    const QString normalizedPlatform = platform.trimmed().toLower();
+    const QString displayName = listenPlatformDisplayName(normalizedPlatform);
+    QAction* manageQianniuAccountsAction = nullptr;
+    if (normalizedPlatform == QLatin1String("qianniu")) {
+        manageQianniuAccountsAction = menu.addAction(QStringLiteral("管理账号"));
+        menu.addSeparator();
+    }
     QAction* bindAction = menu.addAction(QStringLiteral("绑定机器人..."));
     QAction* viewAction = menu.addAction(QStringLiteral("查看当前机器人"));
     QAction* clearAction = menu.addAction(QStringLiteral("解绑机器人"));
@@ -4992,12 +5110,16 @@ void AggregateChatForm::showRobotBindingMenu(const QString& platform, QWidget* b
     if (!chosen)
         return;
 
+    if (chosen == manageQianniuAccountsAction) {
+        openQianniuAccountManagerDialog();
+        return;
+    }
     if (chosen == bindAction) {
-        openRobotBindingDialog(platform);
+        openRobotBindingDialog(normalizedPlatform);
         return;
     }
     if (chosen == clearAction) {
-        clearRobotBindingForPlatform(platform);
+        clearRobotBindingForPlatform(normalizedPlatform);
         return;
     }
     if (chosen == viewAction) {
@@ -5405,18 +5527,61 @@ void AggregateChatForm::refreshPlatformListenStateFromService()
 
 void AggregateChatForm::onStartPlatformListeningClicked()
 {
+    QElapsedTimer flowTimer;
+    flowTimer.start();
     const QStringList platforms = selectedPlatformListenTargets();
+    const bool qianniuSelected = platforms.contains(QStringLiteral("qianniu"));
+    if (qianniuSelected) {
+        appendQianniuListenFlowLog(
+            QStringLiteral("start_button_clicked"),
+            {
+                QStringLiteral("selected_platforms=%1").arg(platforms.join(QLatin1Char(','))),
+                QStringLiteral("python_service_available=%1").arg(aggregateBoolLabel(m_pythonServiceAvailable)),
+                QStringLiteral("registered_platforms=%1").arg(sortedAggregatePlatformSet(m_registeredListenPlatforms).join(QLatin1Char(','))),
+                QStringLiteral("service_listening_platforms=%1").arg(sortedAggregatePlatformSet(m_serviceListeningPlatforms).join(QLatin1Char(','))),
+                QStringLiteral("manager_listening_platforms=%1").arg(aggregateManagerListeningPlatforms().join(QLatin1Char(','))),
+            });
+    }
     if (platforms.isEmpty()) {
+        if (qianniuSelected) {
+            appendQianniuListenFlowLog(
+                QStringLiteral("start_no_platform_selected"),
+                { QStringLiteral("elapsed_ms=%1").arg(flowTimer.elapsed()) });
+        }
         showStatusMessage(QStringLiteral("请先选择要监听的平台"), 3000);
         return;
     }
 
     QStringList started;
     for (const QString& platform : platforms) {
-        if (ConversationManager::instance().startPlatformListening(platform))
+        QElapsedTimer platformTimer;
+        platformTimer.start();
+        const bool startedPlatform = ConversationManager::instance().startPlatformListening(platform);
+        if (qianniuSelected && platform == QLatin1String("qianniu")) {
+            appendQianniuListenFlowLog(
+                QStringLiteral("manager_start_returned"),
+                {
+                    QStringLiteral("platform=%1").arg(platform),
+                    QStringLiteral("started=%1").arg(aggregateBoolLabel(startedPlatform)),
+                    QStringLiteral("manager_is_listening=%1").arg(aggregateBoolLabel(ConversationManager::instance().isPlatformListening(platform))),
+                    QStringLiteral("elapsed_ms=%1").arg(platformTimer.elapsed()),
+                });
+        }
+        if (startedPlatform)
             started.append(listenPlatformDisplayName(platform));
     }
     refreshPlatformListenStateFromService();
+    if (qianniuSelected) {
+        appendQianniuListenFlowLog(
+            QStringLiteral("service_state_refreshed"),
+            {
+                QStringLiteral("service_has_qianniu=%1").arg(aggregateBoolLabel(m_serviceListeningPlatforms.contains(QStringLiteral("qianniu")))),
+                QStringLiteral("manager_has_qianniu=%1").arg(aggregateBoolLabel(ConversationManager::instance().isPlatformListening(QStringLiteral("qianniu")))),
+                QStringLiteral("registered_platforms=%1").arg(sortedAggregatePlatformSet(m_registeredListenPlatforms).join(QLatin1Char(','))),
+                QStringLiteral("service_listening_platforms=%1").arg(sortedAggregatePlatformSet(m_serviceListeningPlatforms).join(QLatin1Char(','))),
+                QStringLiteral("elapsed_ms=%1").arg(flowTimer.elapsed()),
+            });
+    }
     if (started.isEmpty()) {
         for (const QString& platform : platforms) {
             if (m_serviceListeningPlatforms.contains(platform)
@@ -5426,8 +5591,28 @@ void AggregateChatForm::onStartPlatformListeningClicked()
         }
     }
     if (started.isEmpty()) {
+        if (qianniuSelected) {
+            appendQianniuListenFlowLog(
+                QStringLiteral("start_failed"),
+                {
+                    QStringLiteral("selected_platforms=%1").arg(platforms.join(QLatin1Char(','))),
+                    QStringLiteral("service_has_qianniu=%1").arg(aggregateBoolLabel(m_serviceListeningPlatforms.contains(QStringLiteral("qianniu")))),
+                    QStringLiteral("manager_has_qianniu=%1").arg(aggregateBoolLabel(ConversationManager::instance().isPlatformListening(QStringLiteral("qianniu")))),
+                    QStringLiteral("elapsed_ms=%1").arg(flowTimer.elapsed()),
+                });
+        }
         showStatusMessage(QStringLiteral("平台监听启动失败，请检查 Python 服务"), 5000);
         return;
+    }
+    if (qianniuSelected) {
+        appendQianniuListenFlowLog(
+            QStringLiteral("start_succeeded"),
+            {
+                QStringLiteral("started_display=%1").arg(started.join(QStringLiteral("、"))),
+                QStringLiteral("service_has_qianniu=%1").arg(aggregateBoolLabel(m_serviceListeningPlatforms.contains(QStringLiteral("qianniu")))),
+                QStringLiteral("manager_has_qianniu=%1").arg(aggregateBoolLabel(ConversationManager::instance().isPlatformListening(QStringLiteral("qianniu")))),
+                QStringLiteral("elapsed_ms=%1").arg(flowTimer.elapsed()),
+            });
     }
     showStatusMessage(QStringLiteral("已请求监听：%1").arg(started.join(QStringLiteral("、"))), 4000);
 }
@@ -9708,6 +9893,8 @@ void AggregateChatForm::onAutoReplyCompleted()
         maxMessages,
         &rawMessageCount);
     OutgoingMessagePayload payload;
+    payload.metadata.insert(QStringLiteral("send_source"), QStringLiteral("auto_reply"));
+    payload.metadata.insert(QStringLiteral("auto_reply_trace_id"), traceId);
     for (const QString& message : textMessages) {
         OutgoingMessagePart textPart;
         textPart.type = OutgoingPartType::Text;

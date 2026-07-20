@@ -4,6 +4,7 @@
 #include "qqmessagedao.h"
 #include "database.h"
 #include <QDebug>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
 #include <QSqlError>
@@ -92,6 +93,38 @@ QString rowString(const QSqlQuery& q, const QString& name, const QString& fallba
     return value.isValid() && !value.isNull() ? value.toString() : fallback;
 }
 
+QString accountDisplayNameFromRawPayload(const QString& raw)
+{
+    if (raw.trimmed().isEmpty())
+        return {};
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
+    if (!doc.isObject())
+        return {};
+    const QJsonObject payload = doc.object();
+    const QJsonObject metadata = payload.value(QStringLiteral("metadata")).toObject();
+    const QStringList values = {
+        metadata.value(QStringLiteral("account_display_name")).toString(),
+        payload.value(QStringLiteral("account_display_name")).toString(),
+        metadata.value(QStringLiteral("target_account_display_name")).toString(),
+    };
+    for (const QString& value : values) {
+        const QString trimmed = value.trimmed();
+        if (!trimmed.isEmpty())
+            return trimmed;
+    }
+    return {};
+}
+
+QString conversationSelectColumns()
+{
+    return QStringLiteral("c.*, qc.raw_payload_json AS qianniu_raw_payload_json");
+}
+
+QString conversationJoinSql()
+{
+    return QStringLiteral(" LEFT JOIN qianniu_conversations qc ON qc.conversation_id = c.id ");
+}
+
 int rowInt(const QSqlQuery& q, const QString& name, int fallback = 0)
 {
     const QVariant value = rowValue(q, name);
@@ -113,7 +146,8 @@ std::optional<ConversationInfo> findLegacyShortConversation(const QString& platf
         return std::nullopt;
 
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare(QStringLiteral("SELECT * FROM conversations WHERE platform = :p AND platform_conversation_id = :pcid"));
+    q.prepare(QStringLiteral("SELECT %1 FROM conversations c %2 WHERE c.platform = :p AND c.platform_conversation_id = :pcid")
+                  .arg(conversationSelectColumns(), conversationJoinSql()));
     q.bindValue(QStringLiteral(":p"), platform);
     q.bindValue(QStringLiteral(":pcid"), displayKey);
     if (!q.exec() || !q.next())
@@ -158,6 +192,8 @@ static ConversationInfo recordFromQuery(QSqlQuery& q)
     c.status = rowString(q, QStringLiteral("status"));
     c.createdAt = rowDateTime(q, QStringLiteral("created_at"));
     c.accountId = rowString(q, QStringLiteral("account_id"));
+    if (c.platform == QLatin1String("qianniu"))
+        c.accountDisplayName = accountDisplayNameFromRawPayload(rowString(q, QStringLiteral("qianniu_raw_payload_json")));
     c.sourceType = QStringLiteral("ui_observed");
     c.confidence = 100;
     c.updatedAt = rowDateTime(q, QStringLiteral("updated_at"));
@@ -406,7 +442,8 @@ int ConversationDao::deleteMissingSnapshotCacheConversations(
 std::optional<ConversationInfo> ConversationDao::findById(int id)
 {
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare("SELECT * FROM conversations WHERE id = :id");
+    q.prepare(QStringLiteral("SELECT %1 FROM conversations c %2 WHERE c.id = :id")
+                  .arg(conversationSelectColumns(), conversationJoinSql()));
     q.bindValue(":id", id);
     if (!q.exec() || !q.next())
         return std::nullopt;
@@ -416,7 +453,8 @@ std::optional<ConversationInfo> ConversationDao::findById(int id)
 std::optional<ConversationInfo> ConversationDao::findByPlatformId(const QString& platform, const QString& platformConvId)
 {
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare("SELECT * FROM conversations WHERE platform = :p AND platform_conversation_id = :pcid");
+    q.prepare(QStringLiteral("SELECT %1 FROM conversations c %2 WHERE c.platform = :p AND c.platform_conversation_id = :pcid")
+                  .arg(conversationSelectColumns(), conversationJoinSql()));
     q.bindValue(":p", platform);
     q.bindValue(":pcid", platformConvId);
     if (!q.exec())
@@ -429,7 +467,8 @@ std::optional<ConversationInfo> ConversationDao::findByPlatformId(const QString&
 QVector<ConversationInfo> ConversationDao::listByStatus(const QString& status, int limit, int offset)
 {
     QSqlQuery q(Database::getInstance().connection());
-    q.prepare("SELECT * FROM conversations WHERE status = :s ORDER BY last_time DESC LIMIT :lim OFFSET :off");
+    q.prepare(QStringLiteral("SELECT %1 FROM conversations c %2 WHERE c.status = :s ORDER BY c.last_time DESC LIMIT :lim OFFSET :off")
+                  .arg(conversationSelectColumns(), conversationJoinSql()));
     q.bindValue(":s", status);
     q.bindValue(":lim", limit);
     q.bindValue(":off", offset);
@@ -445,11 +484,12 @@ QVector<ConversationInfo> ConversationDao::listAll(int limit, int offset)
 {
     QSqlQuery q(Database::getInstance().connection());
     const QString deletedFilter = tableHasColumn(QStringLiteral("conversations"), QStringLiteral("deleted_at"))
-        ? QStringLiteral("WHERE deleted_at IS NULL OR deleted_at = ''")
+        ? QStringLiteral("WHERE c.deleted_at IS NULL OR c.deleted_at = ''")
         : QString();
     q.prepare(QStringLiteral(
-        "SELECT * FROM conversations %1 "
-        "ORDER BY last_time DESC, id DESC LIMIT :lim OFFSET :off").arg(deletedFilter));
+        "SELECT %1 FROM conversations c %2 %3 "
+        "ORDER BY c.last_time DESC, c.id DESC LIMIT :lim OFFSET :off")
+                  .arg(conversationSelectColumns(), conversationJoinSql(), deletedFilter));
     q.bindValue(":lim", limit);
     q.bindValue(":off", offset);
     q.exec();

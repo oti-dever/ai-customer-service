@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from rpa.platforms.qianniu.adapter import PLATFORM_QIANNIU, QianniuSidecarAdapter
+from rpa.platforms.qianniu.qianniu_logging import get_listen_flow_logger as get_qianniu_listen_flow_logger
 from rpa.platforms.pdd_web.adapter import PLATFORM_PDD_WEB, PddWebSidecarAdapter
 from rpa.platforms.pdd_web.pdd_logging import get_logger as get_pdd_logger
 from rpa.platforms.qq.adapter import PLATFORM_QQ, QQSidecarAdapter
@@ -24,6 +25,7 @@ from .truth_store import PythonServiceTruthStore
 
 MUTATION_OBSERVATION_QUIET_SECONDS = 3.0
 PDD_LOGGER = get_pdd_logger(__name__)
+QIANNIU_LISTEN_FLOW_LOGGER = get_qianniu_listen_flow_logger(__name__)
 
 
 def normalize_platform(value: Any) -> str:
@@ -344,6 +346,19 @@ class _CommandWebSocketServer:
                     continue
 
                 request_id = clean(request_json.get("request_id"))
+                platform = normalize_platform(request_json.get("platform"))
+                command = clean(request_json.get("command"))
+                if platform == PLATFORM_QIANNIU:
+                    params = request_json.get("parameters")
+                    if not isinstance(params, dict):
+                        params = {}
+                    QIANNIU_LISTEN_FLOW_LOGGER.info(
+                        "listen_flow command_ws_received request_id=%s command=%s account_id=%s params=%s",
+                        request_id,
+                        command,
+                        clean(request_json.get("account_id")),
+                        sorted(params.keys()),
+                    )
                 try:
                     response_json = self._bridge.command(request_json)
                 except Exception as exc:
@@ -353,6 +368,25 @@ class _CommandWebSocketServer:
                         request_id,
                         error=clean(str(exc)) or "command_failed",
                         result={},
+                    )
+                    if platform == PLATFORM_QIANNIU:
+                        QIANNIU_LISTEN_FLOW_LOGGER.exception(
+                            "listen_flow command_ws_failed request_id=%s command=%s error=%s",
+                            request_id,
+                            command,
+                            clean(str(exc)),
+                        )
+                if platform == PLATFORM_QIANNIU:
+                    result = response_json.get("result")
+                    if not isinstance(result, dict):
+                        result = {}
+                    QIANNIU_LISTEN_FLOW_LOGGER.info(
+                        "listen_flow command_ws_response request_id=%s command=%s status=%s error=%s result_keys=%s",
+                        request_id,
+                        command,
+                        clean(response_json.get("status")),
+                        clean(response_json.get("error")),
+                        sorted(result.keys()),
                     )
                 self._send_json(client, response_json)
         except socket.timeout:
@@ -471,18 +505,50 @@ class RpaBridge:
         self._event_client.start()
 
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request_id = clean(payload.get("request_id"))
+        command = clean(payload.get("command"))
+        platform_hint = normalize_platform(payload.get("platform")) or PLATFORM_WECHAT
+        wait_started_at = time.perf_counter()
+        if platform_hint == PLATFORM_QIANNIU:
+            QIANNIU_LISTEN_FLOW_LOGGER.info(
+                "listen_flow bridge_command_wait request_id=%s command=%s platform=%s",
+                request_id,
+                command,
+                platform_hint,
+            )
         with self._command_lock:
+            lock_wait_ms = (time.perf_counter() - wait_started_at) * 1000.0
             platform = normalize_platform(payload.get("platform")) or PLATFORM_WECHAT
+            if platform == PLATFORM_QIANNIU:
+                QIANNIU_LISTEN_FLOW_LOGGER.info(
+                    "listen_flow bridge_command_lock_acquired request_id=%s command=%s platform=%s wait_ms=%.1f",
+                    request_id,
+                    command,
+                    platform,
+                    lock_wait_ms,
+                )
             adapter = self._adapters.get(platform)
             if adapter is None:
+                if platform == PLATFORM_QIANNIU:
+                    QIANNIU_LISTEN_FLOW_LOGGER.warning(
+                        "listen_flow bridge_command_unsupported_platform request_id=%s command=%s platform=%s",
+                        request_id,
+                        command,
+                        platform,
+                    )
                 return payload_status(
                     "error",
                     clean(payload.get("request_id")),
                     error=f"unsupported_platform:{platform}",
                     result={},
                 )
-            command = clean(payload.get("command"))
             if self._mode == "formal" and command in {"send_message", "prepare_reply_draft"}:
+                if platform == PLATFORM_QIANNIU:
+                    QIANNIU_LISTEN_FLOW_LOGGER.warning(
+                        "listen_flow bridge_command_blocked_formal_mode request_id=%s command=%s",
+                        request_id,
+                        command,
+                    )
                 return payload_status(
                     "error",
                     clean(payload.get("request_id")),
@@ -520,7 +586,21 @@ class RpaBridge:
                         "client_message_id": client_message_id,
                     },
                 )
-            return adapter.command(normalized_payload)
+            response = adapter.command(normalized_payload)
+            if platform == PLATFORM_QIANNIU:
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    result = {}
+                QIANNIU_LISTEN_FLOW_LOGGER.info(
+                    "listen_flow bridge_command_done request_id=%s command=%s status=%s error=%s result_keys=%s total_ms=%.1f",
+                    request_id,
+                    command,
+                    clean(response.get("status")),
+                    clean(response.get("error")),
+                    sorted(result.keys()),
+                    (time.perf_counter() - wait_started_at) * 1000.0,
+                )
+            return response
 
     def clear_conversation_messages(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._apply_conversation_mutation(payload, mutation_type="clear_messages")
@@ -641,16 +721,38 @@ class RpaBridge:
         return None
 
     def _run_async_send_message(self, platform: str, adapter: Any, payload: dict[str, Any]) -> None:
-        with self._command_lock:
-            request_id = clean(payload.get("request_id"))
-            try:
-                response = adapter.command(payload)
-            except Exception as exc:
-                logging.exception("Async send_message raised request_id=%s platform=%s", request_id, platform)
-                self._emit_send_failed(payload, str(exc))
-                return
-            if response.get("status") != "success":
-                self._emit_send_failed(payload, clean(response.get("error")) or "send_message_failed")
+        request_id = clean(payload.get("request_id"))
+        started_at = time.perf_counter()
+        if normalize_platform(platform) == PLATFORM_QIANNIU:
+            QIANNIU_LISTEN_FLOW_LOGGER.info(
+                "listen_flow bridge_async_send_start request_id=%s platform=%s",
+                request_id,
+                platform,
+            )
+        try:
+            response = adapter.command(payload)
+        except Exception as exc:
+            logging.exception("Async send_message raised request_id=%s platform=%s", request_id, platform)
+            if normalize_platform(platform) == PLATFORM_QIANNIU:
+                QIANNIU_LISTEN_FLOW_LOGGER.exception(
+                    "listen_flow bridge_async_send_exception request_id=%s platform=%s elapsed_ms=%.1f",
+                    request_id,
+                    platform,
+                    (time.perf_counter() - started_at) * 1000.0,
+                )
+            self._emit_send_failed(payload, str(exc))
+            return
+        if normalize_platform(platform) == PLATFORM_QIANNIU:
+            QIANNIU_LISTEN_FLOW_LOGGER.info(
+                "listen_flow bridge_async_send_done request_id=%s platform=%s status=%s error=%s elapsed_ms=%.1f",
+                request_id,
+                platform,
+                clean(response.get("status")),
+                clean(response.get("error")),
+                (time.perf_counter() - started_at) * 1000.0,
+            )
+        if response.get("status") != "success":
+            self._emit_send_failed(payload, clean(response.get("error")) or "send_message_failed")
 
     def _emit_send_failed(self, payload: dict[str, Any], reason: str) -> None:
         params = payload.get("parameters")
@@ -683,21 +785,34 @@ class RpaBridge:
         return self._truth_store.replay_events(platform=normalize_platform(platform), cursor=cursor, limit=limit)
 
     def platforms(self) -> dict[str, Any]:
+        started_at = time.perf_counter()
+
         def adapter_status(platform: str, display_name: str, adapter: Any) -> dict[str, Any]:
-            connected = bool(getattr(adapter, "_connected", False))
-            observer_thread = getattr(adapter, "_observer_thread", None)
-            observer_running = bool(observer_thread is not None and observer_thread.is_alive())
-            account_id = clean(getattr(adapter, "_account_id", ""))
+            status_started_at = time.perf_counter()
             health: dict[str, Any] = {}
-            try:
-                raw_health = adapter.health()
-                if isinstance(raw_health, dict):
-                    raw_detail = raw_health.get("health")
-                    health = raw_detail if isinstance(raw_detail, dict) else {}
-            except Exception:
-                logging.exception("failed to collect platform health platform=%s", platform)
+            snapshot: dict[str, Any] = {}
+            snapshot_getter = getattr(adapter, "status_snapshot", None)
+            if callable(snapshot_getter):
+                try:
+                    raw_snapshot = snapshot_getter()
+                    if isinstance(raw_snapshot, dict):
+                        snapshot = raw_snapshot
+                except Exception:
+                    logging.exception("failed to collect platform status snapshot platform=%s", platform)
+            connected = bool(snapshot.get("connected", getattr(adapter, "_connected", False)))
+            observer_thread = getattr(adapter, "_observer_thread", None)
+            observer_running = bool(
+                snapshot.get(
+                    "observer_running",
+                    observer_thread is not None and observer_thread.is_alive(),
+                )
+            )
+            account_id = clean(snapshot.get("account_id", getattr(adapter, "_account_id", "")))
+            raw_health = snapshot.get("health")
+            if isinstance(raw_health, dict):
+                health = raw_health
             listening = connected and (observer_running or platform == PLATFORM_PDD_WEB)
-            return {
+            item = {
                 "platform": platform,
                 "display_name": display_name,
                 "registered": True,
@@ -709,8 +824,22 @@ class RpaBridge:
                 "healthy": bool(health.get("healthy")),
                 "reason": clean(health.get("reason")),
             }
+            if platform == PLATFORM_QIANNIU:
+                QIANNIU_LISTEN_FLOW_LOGGER.info(
+                    "listen_flow platforms_status_item connected=%s listening=%s observer_running=%s account_id=%s healthy=%s probe_status=%s reason=%s elapsed_ms=%.1f source=%s",
+                    connected,
+                    listening,
+                    observer_running,
+                    account_id,
+                    bool(health.get("healthy")),
+                    clean(health.get("probe_status")),
+                    clean(health.get("reason")),
+                    (time.perf_counter() - status_started_at) * 1000.0,
+                    "snapshot" if snapshot else "attributes",
+                )
+            return item
 
-        return {
+        response = {
             "status": "success",
             "mode": self._mode,
             "platforms": [
@@ -720,6 +849,12 @@ class RpaBridge:
                 adapter_status(PLATFORM_QQ, "QQ", self._qq),
             ],
         }
+        QIANNIU_LISTEN_FLOW_LOGGER.info(
+            "listen_flow platforms_response platform_count=%s elapsed_ms=%.1f",
+            len(response["platforms"]),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        return response
 
     def health(self, platform: str) -> dict[str, Any]:
         normalized = normalize_platform(platform) or PLATFORM_WECHAT

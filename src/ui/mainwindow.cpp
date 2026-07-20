@@ -3818,13 +3818,15 @@ void MainWindow::showPlatformContextMenu(const QPoint& pos)
 
     QMenu menu(this);
     QAction* actPrimary = nullptr;
-    if (isCS)
-        actPrimary = menu.addAction(QStringLiteral("断开关联"));
-    else
-        actPrimary = menu.addAction(QStringLiteral("删除"));
+    if (m_managedWindows.contains(id)) {
+        if (isCS)
+            actPrimary = menu.addAction(QStringLiteral("断开关联"));
+        else
+            actPrimary = menu.addAction(QStringLiteral("删除"));
+    }
 
     QAction* chosen = menu.exec(m_platformTree->viewport()->mapToGlobal(pos));
-    if (chosen == actPrimary) {
+    if (actPrimary && chosen == actPrimary) {
         removeOnlinePlatformItem(id);
     }
 }

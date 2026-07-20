@@ -18,6 +18,7 @@ struct PlatformMessage {
     QDateTime createdAt;
     QString platformMsgId;
     QString senderName;        // OCR 识别的发送者名称（如 "店铺:昵称"）
+    QString accountDisplayName;
     QString originalTimestamp; // 入站展示用时间（如微信 RPA 为入库/解析时刻；千牛等可为 OCR 时间）
     QString contentImagePath;  // 千牛聊天区截图等；空表示纯文本入站
     QString sourceType = QStringLiteral("mock");
@@ -38,6 +39,7 @@ struct ConversationInfo {
     QString status; // "new", "active", "waiting_agent", "waiting_customer", "closed"
     QDateTime createdAt;
     QString accountId;
+    QString accountDisplayName;
     QString sourceType = QStringLiteral("mock");
     int confidence = 100;
     QDateTime updatedAt;
@@ -83,10 +85,12 @@ struct OutgoingMessagePart {
     QString fileName;
     qint64 sizeBytes = 0;
     QString mimeType;
+    QJsonObject metadata;
 };
 
 struct OutgoingMessagePayload {
     QVector<OutgoingMessagePart> parts;
+    QJsonObject metadata;
 };
 
 /** 聚合「生成本条回复」：最后一条有效入站文本与可选聊天区截图路径。 */

@@ -36,6 +36,8 @@ Models::Conversation toUnifiedConversation(const ConversationInfo& value)
     out.unreadCount = value.unreadCount;
     out.sourceType = sourceTypeOrDefault(value.sourceType, value.platform);
     out.confidence = confidenceOrDefault(value.confidence, out.sourceType);
+    if (!value.accountDisplayName.trimmed().isEmpty())
+        out.metadata.insert(QStringLiteral("accountDisplayName"), value.accountDisplayName.trimmed());
     out.createdAt = value.createdAt;
     out.updatedAt = value.updatedAt.isValid() ? value.updatedAt : value.lastTime;
     return out;

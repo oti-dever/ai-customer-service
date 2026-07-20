@@ -2,6 +2,22 @@
 
 #include <QDateTime>
 
+namespace {
+
+QString conversationDisplayTitle(const ConversationInfo& conversation)
+{
+    const QString customerName = conversation.customerName.trimmed();
+    const QString accountName = conversation.accountDisplayName.trimmed();
+    if (conversation.platform == QLatin1String("qianniu")
+        && !accountName.isEmpty()
+        && !customerName.contains(QStringLiteral("（%1）").arg(accountName))) {
+        return QStringLiteral("%1（%2）").arg(customerName, accountName);
+    }
+    return customerName;
+}
+
+} // namespace
+
 ConversationListModel::ConversationListModel(QObject* parent)
     : QAbstractListModel(parent)
 {
@@ -20,7 +36,7 @@ QVariant ConversationListModel::data(const QModelIndex& index, int role) const
     const Row& row = m_rows.at(index.row());
     switch (role) {
     case Qt::DisplayRole:
-        return row.conversation.customerName;
+        return conversationDisplayTitle(row.conversation);
     case ConversationIdRole:
         return row.conversation.id;
     case ConversationRole:
@@ -140,6 +156,8 @@ bool ConversationListModel::accepts(const ConversationInfo& conversation,
 
     if (!m_keyword.isEmpty()
         && !conversation.customerName.contains(m_keyword, Qt::CaseInsensitive)
+        && !conversation.accountDisplayName.contains(m_keyword, Qt::CaseInsensitive)
+        && !conversationDisplayTitle(conversation).contains(m_keyword, Qt::CaseInsensitive)
         && !conversation.lastMessage.contains(m_keyword, Qt::CaseInsensitive))
         return false;
 

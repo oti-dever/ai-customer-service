@@ -216,8 +216,65 @@ class QianniuReaderTests(unittest.TestCase):
         self.assertEqual(result.source, "message_web_copy")
         self.assertEqual(len(result.texts), 1)
         self.assertIn("tb1001 2026-06-04 12:00:00", result.texts[0])
-        self.assertEqual(fake_detector.find_message_display_calls, 1)
+        self.assertEqual(fake_detector.find_message_display_calls, 0)
         self.assertEqual(fake_detector.find_message_web_calls, 1)
+
+    def test_read_visible_texts_uses_provided_message_web_without_detector_lookup(self):
+        q_reader = reader.QianniuReader()
+        fake_detector = FakeDetector(message_web=FakeWebControl())
+        q_reader.detector = fake_detector
+        calls = []
+        original_get_clipboard_text = reader.get_clipboard_text
+        original_set_clipboard_text = reader.set_clipboard_text
+        original_click_point = reader.click_point
+        original_send_ctrl_key = reader.send_ctrl_key
+
+        clipboard_reads = iter(
+            [
+                "old clipboard",
+                "\n".join(
+                    [
+                        "tb1001 2026-06-04 12:00:00",
+                        "hello",
+                    ]
+                ),
+            ]
+        )
+
+        def fake_get_clipboard_text():
+            calls.append(("get_clipboard_text",))
+            return next(clipboard_reads)
+
+        def fake_set_clipboard_text(text):
+            calls.append(("set_clipboard_text", text))
+
+        def fake_click_point(x, y):
+            calls.append(("click_point", x, y))
+
+        def fake_send_ctrl_key(letter):
+            calls.append(("send_ctrl_key", letter))
+
+        try:
+            reader.get_clipboard_text = fake_get_clipboard_text
+            reader.set_clipboard_text = fake_set_clipboard_text
+            reader.click_point = fake_click_point
+            reader.send_ctrl_key = fake_send_ctrl_key
+
+            result = q_reader.read_visible_texts(
+                limit=10,
+                chat_root=FakeControl(),
+                message_web=FakeWebControl(),
+            )
+        finally:
+            reader.get_clipboard_text = original_get_clipboard_text
+            reader.set_clipboard_text = original_set_clipboard_text
+            reader.click_point = original_click_point
+            reader.send_ctrl_key = original_send_ctrl_key
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.source, "message_web_copy")
+        self.assertEqual(fake_detector.find_message_display_calls, 0)
+        self.assertEqual(fake_detector.find_message_web_calls, 0)
 
     def test_copy_text_clicks_message_area_again_after_ctrl_a_c(self):
         calls = []

@@ -82,6 +82,30 @@ class RpaBridgePlatformRoutingTests(unittest.TestCase):
         self.assertEqual(response["error"], "send_disabled_in_formal_mode")
         self.assertEqual(len(bridge._qianniu.commands), 0)
 
+    def test_async_send_message_does_not_wait_for_command_lock(self):
+        bridge = self._make_bridge()
+        payload = {
+            "request_id": "async-lock",
+            "platform": "qianniu",
+            "command": "send_message",
+            "parameters": {"text": "ok"},
+        }
+        bridge._command_lock.acquire()
+        try:
+            thread = threading.Thread(
+                target=rpa_bridge.RpaBridge._run_async_send_message,
+                args=(bridge, "qianniu", bridge._qianniu, payload),
+            )
+            thread.start()
+            thread.join(timeout=0.2)
+            finished_without_lock = not thread.is_alive()
+        finally:
+            bridge._command_lock.release()
+        thread.join(timeout=1.0)
+
+        self.assertTrue(finished_without_lock)
+        self.assertEqual(len(bridge._qianniu.commands), 1)
+
     def test_health_routes_to_qianniu_adapter(self):
         bridge = self._make_bridge()
         response = rpa_bridge.RpaBridge.health(bridge, "qianniu")
